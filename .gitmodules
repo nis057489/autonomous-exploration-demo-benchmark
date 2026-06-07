@@ -1,0 +1,3 @@
+[submodule "exploration_packages/frontier_exploration_ros2"]
+	path = exploration_packages/frontier_exploration_ros2
+	url = https://github.com/mertgulerx/frontier_exploration_ros2.git
