@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     python3-colcon-common-extensions \
     python3-rosdep \
+    python3-yaml \
     python3-vcstool \
     xauth \
     x11-apps \

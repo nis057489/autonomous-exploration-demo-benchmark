@@ -47,4 +47,9 @@ if(_existing_share_dirs)
   )
 endif()
 
+install(PROGRAMS
+  scripts/team_map_fusion.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()

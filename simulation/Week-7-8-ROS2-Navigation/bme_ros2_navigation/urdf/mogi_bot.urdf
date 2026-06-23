@@ -2,6 +2,16 @@
 
 <robot name="mogi_bot" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
+  <xacro:arg name="cmd_vel_topic" default="/cmd_vel" />
+  <xacro:arg name="odom_topic" default="odom" />
+  <xacro:arg name="joint_states_topic" default="joint_states" />
+  <xacro:arg name="camera_image_topic" default="camera/image" />
+  <xacro:arg name="camera_info_topic" default="camera/camera_info" />
+  <xacro:arg name="imu_topic" default="imu" />
+  <xacro:arg name="scan_topic" default="scan" />
+  <xacro:arg name="navsat_topic" default="navsat" />
+  <xacro:arg name="frame_prefix" default="" />
+
   <!-- STEP 3 - Gazebo plugin -->
   <xacro:include filename="$(find bme_ros2_navigation)/urdf/mogi_bot.gazebo" />
 

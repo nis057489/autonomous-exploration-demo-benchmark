@@ -10,6 +10,7 @@ WORLD="${1:-bookstore}"
 
 if [[ $# -gt 1 ]]; then
   echo "Usage: $0 [world_name]" >&2
+  echo "  Env vars: ROBOT=<model>  NUM_ROBOTS=<n>" >&2
   exit 1
 fi
 
@@ -76,6 +77,14 @@ run_docker() {
     docker_args+=(-e ROS_DOMAIN_ID)
   fi
 
+  if [[ -n "${NUM_ROBOTS:-}" ]]; then
+    docker_args+=(-e NUM_ROBOTS)
+  fi
+
+  if [[ -n "${ROBOT:-}" ]]; then
+    docker_args+=(-e ROBOT)
+  fi
+
   if [[ -n "${DISPLAY:-}" ]]; then
     docker_args+=(-e DISPLAY)
   fi
@@ -119,7 +128,7 @@ run_docker() {
     docker_args+=(-v "${PROJECT_ROOT}/results:/opt/benchmark_ws/results")
   fi
 
-  echo "Starting benchmark in Docker (image=${DOCKER_IMAGE}, world=${WORLD})..."
+  echo "Starting benchmark in Docker (image=${DOCKER_IMAGE}, world=${WORLD}, robot=${ROBOT:-mogi_bot}, num_robots=${NUM_ROBOTS:-1})..."
   docker "${docker_args[@]}" "${DOCKER_IMAGE}" ./launch.sh "${WORLD}"
 }
 

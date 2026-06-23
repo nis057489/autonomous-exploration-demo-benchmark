@@ -40,6 +40,7 @@ limitations under the License.
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
 
@@ -87,8 +88,31 @@ ExplorationControlPanel::ExplorationControlPanel(QWidget * parent)
       explorers_.push_back(entry);
     };
 
+  const int robot_count = []() {
+      const char * value = std::getenv("NUM_ROBOTS");
+      if (value == nullptr) {
+        return 1;
+      }
+      bool ok = false;
+      const int parsed = QString::fromLocal8Bit(value).toInt(&ok);
+      return ok && parsed > 0 ? parsed : 1;
+    }();
+
+  int row = 0;
+  if (robot_count > 1) {
+    add_explorer_row(
+      row++,
+      "frontier_exploration_ros2 team (mrtsp)",
+      "rviz_autonomous_exploration_benchmark",
+      "multi_robot_frontier_explorer.launch.py",
+      QString("num_robots:=%1 params_file:=config/frontier_exploration_ros2/config.yaml")
+      .arg(robot_count),
+      "frontier_explorer",
+      "frontier_exploration_ros2_team");
+  }
+
   add_explorer_row(
-    0,
+    row++,
     "frontier_exploration_ros2 (mrtsp)",
     "frontier_exploration_ros2",
     "frontier_explorer.launch.py",
@@ -97,7 +121,7 @@ ExplorationControlPanel::ExplorationControlPanel(QWidget * parent)
     "frontier_exploration_ros2_mrtsp");
 
   add_explorer_row(
-    1,
+    row++,
     "frontier_exploration_ros2 (nearest)",
     "frontier_exploration_ros2",
     "frontier_explorer.launch.py",
@@ -106,7 +130,7 @@ ExplorationControlPanel::ExplorationControlPanel(QWidget * parent)
     "frontier_exploration_ros2_nearest");
 
   add_explorer_row(
-    2,
+    row++,
     "m_explore_ros2",
     "explore_lite",
     "explore.launch.py",
@@ -115,7 +139,7 @@ ExplorationControlPanel::ExplorationControlPanel(QWidget * parent)
     "m_explore_ros2");
 
   add_explorer_row(
-    3,
+    row++,
     "nav2_wavefront_frontier_exploration",
     "nav2_wfd",
     "",
@@ -126,7 +150,7 @@ ExplorationControlPanel::ExplorationControlPanel(QWidget * parent)
     "explore");
 
   add_explorer_row(
-    4,
+    row++,
     "roadmap_explorer",
     "rviz_autonomous_exploration_benchmark",
     "roadmap_explorer_compat.launch.py",

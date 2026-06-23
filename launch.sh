@@ -14,11 +14,19 @@ set -u
 
 if [[ $# -gt 1 ]]; then
   echo "Usage: $0 [world_name]" >&2
+  echo "  Env vars: ROBOT=<model>  NUM_ROBOTS=<n>" >&2
   exit 1
 fi
 
 # Default benchmark world. Users can override by passing a single world name argument.
 WORLD="${1:-bookstore}"
+NUM_ROBOTS="${NUM_ROBOTS:-1}"
+ROBOT="${ROBOT:-mogi_bot}"
+
+if ! [[ "${NUM_ROBOTS}" =~ ^[0-9]+$ ]] || (( NUM_ROBOTS < 1 )); then
+  echo "NUM_ROBOTS must be a positive integer (got '${NUM_ROBOTS}')." >&2
+  exit 1
+fi
 
 collect_available_worlds() {
   # A world is considered runnable when folder and world file name match:
@@ -59,28 +67,31 @@ fi
 # Baseline spawn tuned for the benchmark maps.
 SPAWN_X="2.5"
 SPAWN_Y="1.5"
-SPAWN_Z="0.5"
 SPAWN_YAW="-1.5707"
 
-# Map-specific spawn overrides reduce initial collisions and improve reproducibility.
+# Robot-specific spawn height above the floor.
+case "${ROBOT}" in
+  turtlebot3_waffle) SPAWN_Z="0.05" ;;
+  mogi_bot)          SPAWN_Z="0.10" ;;
+  *)                 SPAWN_Z="0.05" ;;
+esac
+
+# Map-specific spawn overrides for x/y/yaw; z is set per robot above.
 if [[ "${WORLD}" == "bookstore" ]]; then
   SPAWN_X="1.23"
   SPAWN_Y="6.35"
-  SPAWN_Z="0.11"
   SPAWN_YAW="-3.10"
 fi
 
 if [[ "${WORLD}" == "corridor" ]]; then
   SPAWN_X="-8.11"
   SPAWN_Y="0.31"
-  SPAWN_Z="0.10"
   SPAWN_YAW="0.00"
 fi
 
 if [[ "${WORLD}" == "warehouse" ]]; then
   SPAWN_X="-12.97"
   SPAWN_Y="8.23"
-  SPAWN_Z="0.10"
   SPAWN_YAW="1.58"
 fi
 
@@ -94,6 +105,12 @@ fi
 if ! ros2 pkg prefix rviz_autonomous_exploration_benchmark >/dev/null 2>&1; then
   echo "Workspace overlay is not available. Expected package 'rviz_autonomous_exploration_benchmark' was not found." >&2
   echo "Rebuild the image/container so /opt/benchmark_ws/install/setup.bash contains the workspace packages." >&2
+  exit 1
+fi
+
+URDF_PATH="$(ros2 pkg prefix bme_ros2_navigation)/share/bme_ros2_navigation/urdf/${ROBOT}.urdf"
+if [[ ! -f "${URDF_PATH}" ]]; then
+  echo "Unknown robot model: '${ROBOT}'. No URDF found at: ${URDF_PATH}" >&2
   exit 1
 fi
 
@@ -147,15 +164,34 @@ cleanup() {
   [[ -n "${SPAWN_PID:-}" ]] && kill "${SPAWN_PID}" 2>/dev/null || true
   [[ -n "${NAV_PID:-}" ]] && kill "${NAV_PID}" 2>/dev/null || true
   [[ -n "${TRACKER_PID:-}" ]] && kill "${TRACKER_PID}" 2>/dev/null || true
+  [[ -n "${STACK_PID:-}" ]] && kill "${STACK_PID}" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
 # Ensure a clean process baseline before starting the new run.
 cleanup_existing_nav2
 
+if (( NUM_ROBOTS > 1 )); then
+  ros2 launch bme_ros2_navigation multi_robot_navigation_with_slam.launch.py \
+    world:="${WORLD}" \
+    num_robots:="${NUM_ROBOTS}" \
+    model:="${ROBOT}.urdf" \
+    x:="${SPAWN_X}" \
+    y:="${SPAWN_Y}" \
+    z:="${SPAWN_Z}" \
+    yaw:="${SPAWN_YAW}" &
+  STACK_PID=$!
+
+  echo "multi_robot_navigation_with_slam.launch.py started (pid=${STACK_PID}, world=${WORLD}, robot=${ROBOT}, num_robots=${NUM_ROBOTS})."
+  echo "All processes are running. Press Ctrl+C to stop all."
+  wait
+  exit $?
+fi
+
 # 1) Start world + robot spawning.
 ros2 launch bme_ros2_navigation spawn_robot.launch.py \
   world:="${WORLD}" \
+  model:="${ROBOT}.urdf" \
   x:="${SPAWN_X}" \
   y:="${SPAWN_Y}" \
   z:="${SPAWN_Z}" \
@@ -163,7 +199,7 @@ ros2 launch bme_ros2_navigation spawn_robot.launch.py \
 SPAWN_PID=$!
 
 # Give simulation/spawn a short head start before Nav2 + tracker.
-echo "spawn_robot.launch.py started (pid=${SPAWN_PID}, world=${WORLD}, x=${SPAWN_X}, y=${SPAWN_Y}, z=${SPAWN_Z}, yaw=${SPAWN_YAW}). Waiting 5 seconds..."
+echo "spawn_robot.launch.py started (pid=${SPAWN_PID}, world=${WORLD}, robot=${ROBOT}, x=${SPAWN_X}, y=${SPAWN_Y}, z=${SPAWN_Z}, yaw=${SPAWN_YAW}). Waiting 5 seconds..."
 sleep 5
 
 # 2) Start Nav2 + SLAM stack.

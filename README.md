@@ -403,8 +403,15 @@ For manual setups please make sure to install all of the dependencies.
 
 ### Docker Quick Start
 
-Package runtime entrypoint remains `./launch.sh`. **(Defaults to `Bookstore` world)**
+Package runtime entrypoint remains `./launch.sh`. **(Defaults to `Bookstore` world and `Mogi Bot` robot)**
 Docker is provided as a separate wrapper script: `./docker.sh`.
+
+#### Environment Variables
+
+| Variable | Allowed Values | Default | Description |
+| --- | --- | --- | --- |
+| `NUM_ROBOTS` | Any integer | `1` | Number of robots to spawn in the simulation |
+| `ROBOT` | `mogi_bot`, `turtlebot3_waffle` | `mogi_bot` | Type of robot to use in the simulation |
 
 Examples:
 
@@ -413,6 +420,10 @@ Examples:
 ./launch.sh corridor
 ./docker.sh
 ./docker.sh bookstore
+# With 3 Mogi Bots instead of 1
+NUM_ROBOTS=3 ./docker.sh bookstore
+# With 2 TurtleBots instead of a Mogi bot
+ROBOT=turtlebot3_waffle NUM_ROBOTS=2 ./docker.sh cooridor
 ```
 
 Docker notes:
