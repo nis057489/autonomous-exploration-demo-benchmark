@@ -15,10 +15,6 @@
 # What this script does NOT do (run these yourself, on the robot or on another terminal):
 #   - turtlebot3_bringup robot.launch.py  (unless --local-bringup is given)
 #   - RViz (open it manually, or pass rviz:=true to navigation_with_slam.launch.py)
-#   - The exploration node itself — start it separately, e.g.:
-#       ros2 launch frontier_exploration_ros2 explore.launch.py \
-#         use_sim_time:=false \
-#         params_file:=config/frontier_exploration_ros2/config.yaml
 
 set -eo pipefail
 
@@ -27,7 +23,7 @@ PROJECT_ROOT="${SCRIPT_DIR}"
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 
-LOCAL_BRINGUP=false
+LOCAL_BRINGUP=true
 TB3_MODEL="${TURTLEBOT3_MODEL:-}"
 
 while [[ $# -gt 0 ]]; do
@@ -49,7 +45,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${TB3_MODEL}" ]]; then
-  TB3_MODEL="burger"
+  TB3_MODEL="waffle_pi"
   echo "TURTLEBOT3_MODEL not set and --model not given; defaulting to '${TB3_MODEL}'."
 fi
 
@@ -74,6 +70,7 @@ check_pkg() {
 
 check_pkg slam_toolbox
 check_pkg nav2_bringup
+check_pkg frontier_exploration_ros2
 
 if [[ "${LOCAL_BRINGUP}" == true ]]; then
   check_pkg turtlebot3_bringup
@@ -118,9 +115,10 @@ cleanup_existing_nav2() {
 
 cleanup() {
   trap - EXIT INT TERM
-  [[ -n "${BRINGUP_PID:-}" ]] && kill "${BRINGUP_PID}" 2>/dev/null || true
-  [[ -n "${NAV_PID:-}"     ]] && kill "${NAV_PID}"     2>/dev/null || true
-  [[ -n "${TRACKER_PID:-}" ]] && kill "${TRACKER_PID}" 2>/dev/null || true
+  [[ -n "${BRINGUP_PID:-}"  ]] && kill "${BRINGUP_PID}"  2>/dev/null || true
+  [[ -n "${NAV_PID:-}"      ]] && kill "${NAV_PID}"      2>/dev/null || true
+  [[ -n "${TRACKER_PID:-}"  ]] && kill "${TRACKER_PID}"  2>/dev/null || true
+  [[ -n "${EXPLORE_PID:-}"  ]] && kill "${EXPLORE_PID}"  2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -178,13 +176,18 @@ ros2 run rviz_autonomous_exploration_benchmark frontier_path_tracker.py \
 TRACKER_PID=$!
 echo "frontier_path_tracker.py started (pid=${TRACKER_PID})."
 
+# ── 4) Frontier exploration ───────────────────────────────────────────────────
+
+EXPLORE_CONFIG="${PROJECT_ROOT}/config/frontier_exploration_ros2/config.yaml"
+echo "Starting frontier_exploration_ros2 (params=${EXPLORE_CONFIG})..."
+ros2 launch frontier_exploration_ros2 explore.launch.py \
+  use_sim_time:=false \
+  params_file:="${EXPLORE_CONFIG}" &
+EXPLORE_PID=$!
+echo "frontier_exploration_ros2 started (pid=${EXPLORE_PID})."
+
 # ── Done ─────────────────────────────────────────────────────────────────────
 
 echo ""
-echo "Stack is running. Start your exploration node separately, e.g.:"
-echo "  ros2 launch frontier_exploration_ros2 explore.launch.py \\"
-echo "    use_sim_time:=false \\"
-echo "    params_file:=${PROJECT_ROOT}/config/frontier_exploration_ros2/config.yaml"
-echo ""
-echo "Press Ctrl+C to stop all."
+echo "Full stack is running. Press Ctrl+C to stop all."
 wait
