@@ -33,15 +33,75 @@ RUN rosdep init 2>/dev/null || true
 RUN rosdep update --rosdistro ${ROS_DISTRO}
 
 WORKDIR ${WORKSPACE_DIR}
-COPY . ${WORKSPACE_DIR}
+
+# Stable, rarely-changed inputs first to maximise cache reuse.
+COPY config config
+COPY docker docker
+COPY simulation simulation
+COPY rviz rviz
+
+# Third-party exploration packages — effectively never change.
+COPY exploration_packages/m-explore-ros2 exploration_packages/m-explore-ros2
+COPY exploration_packages/nav2_wavefront_frontier_exploration exploration_packages/nav2_wavefront_frontier_exploration
+COPY exploration_packages/roadmap-explorer exploration_packages/roadmap-explorer
+
 
 RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
     apt-get update && \
     rosdep install --from-paths exploration_packages simulation rviz --ignore-src -r -y && \
     rm -rf /var/lib/apt/lists/*"
 
+# Build stable third-party packages first — these layers are almost never invalidated.
 RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
-    colcon build --symlink-install"
+    colcon build --symlink-install --packages-select \
+        explore_lite_msgs explore \
+        nav2_wavefront_frontier_exploration \
+        roadmap_explorer_msgs roadmap_explorer roadmap_explorer_rviz_plugins"
+
+# Simulation and benchmark rviz package — change occasionally.
+RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
+    source ${WORKSPACE_DIR}/install/setup.bash && \
+    colcon build --symlink-install --packages-select \
+        bme_ros2_navigation bme_ros2_navigation_py \
+        rviz_autonomous_exploration_benchmark"
+    
+# ── frontier_exploration_ros2 (frequently changed) ────────────────────────────
+COPY exploration_packages/frontier_exploration_ros2 exploration_packages/frontier_exploration_ros2
+
+RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
+    apt-get update && \
+    rosdep install --from-paths exploration_packages/frontier_exploration_ros2 --ignore-src -r -y && \
+    rm -rf /var/lib/apt/lists/*"
+
+RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
+    source ${WORKSPACE_DIR}/install/setup.bash && \
+    colcon build --symlink-install --packages-select frontier_exploration_ros2"
+
+RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
+    source ${WORKSPACE_DIR}/install/setup.bash && \
+    colcon build --symlink-install --packages-select frontier_exploration_ros2_rviz"
+
+# ── vxch (frequently changed) ─────────────────────────────────────────────────
+COPY exploration_packages/vxch exploration_packages/vxch
+
+RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
+    apt-get update && \
+    rosdep install --from-paths exploration_packages/vxch --ignore-src -r -y && \
+    rm -rf /var/lib/apt/lists/*"
+
+RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
+    source ${WORKSPACE_DIR}/install/setup.bash && \
+    colcon build --symlink-install --packages-select voxelcodec_msgs"
+
+RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
+    source ${WORKSPACE_DIR}/install/setup.bash && \
+    colcon build --symlink-install --packages-select voxelcodec_ros"
+
+# Scripts and experiment config go last — changes here don't bust the build cache.
+COPY launch.sh launch.sh
+COPY launch_real_hardware.sh launch_real_hardware.sh
+COPY docker.sh docker.sh
+COPY experiment.conf experiment.conf
 
 RUN chmod +x ${WORKSPACE_DIR}/launch.sh ${WORKSPACE_DIR}/docker/entrypoint.sh
 
