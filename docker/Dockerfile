@@ -35,6 +35,23 @@ RUN rosdep update --rosdistro ${ROS_DISTRO}
 WORKDIR ${WORKSPACE_DIR}
 
 # Stable, rarely-changed inputs first to maximise cache reuse.
+
+# Pre-populate the Gazebo Fuel model cache so Gazebo doesn't download on every launch.
+# GZ_FUEL_CACHE_PATH is set here and in the entrypoint so the path is consistent.
+ENV GZ_FUEL_CACHE_PATH=/root/.gz/fuel
+RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
+    gz fuel download -u https://fuel.gazebosim.org/1.0/OpenRobotics/models/Warehouse && \
+    gz fuel download -u https://fuel.gazebosim.org/1.0/MovAi/models/pallet_box_mobile && \
+    gz fuel download -u https://fuel.gazebosim.org/1.0/MovAi/models/shelf && \
+    gz fuel download -u https://fuel.gazebosim.org/1.0/MovAi/models/shelf_big && \
+    gz fuel download -u 'https://fuel.gazebosim.org/1.0/OpenRobotics/models/Jersey%20Barrier' && \
+    gz fuel download -u https://fuel.gazebosim.org/1.0/OpenRobotics/models/Chair && \
+    gz fuel download -u https://fuel.gazebosim.org/1.0/OpenRobotics/models/foldable_chair && \
+    gz fuel download -u https://fuel.gazebosim.org/1.0/OpenRobotics/models/Table && \
+    gz fuel download -u 'https://fuel.gazebosim.org/1.0/OpenRobotics/models/Rescue%20Randy%20Sitting' && \
+    gz fuel download -u https://fuel.gazebosim.org/1.0/OpenRobotics/models/MaleVisitorOnPhone && \
+    gz fuel download -u 'https://fuel.gazebosim.org/1.0/plateau/models/Casual%20female'"
+
 COPY config config
 COPY docker docker
 COPY simulation simulation
@@ -102,21 +119,6 @@ COPY launch.sh launch.sh
 COPY launch_real_hardware.sh launch_real_hardware.sh
 COPY docker.sh docker.sh
 COPY experiment.conf experiment.conf
-
-# Pre-populate the Gazebo Fuel model cache so Gazebo doesn't download on every launch.
-# GZ_FUEL_CACHE_PATH is set here and in the entrypoint so the path is consistent.
-ENV GZ_FUEL_CACHE_PATH=/root/.gz/fuel
-RUN gz fuel download -u https://fuel.gazebosim.org/1.0/OpenRobotics/models/Warehouse && \
-    gz fuel download -u https://fuel.gazebosim.org/1.0/MovAi/models/pallet_box_mobile && \
-    gz fuel download -u https://fuel.gazebosim.org/1.0/MovAi/models/shelf && \
-    gz fuel download -u https://fuel.gazebosim.org/1.0/MovAi/models/shelf_big && \
-    gz fuel download -u "https://fuel.gazebosim.org/1.0/OpenRobotics/models/Jersey%20Barrier" && \
-    gz fuel download -u https://fuel.gazebosim.org/1.0/OpenRobotics/models/Chair && \
-    gz fuel download -u https://fuel.gazebosim.org/1.0/OpenRobotics/models/foldable_chair && \
-    gz fuel download -u https://fuel.gazebosim.org/1.0/OpenRobotics/models/Table && \
-    gz fuel download -u "https://fuel.gazebosim.org/1.0/OpenRobotics/models/Rescue%20Randy%20Sitting" && \
-    gz fuel download -u https://fuel.gazebosim.org/1.0/OpenRobotics/models/MaleVisitorOnPhone && \
-    gz fuel download -u "https://fuel.gazebosim.org/1.0/plateau/models/Casual%20female"
 
 RUN chmod +x ${WORKSPACE_DIR}/launch.sh ${WORKSPACE_DIR}/docker/entrypoint.sh
 
