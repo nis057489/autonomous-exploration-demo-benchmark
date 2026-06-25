@@ -441,9 +441,6 @@ def _rviz_config(output_dir, namespaces):
     config = {
         "Panels": [
             {"Class": "rviz_common/Displays", "Name": "Displays"},
-            {"Class": "rviz_common/Selection", "Name": "Selection"},
-            {"Class": "rviz_common/Tool Properties", "Name": "Tool Properties"},
-            {"Class": "rviz_common/Views", "Name": "Views"},
             {"Class": "rviz_common/Time", "Name": "Time"},
             {
                 "Class": "rviz_autonomous_exploration_benchmark/ExplorationControlPanel",
@@ -487,7 +484,13 @@ def _rviz_config(output_dir, namespaces):
                 }
             },
         },
-        "Window Geometry": {"Height": 1000, "Width": 1600},
+        "Window Geometry": {
+            "Displays": {"collapsed": False},
+            "Height": 1000,
+            "Hide Left Dock": False,
+            "Hide Right Dock": True,
+            "Width": 1600,
+        },
     }
     return _write_yaml(output_dir, "multi_robot_navigation.rviz", config)
 
