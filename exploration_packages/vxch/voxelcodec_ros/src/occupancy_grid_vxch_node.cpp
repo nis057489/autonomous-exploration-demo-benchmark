@@ -1,5 +1,7 @@
 #include <algorithm>
+#include <functional>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -64,6 +66,8 @@ public:
         on_map(msg);
       });
 
+    last_band_fingerprint_.assign(static_cast<std::size_t>(total_bands), 0);
+
     RCLCPP_INFO(
       get_logger(),
       "Encoding %s → %s/manifest + band_0..band_%d (haar_levels=%d, compression=%s)",
@@ -119,11 +123,59 @@ private:
 
     const std_msgs::msg::Header header = msg->header;
 
-    // Publish manifest first (TRANSIENT_LOCAL — reaches late-joining decoders)
+    // Determine which bands changed by fingerprinting compressed payloads.
+    // Bands whose payload is identical to the last transmission are skipped —
+    // the decoder already has them and doesn't need to re-download.
+    std::vector<std::size_t> changed_indices;
+    for (std::size_t k = 0; k < bands.size(); ++k) {
+      const auto & payload = bands[k].payload;
+      const std::size_t fp =
+        payload.size() ^
+        std::hash<std::string>{}(std::string(payload.begin(), payload.end()));
+      if (fp != last_band_fingerprint_[k]) {
+        changed_indices.push_back(k);
+        last_band_fingerprint_[k] = fp;
+      }
+    }
+
+    if (changed_indices.empty()) {
+      RCLCPP_DEBUG(get_logger(), "all %zu bands unchanged — nothing sent", bands.size());
+      return;
+    }
+
+    // Build a human-readable summary: "[0:1.2KB* 1:3.4KB* 2:0.8KB 3:- 4:- 5:-]"
+    // '*' = changed/sent, '-' = suppressed (unchanged), bare size = sent
+    {
+      std::ostringstream ss;
+      ss << "[";
+      std::size_t total_bytes = 0;
+      for (std::size_t k = 0; k < bands.size(); ++k) {
+        if (k > 0) {ss << " ";}
+        const bool changed = std::find(
+          changed_indices.begin(), changed_indices.end(), k) != changed_indices.end();
+        if (changed) {
+          const double kb = static_cast<double>(bands[k].payload.size()) / 1024.0;
+          ss << k << ":" << std::fixed;
+          ss.precision(1);
+          ss << kb << "KB";
+          total_bytes += bands[k].payload.size();
+        } else {
+          ss << k << ":-";
+        }
+      }
+      ss << "]";
+      RCLCPP_INFO(
+        get_logger(), "encode bands %s  total=%.1f KB  (%zu/%zu bands sent)",
+        ss.str().c_str(),
+        static_cast<double>(total_bytes) / 1024.0,
+        changed_indices.size(), bands.size());
+    }
+
+    // Publish manifest before bands (TRANSIENT_LOCAL — reaches late-joining decoders).
     manifest_pub_->publish(manifest_to_msg(header, stream_id_, manifest));
 
-    // Publish bands coarsest-first so smallest message departs the DDS queue first
-    for (std::size_t k = 0; k < bands.size(); ++k) {
+    // Publish only changed bands, coarsest-first.
+    for (std::size_t k : changed_indices) {
       band_pubs_[k]->publish(
         channel_to_msg(header, stream_id_, bands[k].descriptor, bands[k].payload));
     }
@@ -138,6 +190,7 @@ private:
   rclcpp::Publisher<voxelcodec_msgs::msg::VoxelManifest>::SharedPtr manifest_pub_;
   std::vector<rclcpp::Publisher<voxelcodec_msgs::msg::VoxelChannel>::SharedPtr> band_pubs_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
+  std::vector<std::size_t> last_band_fingerprint_;
 };
 
 }  // namespace
