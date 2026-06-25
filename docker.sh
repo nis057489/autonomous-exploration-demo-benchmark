@@ -138,6 +138,13 @@ run_docker() {
     )
   fi
 
+  # Persist the Gazebo Fuel model cache on the host so models aren't re-downloaded
+  # after image rebuilds.  The image pre-populates this path at build time; mounting
+  # it here means any models downloaded at runtime are also retained.
+  local gz_fuel_cache="${GZ_FUEL_CACHE_PATH:-${HOME}/.gz/fuel}"
+  mkdir -p "${gz_fuel_cache}"
+  docker_args+=(-v "${gz_fuel_cache}:/root/.gz/fuel" -e GZ_FUEL_CACHE_PATH=/root/.gz/fuel)
+
   if [[ -d "${PROJECT_ROOT}/logs" ]]; then
     docker_args+=(-v "${PROJECT_ROOT}/logs:/opt/benchmark_ws/logs")
   fi
