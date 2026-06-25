@@ -68,6 +68,14 @@ int band_index_from_topic(const std::string & topic)
   return std::stoi(suffix);
 }
 
+// True if the topic ends in "/manifest" — these get dedup treatment just like bands.
+bool is_manifest_topic(const std::string & topic)
+{
+  const std::string suffix = "/manifest";
+  return topic.size() >= suffix.size() &&
+         topic.compare(topic.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 // Token bucket — thread-safe, shared across all relay channels (simulates one shared link).
 class TokenBucket
 {
@@ -319,10 +327,16 @@ private:
     const int band_idx = band_index_from_topic(input_topic);
     if (band_idx >= 0) {
       item.band_priority = band_idx;
-      // Dedup key: publisher address + band index so each (channel, band) slot is independent.
       item.dedup_key =
         std::to_string(reinterpret_cast<std::uintptr_t>(pub.get())) +
         ":band_" + std::to_string(band_idx);
+    } else if (is_manifest_topic(input_topic)) {
+      // Manifest must arrive before any band (decoder needs it to parse coefficients).
+      // Priority -1 puts it ahead of band_0 (priority 0). Deduplicated so only the
+      // latest manifest is ever queued; stale ones are replaced in-place.
+      item.band_priority = -1;
+      item.dedup_key =
+        std::to_string(reinterpret_cast<std::uintptr_t>(pub.get())) + ":manifest";
     }
 
     bool deduped;

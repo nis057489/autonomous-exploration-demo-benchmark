@@ -1,20 +1,25 @@
 """
 VXCH progressive streaming experiment launcher.
 
+Network model: each robot has an independent point-to-point downlink from the base station
+at bandwidth_kbps.  One ddil_proxy instance per robot enforces this — robots cannot starve
+each other and there is no implicit multicast advantage for either method.
+
 map_transport:=baseline
-  team_map_fusion → /{robot}/global_map → DdilProxy → /{robot}/team_map_ddil
-  PerRobotMapCompositor merges /{robot}/map (local) + /{robot}/team_map_ddil → /{robot}/nav_map
+  base station: team_map_fusion → /{robot}/global_map
+  per-robot link (ddil_proxy_{robot}): /{robot}/global_map → /{robot}/team_map_ddil
+  robot: PerRobotMapCompositor merges /{robot}/map (local) + /{robot}/team_map_ddil → /{robot}/nav_map
 
 map_transport:=vxch
-  team_map_fusion → /map → encoder → bands → DdilProxy → decoder → /{robot}/team_map_ddil
-  PerRobotMapCompositor merges /{robot}/map (local) + /{robot}/team_map_ddil → /{robot}/nav_map
+  base station: team_map_fusion → /map → encoder → /vxch/map/band_0..N + manifest
+  per-robot link (ddil_proxy_{robot}): bands + manifest → /vxch/map_ddil_{robot}/band_0..N + manifest
+  robot: vxch_decoder_{robot} → /{robot}/team_map_ddil
+         PerRobotMapCompositor merges /{robot}/map (local) + /{robot}/team_map_ddil → /{robot}/nav_map
 
 Nav2 and frontier exploration subscribe to /{robot}/nav_map in both modes.
-team_map_fusion always publishes /{robot}/global_map with its default empty suffix —
-the DdilProxy intercepts it so bypass is structurally impossible.
 
 DDIL args (default 0 = no degradation):
-  bandwidth_kbps   token-bucket rate limit on the map transport link
+  bandwidth_kbps   token-bucket rate limit per robot downlink
   loss_pct         per-message drop probability (0–100)
   delay_ms         additional forwarding latency
 """
@@ -77,16 +82,21 @@ def _create_all_actions(context):
 
     robot_names = [f"robot{i + 1}" for i in range(num_robots)]
     vxch_base = "/vxch/map"
-    vxch_ddil_base = "/vxch/map_ddil"
+
     total_bands = haar_levels + 1
 
-    ddil_params = {
+    # Base DDIL params shared across per-robot proxies.
+    # rng_seed is offset per robot so packet-loss patterns are independent.
+    ddil_params_base = {
         "bandwidth_kbps": bandwidth_kbps,
         "loss_pct": loss_pct,
         "delay_ms": delay_ms,
-        "rng_seed": rng_seed,
         "use_sim_time": use_sim_time,
     }
+
+    def ddil_params_for(robot_index: int) -> dict:
+        seed = (rng_seed + robot_index) if rng_seed >= 0 else -1
+        return {**ddil_params_base, "rng_seed": seed}
 
     actions = []
 
@@ -132,30 +142,30 @@ def _create_all_actions(context):
 
     # ── Baseline mode ──────────────────────────────────────────────────────────
     if not is_vxch:
-        # team_map_fusion publishes /{robot}/global_map (default, no suffix).
-        # DdilProxy intercepts it and produces /{robot}/team_map_ddil.
-        # The compositor merges /{robot}/map (local) + /{robot}/team_map_ddil → /{robot}/nav_map.
-        relay_topics = [
-            f"/{name}/global_map /{name}/team_map_ddil nav_msgs/msg/OccupancyGrid reliable"
-            for name in robot_names
-        ]
-        actions.append(
-            Node(
-                package="voxelcodec_ros",
-                executable="ddil_proxy_node",
-                name="ddil_proxy_baseline",
-                output="screen",
-                parameters=[{
-                    **ddil_params,
-                    "relay_topics": relay_topics,
-                    # bypass_topics omitted — C++ default is empty vector
-                }],
+        # One proxy per robot — each robot has its own independent downlink.
+        # team_map_fusion publishes /{robot}/global_map; the proxy throttles it
+        # to /{robot}/team_map_ddil; the compositor merges that with the local
+        # /{robot}/map to produce /{robot}/nav_map.
+        for i, name in enumerate(robot_names):
+            actions.append(
+                Node(
+                    package="voxelcodec_ros",
+                    executable="ddil_proxy_node",
+                    name=f"ddil_proxy_{name}",
+                    output="screen",
+                    parameters=[{
+                        **ddil_params_for(i),
+                        "relay_topics": [
+                            f"/{name}/global_map /{name}/team_map_ddil"
+                            " nav_msgs/msg/OccupancyGrid reliable"
+                        ],
+                    }],
+                )
             )
-        )
 
     # ── VXCH mode ──────────────────────────────────────────────────────────────
     else:
-        # Encoder: /map → VXCH bands
+        # Encoder runs once at the base station: /map → /vxch/map/band_0..N + manifest.
         actions.append(
             Node(
                 package="voxelcodec_ros",
@@ -172,31 +182,33 @@ def _create_all_actions(context):
             )
         )
 
-        # DdilProxy: throttle bands, bypass manifest
-        relay_topics = [
-            f"{vxch_base}/band_{k} {vxch_ddil_base}/band_{k} voxelcodec_msgs/msg/VoxelChannel"
-            for k in range(total_bands)
-        ]
-        bypass_topics = [
-            f"{vxch_base}/manifest {vxch_ddil_base}/manifest voxelcodec_msgs/msg/VoxelManifest"
-        ]
-        actions.append(
-            Node(
-                package="voxelcodec_ros",
-                executable="ddil_proxy_node",
-                name="ddil_proxy_vxch",
-                output="screen",
-                parameters=[{
-                    **ddil_params,
-                    "relay_topics": relay_topics,
-                    "bypass_topics": bypass_topics,
-                }],
+        # One proxy + decoder per robot — each robot's downlink is independent.
+        # The manifest travels through the same token bucket as the bands so it
+        # counts against the bandwidth budget; it uses RELIABLE QoS so late-joining
+        # decoders still receive it on the next encoder cycle.
+        for i, name in enumerate(robot_names):
+            robot_ddil_base = f"/vxch/map_ddil_{name}"
+            relay_topics = [
+                f"{vxch_base}/band_{k} {robot_ddil_base}/band_{k}"
+                " voxelcodec_msgs/msg/VoxelChannel"
+                for k in range(total_bands)
+            ]
+            relay_topics.append(
+                f"{vxch_base}/manifest {robot_ddil_base}/manifest"
+                " voxelcodec_msgs/msg/VoxelManifest reliable"
             )
-        )
-
-        # One decoder per robot → publishes /{robot}/team_map_ddil
-        # (the compositor merges this with /{robot}/map to produce /{robot}/nav_map)
-        for name in robot_names:
+            actions.append(
+                Node(
+                    package="voxelcodec_ros",
+                    executable="ddil_proxy_node",
+                    name=f"ddil_proxy_{name}",
+                    output="screen",
+                    parameters=[{
+                        **ddil_params_for(i),
+                        "relay_topics": relay_topics,
+                    }],
+                )
+            )
             actions.append(
                 Node(
                     package="voxelcodec_ros",
@@ -204,7 +216,7 @@ def _create_all_actions(context):
                     name=f"vxch_decoder_{name}",
                     output="screen",
                     parameters=[{
-                        "input_base_topic": vxch_ddil_base,
+                        "input_base_topic": robot_ddil_base,
                         "output_topic": f"/{name}/team_map_ddil",
                         "haar_levels": haar_levels,
                         "publish_rate_hz": 1.0,
