@@ -2,7 +2,7 @@
 # Launch the autonomous exploration stack on a real TurtleBot3 (ROS 2 Jazzy).
 #
 # Usage:
-#   ./launch_real_hardware.sh [--local-bringup] [--model burger|waffle|waffle_pi]
+#   ./launch_real_hardware.sh [--local-bringup] [--model burger|waffle|waffle_pi] [--num-robots <n>]
 #
 # Flags:
 #   --local-bringup   Also launch turtlebot3_bringup on this machine (useful when the
@@ -10,21 +10,42 @@
 #                     Omit this flag when the robot's Raspberry Pi is running its own
 #                     bringup and you are only launching the navigation/exploration side.
 #   --model <name>    TurtleBot3 model (burger | waffle | waffle_pi). Defaults to the
-#                     TURTLEBOT3_MODEL env var, then falls back to burger.
+#                     TURTLEBOT3_MODEL env var, then falls back to waffle_pi.
+#   --num-robots <n>  Number of robots (default 1). When >1 the script launches the
+#                     multi-robot VXCH experiment stack instead of the single-robot path.
+#                     Each robot must already be running turtlebot3_bringup independently.
+#
+# Experiment parameters are read from experiment.conf (project root) or env vars:
+#   MAP_TRANSPORT, BANDWIDTH_KBPS, LOSS_PCT, DELAY_MS, HAAR_LEVELS
 #
 # What this script does NOT do (run these yourself, on the robot or on another terminal):
-#   - turtlebot3_bringup robot.launch.py  (unless --local-bringup is given)
-#   - RViz (open it manually, or pass rviz:=true to navigation_with_slam.launch.py)
+#   - turtlebot3_bringup robot.launch.py  (unless --local-bringup is given, single-robot only)
+#   - RViz (open it manually, or pass rviz:=true to the launch file)
 
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${SCRIPT_DIR}"
 
+# Load experiment parameters from experiment.conf if present.
+# Individual env vars always take precedence over conf file values.
+if [[ -f "${PROJECT_ROOT}/experiment.conf" ]]; then
+  # shellcheck source=/dev/null
+  source "${PROJECT_ROOT}/experiment.conf"
+fi
+
+# Experiment parameters (set by experiment.conf or env).
+MAP_TRANSPORT="${MAP_TRANSPORT:-baseline}"
+BANDWIDTH_KBPS="${BANDWIDTH_KBPS:-0}"
+LOSS_PCT="${LOSS_PCT:-0.0}"
+DELAY_MS="${DELAY_MS:-0}"
+HAAR_LEVELS="${HAAR_LEVELS:-4}"
+
 # ── Parse arguments ──────────────────────────────────────────────────────────
 
 LOCAL_BRINGUP=true
 TB3_MODEL="${TURTLEBOT3_MODEL:-}"
+NUM_ROBOTS="${NUM_ROBOTS:-1}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -36,13 +57,22 @@ while [[ $# -gt 0 ]]; do
       TB3_MODEL="$2"
       shift 2
       ;;
+    --num-robots)
+      NUM_ROBOTS="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: $0 [--local-bringup] [--model burger|waffle|waffle_pi]" >&2
+      echo "Usage: $0 [--local-bringup] [--model burger|waffle|waffle_pi] [--num-robots <n>]" >&2
       exit 1
       ;;
   esac
 done
+
+if ! [[ "${NUM_ROBOTS}" =~ ^[0-9]+$ ]] || (( NUM_ROBOTS < 1 )); then
+  echo "NUM_ROBOTS must be a positive integer (got '${NUM_ROBOTS}')." >&2
+  exit 1
+fi
 
 if [[ -z "${TB3_MODEL}" ]]; then
   TB3_MODEL="waffle_pi"
@@ -134,6 +164,25 @@ SLAM_PARAMS="${PROJECT_ROOT}/simulation/Week-7-8-ROS2-Navigation/bme_ros2_naviga
 TRACKER_PARAMS="${PROJECT_ROOT}/install/rviz_autonomous_exploration_benchmark/share/rviz_autonomous_exploration_benchmark/config/frontier_path_tracker.yaml"
 if [[ ! -f "${TRACKER_PARAMS}" ]]; then
   TRACKER_PARAMS="${PROJECT_ROOT}/rviz/src/frontier_path_tracker.yaml"
+fi
+
+# ── Multi-robot path ─────────────────────────────────────────────────────────
+
+if (( NUM_ROBOTS > 1 )); then
+  echo "Multi-robot mode: ${NUM_ROBOTS} robots, map_transport=${MAP_TRANSPORT}, bandwidth_kbps=${BANDWIDTH_KBPS}, loss_pct=${LOSS_PCT}, delay_ms=${DELAY_MS}."
+  echo "Assumes each robot is already running turtlebot3_bringup + SLAM + Nav2 independently."
+
+  ros2 launch bme_ros2_navigation multi_robot_vxch_experiment.launch.py \
+    num_robots:="${NUM_ROBOTS}" \
+    use_sim_time:=false \
+    rviz:=false \
+    map_transport:="${MAP_TRANSPORT}" \
+    bandwidth_kbps:="${BANDWIDTH_KBPS}" \
+    loss_pct:="${LOSS_PCT}" \
+    delay_ms:="${DELAY_MS}" \
+    haar_levels:="${HAAR_LEVELS}"
+
+  exit $?
 fi
 
 # ── 1) Optional: local TurtleBot3 bringup ────────────────────────────────────

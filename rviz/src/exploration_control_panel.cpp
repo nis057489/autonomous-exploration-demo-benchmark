@@ -34,6 +34,7 @@ limitations under the License.
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSet>
 #include <QTextStream>
 #include <QVBoxLayout>
 
@@ -372,19 +373,36 @@ void ExplorationControlPanel::onMapResetClicked()
 
   setStatusText(QString("Status: map reset requested (%1 candidate service(s))").arg(discovered.size()));
   startBackgroundOperation([this, discovered]() {
+      // In multi-robot mode there are multiple slam_toolbox instances (one per robot).
+      // We must call every discovered service so all robots reset, not just the first.
+      // Within a single robot's candidates we stop at the first success (Reset > Clear > etc.)
+      // but we never skip robots.
+      QSet<QString> reset_done;
+      int ok_count = 0;
       for (const auto & candidate : discovered) {
         if (stop_ros_thread_) {
           return;
         }
-        if (callSlamResetService(candidate.first, candidate.second, 2000)) {
-          postStatusText(
-            QString("Status: map reset OK (%1, %2)").arg(candidate.first, candidate.second));
-          return;
+        // Derive the "robot identity" from the service name prefix up to /slam_toolbox.
+        const QString name = candidate.first;
+        const int idx = name.lastIndexOf("/slam_toolbox");
+        const QString robot_key = (idx >= 0) ? name.left(idx) : name;
+
+        if (reset_done.contains(robot_key)) {
+          continue;  // already reset this robot via an earlier candidate
+        }
+        if (callSlamResetService(name, candidate.second, 2000)) {
+          reset_done.insert(robot_key);
+          ++ok_count;
         }
       }
 
-      postStatusText(
-        QString("Status: map reset failed (checked %1 candidate service(s))").arg(discovered.size()));
+      if (ok_count > 0) {
+        postStatusText(QString("Status: map reset OK (%1 robot(s))").arg(ok_count));
+      } else {
+        postStatusText(
+          QString("Status: map reset failed (checked %1 candidate service(s))").arg(discovered.size()));
+      }
     });
 }
 

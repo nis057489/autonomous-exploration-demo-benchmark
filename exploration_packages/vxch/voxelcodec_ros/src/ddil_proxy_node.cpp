@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -24,20 +25,25 @@ struct RelayConfig
   std::string input_topic;
   std::string output_topic;
   std::string msg_type;
-  bool bypass{false};  // bypass throttle (manifest topics etc.)
+  bool bypass{false};    // bypass throttle (manifest topics etc.)
+  bool reliable{false};  // use RELIABLE + TRANSIENT_LOCAL (for Nav2 consumers)
 };
 
 RelayConfig parse_relay_entry(const std::string & entry)
 {
-  // Format: "input_topic output_topic msg_type"
+  // Format: "input_topic output_topic msg_type [reliable]"
+  // Add the literal word "reliable" as a 4th token to request RELIABLE+TRANSIENT_LOCAL QoS.
+  // Without it, BEST_EFFORT is used (appropriate for VXCH bands).
   RelayConfig cfg;
   std::istringstream ss(entry);
-  ss >> cfg.input_topic >> cfg.output_topic >> cfg.msg_type;
+  std::string flag;
+  ss >> cfg.input_topic >> cfg.output_topic >> cfg.msg_type >> flag;
   if (cfg.input_topic.empty() || cfg.output_topic.empty() || cfg.msg_type.empty()) {
     throw std::runtime_error(
             "relay entry '" + entry +
-            "' must have format 'input_topic output_topic msg_type'");
+            "' must have format 'input_topic output_topic msg_type [reliable]'");
   }
+  cfg.reliable = (flag == "reliable");
   return cfg;
 }
 
@@ -107,9 +113,9 @@ public:
     loss_pct_ = declare_parameter<double>("loss_pct", 0.0);
     delay_ms_ = declare_parameter<double>("delay_ms", 0.0);
     const auto relay_entries =
-      declare_parameter<std::vector<std::string>>("relay_topics", {});
+      declare_parameter<std::vector<std::string>>("relay_topics", std::vector<std::string>{});
     const auto bypass_entries =
-      declare_parameter<std::vector<std::string>>("bypass_topics", {});
+      declare_parameter<std::vector<std::string>>("bypass_topics", std::vector<std::string>{});
 
     token_bucket_ = std::make_shared<TokenBucket>(bandwidth_kbps_);
 
@@ -166,12 +172,13 @@ public:
 private:
   void setup_relay(const RelayConfig & cfg)
   {
-    // QoS: bypass (manifest) → TRANSIENT_LOCAL RELIABLE; relay → BEST_EFFORT
+    // bypass or reliable → RELIABLE + TRANSIENT_LOCAL (for manifest topics and Nav2 consumers)
+    // plain relay         → BEST_EFFORT volatile (for VXCH bands between encoder and decoder)
     rclcpp::QoS qos(1);
-    if (cfg.bypass) {
+    if (cfg.bypass || cfg.reliable) {
       qos.reliable().durability(rclcpp::DurabilityPolicy::TransientLocal);
     } else {
-      qos.best_effort().volatile_();
+      qos.best_effort();
     }
 
     auto pub = create_generic_publisher(cfg.output_topic, cfg.msg_type, qos);

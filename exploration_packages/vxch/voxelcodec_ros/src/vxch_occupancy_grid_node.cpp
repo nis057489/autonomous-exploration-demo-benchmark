@@ -88,7 +88,7 @@ public:
     const auto map_qos = rclcpp::QoS(1)
       .reliable()
       .durability(rclcpp::DurabilityPolicy::TransientLocal);
-    const auto band_qos = rclcpp::QoS(1).best_effort().volatile_();
+    const auto band_qos = rclcpp::QoS(1).best_effort();
 
     map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(output_topic_, map_qos);
 
@@ -178,7 +178,7 @@ private:
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Ignore bands that don't match the current manifest stamp
-    if (msg->header.stamp.sec != pending_.stamp_sec ||
+    if (static_cast<std::uint32_t>(msg->header.stamp.sec) != pending_.stamp_sec ||
       msg->header.stamp.nanosec != pending_.stamp_nanosec ||
       pending_.original_len == 0)
     {

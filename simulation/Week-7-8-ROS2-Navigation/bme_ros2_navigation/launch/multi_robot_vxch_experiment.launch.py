@@ -1,17 +1,19 @@
 """
 VXCH progressive streaming experiment launcher.
 
-map_transport:=baseline   — team_map_fusion publishes /{robot}/global_map_raw,
-                            DdilProxy relays it to /{robot}/global_map with DDIL params.
+map_transport:=baseline
+  team_map_fusion → /{robot}/global_map → DdilProxy → /{robot}/team_map_ddil
+  PerRobotMapCompositor merges /{robot}/map (local) + /{robot}/team_map_ddil → /{robot}/nav_map
 
-map_transport:=vxch       — team_map_fusion publishes /map only (vxch_mode=true),
-                            OccupancyGridVxchNode encodes it into per-band VXCH topics,
-                            DdilProxy applies DDIL to the bands,
-                            VxchOccupancyGridNode decodes and publishes /{robot}/global_map.
+map_transport:=vxch
+  team_map_fusion → /map → encoder → bands → DdilProxy → decoder → /{robot}/team_map_ddil
+  PerRobotMapCompositor merges /{robot}/map (local) + /{robot}/team_map_ddil → /{robot}/nav_map
 
-Nav2 and frontier exploration always consume /{robot}/global_map — unchanged in both modes.
+Nav2 and frontier exploration subscribe to /{robot}/nav_map in both modes.
+team_map_fusion always publishes /{robot}/global_map with its default empty suffix —
+the DdilProxy intercepts it so bypass is structurally impossible.
 
-DDIL args (default 0 = no degradation, useful for smoke-testing):
+DDIL args (default 0 = no degradation):
   bandwidth_kbps   token-bucket rate limit on the map transport link
   loss_pct         per-message drop probability (0–100)
   delay_ms         additional forwarding latency
@@ -23,7 +25,6 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
-    GroupAction,
     IncludeLaunchDescription,
     OpaqueFunction,
 )
@@ -36,19 +37,42 @@ def _bool_value(s):
     return str(s).strip().lower() in ("1", "true", "yes", "on")
 
 
-def _create_experiment_actions(context):
+def _create_all_actions(context):
+    """
+    Single OpaqueFunction that builds every action for the experiment.
+
+    By resolving map_transport here and constructing IncludeLaunchDescription
+    with plain string values (not LaunchConfiguration substitutions), we avoid
+    the SetLaunchConfiguration timing issue where inner args might not be set
+    before IncludeLaunchDescription evaluates its launch_arguments.
+    """
+    pkg_nav = get_package_share_directory("bme_ros2_navigation")
+    pkg_rviz = get_package_share_directory("rviz_autonomous_exploration_benchmark")
+
     map_transport = LaunchConfiguration("map_transport").perform(context)
     haar_levels = int(LaunchConfiguration("haar_levels").perform(context))
     bandwidth_kbps = float(LaunchConfiguration("bandwidth_kbps").perform(context))
     loss_pct = float(LaunchConfiguration("loss_pct").perform(context))
     delay_ms = float(LaunchConfiguration("delay_ms").perform(context))
     num_robots = int(LaunchConfiguration("num_robots").perform(context))
-    use_sim_time = _bool_value(LaunchConfiguration("use_sim_time").perform(context))
+    use_sim_time_str = LaunchConfiguration("use_sim_time").perform(context)
+    use_sim_time = _bool_value(use_sim_time_str)
+
+    world = LaunchConfiguration("world").perform(context)
+    model = LaunchConfiguration("model").perform(context)
+    x = LaunchConfiguration("x").perform(context)
+    y = LaunchConfiguration("y").perform(context)
+    z = LaunchConfiguration("z").perform(context)
+    yaw = LaunchConfiguration("yaw").perform(context)
+    spacing = LaunchConfiguration("spacing").perform(context)
+    rviz = LaunchConfiguration("rviz").perform(context)
 
     if map_transport not in ("baseline", "vxch"):
         raise ValueError(f"map_transport must be 'baseline' or 'vxch', got '{map_transport}'")
 
     is_vxch = map_transport == "vxch"
+    vxch_mode_str = "true" if is_vxch else "false"
+
     robot_names = [f"robot{i + 1}" for i in range(num_robots)]
     vxch_base = "/vxch/map"
     vxch_ddil_base = "/vxch/map_ddil"
@@ -63,12 +87,51 @@ def _create_experiment_actions(context):
 
     actions = []
 
+    # ── Navigation + SLAM + world ──────────────────────────────────────────────
+    # global_map_suffix is intentionally omitted: team_map_fusion always publishes
+    # /{robot}/global_map (default suffix ""). The DdilProxy intercepts that topic
+    # and produces /{robot}/team_map_ddil, making bypass structurally impossible.
+    actions.append(
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(pkg_nav, "launch", "multi_robot_navigation_with_slam.launch.py")
+            ),
+            launch_arguments={
+                "world": world,
+                "num_robots": str(num_robots),
+                "model": model,
+                "x": x,
+                "y": y,
+                "z": z,
+                "yaw": yaw,
+                "spacing": spacing,
+                "use_sim_time": use_sim_time_str,
+                "rviz": rviz,
+                "vxch_mode": vxch_mode_str,
+            }.items(),
+        )
+    )
+
+    # ── Frontier exploration ───────────────────────────────────────────────────
+    actions.append(
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(pkg_rviz, "launch", "multi_robot_frontier_explorer.launch.py")
+            ),
+            launch_arguments={
+                "num_robots": str(num_robots),
+                "use_sim_time": use_sim_time_str,
+            }.items(),
+        )
+    )
+
     # ── Baseline mode ──────────────────────────────────────────────────────────
     if not is_vxch:
-        # team_map_fusion publishes /{robot}/global_map_raw (via global_map_suffix)
-        # DdilProxy relays each to /{robot}/global_map
+        # team_map_fusion publishes /{robot}/global_map (default, no suffix).
+        # DdilProxy intercepts it and produces /{robot}/team_map_ddil.
+        # The compositor merges /{robot}/map (local) + /{robot}/team_map_ddil → /{robot}/nav_map.
         relay_topics = [
-            f"/{name}/global_map_raw /{name}/global_map nav_msgs/msg/OccupancyGrid"
+            f"/{name}/global_map /{name}/team_map_ddil nav_msgs/msg/OccupancyGrid reliable"
             for name in robot_names
         ]
         actions.append(
@@ -80,7 +143,7 @@ def _create_experiment_actions(context):
                 parameters=[{
                     **ddil_params,
                     "relay_topics": relay_topics,
-                    "bypass_topics": [],
+                    # bypass_topics omitted — C++ default is empty vector
                 }],
             )
         )
@@ -126,7 +189,8 @@ def _create_experiment_actions(context):
             )
         )
 
-        # One decoder per robot → publishes /{robot}/global_map
+        # One decoder per robot → publishes /{robot}/team_map_ddil
+        # (the compositor merges this with /{robot}/map to produce /{robot}/nav_map)
         for name in robot_names:
             actions.append(
                 Node(
@@ -136,7 +200,7 @@ def _create_experiment_actions(context):
                     output="screen",
                     parameters=[{
                         "input_base_topic": vxch_ddil_base,
-                        "output_topic": f"/{name}/global_map",
+                        "output_topic": f"/{name}/team_map_ddil",
                         "haar_levels": haar_levels,
                         "publish_rate_hz": 1.0,
                         "use_sim_time": use_sim_time,
@@ -148,40 +212,6 @@ def _create_experiment_actions(context):
 
 
 def generate_launch_description():
-    pkg_nav = get_package_share_directory("bme_ros2_navigation")
-    pkg_rviz = get_package_share_directory("rviz_autonomous_exploration_benchmark")
-
-    multi_robot_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(pkg_nav, "launch", "multi_robot_navigation_with_slam.launch.py")
-        ),
-        launch_arguments={
-            "world": LaunchConfiguration("world"),
-            "num_robots": LaunchConfiguration("num_robots"),
-            "model": LaunchConfiguration("model"),
-            "x": LaunchConfiguration("x"),
-            "y": LaunchConfiguration("y"),
-            "z": LaunchConfiguration("z"),
-            "yaw": LaunchConfiguration("yaw"),
-            "spacing": LaunchConfiguration("spacing"),
-            "use_sim_time": LaunchConfiguration("use_sim_time"),
-            "rviz": LaunchConfiguration("rviz"),
-            # VXCH-specific params forwarded to team_map_fusion
-            "vxch_mode": LaunchConfiguration("vxch_mode_inner"),
-            "global_map_suffix": LaunchConfiguration("global_map_suffix_inner"),
-        }.items(),
-    )
-
-    frontier_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(pkg_rviz, "launch", "multi_robot_frontier_explorer.launch.py")
-        ),
-        launch_arguments={
-            "num_robots": LaunchConfiguration("num_robots"),
-            "use_sim_time": LaunchConfiguration("use_sim_time"),
-        }.items(),
-    )
-
     return LaunchDescription(
         [
             # ── Experiment args ────────────────────────────────────────────
@@ -213,26 +243,6 @@ def generate_launch_description():
             DeclareLaunchArgument("use_sim_time", default_value="True"),
             DeclareLaunchArgument("rviz", default_value="true"),
 
-            # Internal substitutions resolved in OpaqueFunction
-            OpaqueFunction(
-                function=_resolve_inner_args,
-            ),
-
-            multi_robot_launch,
-            frontier_launch,
-            OpaqueFunction(function=_create_experiment_actions),
+            OpaqueFunction(function=_create_all_actions),
         ]
     )
-
-
-def _resolve_inner_args(context):
-    """Compute vxch_mode_inner and global_map_suffix_inner from map_transport."""
-    map_transport = LaunchConfiguration("map_transport").perform(context)
-    is_vxch = map_transport == "vxch"
-
-    from launch.actions import SetLaunchConfiguration
-    return [
-        SetLaunchConfiguration("vxch_mode_inner", "true" if is_vxch else "false"),
-        SetLaunchConfiguration(
-            "global_map_suffix_inner", "" if is_vxch else "_raw"),
-    ]

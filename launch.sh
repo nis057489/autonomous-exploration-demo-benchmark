@@ -23,6 +23,13 @@ WORLD="${1:-bookstore}"
 NUM_ROBOTS="${NUM_ROBOTS:-1}"
 ROBOT="${ROBOT:-mogi_bot}"
 
+# Experiment parameters — forwarded by docker.sh from experiment.conf.
+MAP_TRANSPORT="${MAP_TRANSPORT:-baseline}"
+BANDWIDTH_KBPS="${BANDWIDTH_KBPS:-0}"
+LOSS_PCT="${LOSS_PCT:-0.0}"
+DELAY_MS="${DELAY_MS:-0}"
+HAAR_LEVELS="${HAAR_LEVELS:-4}"
+
 if ! [[ "${NUM_ROBOTS}" =~ ^[0-9]+$ ]] || (( NUM_ROBOTS < 1 )); then
   echo "NUM_ROBOTS must be a positive integer (got '${NUM_ROBOTS}')." >&2
   exit 1
@@ -172,17 +179,22 @@ trap cleanup EXIT INT TERM
 cleanup_existing_nav2
 
 if (( NUM_ROBOTS > 1 )); then
-  ros2 launch bme_ros2_navigation multi_robot_navigation_with_slam.launch.py \
+  ros2 launch bme_ros2_navigation multi_robot_vxch_experiment.launch.py \
     world:="${WORLD}" \
     num_robots:="${NUM_ROBOTS}" \
     model:="${ROBOT}.urdf" \
     x:="${SPAWN_X}" \
     y:="${SPAWN_Y}" \
     z:="${SPAWN_Z}" \
-    yaw:="${SPAWN_YAW}" &
+    yaw:="${SPAWN_YAW}" \
+    map_transport:="${MAP_TRANSPORT}" \
+    bandwidth_kbps:="${BANDWIDTH_KBPS}" \
+    loss_pct:="${LOSS_PCT}" \
+    delay_ms:="${DELAY_MS}" \
+    haar_levels:="${HAAR_LEVELS}" &
   STACK_PID=$!
 
-  echo "multi_robot_navigation_with_slam.launch.py started (pid=${STACK_PID}, world=${WORLD}, robot=${ROBOT}, num_robots=${NUM_ROBOTS})."
+  echo "multi_robot_vxch_experiment.launch.py started (pid=${STACK_PID}, world=${WORLD}, robot=${ROBOT}, num_robots=${NUM_ROBOTS}, map_transport=${MAP_TRANSPORT}, bandwidth_kbps=${BANDWIDTH_KBPS}, loss_pct=${LOSS_PCT}, delay_ms=${DELAY_MS})."
   echo "All processes are running. Press Ctrl+C to stop all."
   wait
   exit $?

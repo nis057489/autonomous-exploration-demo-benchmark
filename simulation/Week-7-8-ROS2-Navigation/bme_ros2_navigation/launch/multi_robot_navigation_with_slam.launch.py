@@ -111,7 +111,7 @@ def _navigation_params(base_path, output_dir, namespace, use_sim_time):
     global_costmap.setdefault("obstacle_layer", {}).setdefault("scan", {})["topic"] = (
         f"/{namespace}/scan"
     )
-    global_costmap.setdefault("static_layer", {})["map_topic"] = f"/{namespace}/global_map"
+    global_costmap.setdefault("static_layer", {})["map_topic"] = f"/{namespace}/nav_map"
 
     behavior_server = _node_params(data, "behavior_server")
     behavior_server["local_frame"] = odom_frame
@@ -297,6 +297,44 @@ def _topic_qos(topic):
     }
 
 
+_PATH_COLORS = [
+    "255; 85; 0",    # orange-red  (robot1)
+    "0; 100; 255",   # blue        (robot2)
+    "0; 200; 50",    # green       (robot3)
+    "200; 0; 200",   # purple      (robot4+)
+]
+
+
+def _path_display(name, topic, color):
+    return {
+        "Alpha": 1.0,
+        "Buffer Length": 1,
+        "Class": "rviz_default_plugins/Path",
+        "Color": color,
+        "Enabled": True,
+        "Head Diameter": 0.03,
+        "Head Length": 0.03,
+        "Length": 0.3,
+        "Line Style": "Lines",
+        "Line Width": 0.03,
+        "Name": name,
+        "Offset": {"X": 0, "Y": 0, "Z": 0},
+        "Pose Color": "255; 85; 255",
+        "Pose Style": "None",
+        "Radius": 0.03,
+        "Shaft Diameter": 0.01,
+        "Shaft Length": 0.23,
+        "Topic": {
+            "Depth": 5,
+            "Durability Policy": "Transient Local",
+            "History Policy": "Keep Last",
+            "Reliability Policy": "Reliable",
+            "Value": topic,
+        },
+        "Value": True,
+    }
+
+
 def _map_display(name, topic, alpha=0.55):
     return {
         "Alpha": alpha,
@@ -339,7 +377,8 @@ def _rviz_config(output_dir, namespaces):
     ]
     displays.append(_map_display("Team Global Map", "/map", 0.75))
 
-    for namespace in namespaces:
+    for idx, namespace in enumerate(namespaces):
+        color = _PATH_COLORS[min(idx, len(_PATH_COLORS) - 1)]
         displays.extend(
             [
                 {
@@ -379,6 +418,11 @@ def _rviz_config(output_dir, namespaces):
                     "Value": True,
                 },
                 _map_display(f"{namespace} Local SLAM Map", f"/{namespace}/map", 0.35),
+                _map_display(f"{namespace} Nav Map (composite)", f"/{namespace}/nav_map", 0.6),
+                {
+                    **_map_display(f"{namespace} Team Map DDIL", f"/{namespace}/team_map_ddil", 0.4),
+                    "Enabled": False,
+                },
                 {
                     "Class": "rviz_default_plugins/MarkerArray",
                     "Enabled": True,
@@ -386,6 +430,11 @@ def _rviz_config(output_dir, namespaces):
                     "Topic": _topic_qos(f"/{namespace}/explore/frontiers"),
                     "Value": True,
                 },
+                _path_display(
+                    f"{namespace} Traversed Path",
+                    f"/{namespace}/explore/traversed_path",
+                    color,
+                ),
             ]
         )
 
@@ -462,7 +511,6 @@ def _create_multi_robot_actions(context):
     yaw = float(LaunchConfiguration("yaw").perform(context))
     spacing = float(LaunchConfiguration("spacing").perform(context))
     vxch_mode = _bool_value(LaunchConfiguration("vxch_mode").perform(context))
-    global_map_suffix = LaunchConfiguration("global_map_suffix").perform(context)
 
     if num_robots < 1:
         raise RuntimeError("num_robots must be at least 1")
@@ -500,6 +548,24 @@ def _create_multi_robot_actions(context):
         robot_offsets_x.append(robot_x)
         robot_offsets_y.append(robot_y)
         robot_offsets_yaw.append(robot_yaw)
+
+        actions.append(
+            Node(
+                package="bme_ros2_navigation",
+                executable="per_robot_map_compositor.py",
+                name=f"per_robot_map_compositor_{namespace}",
+                output="screen",
+                parameters=[{
+                    "robot_name": namespace,
+                    "offset_x": robot_x,
+                    "offset_y": robot_y,
+                    "offset_yaw": robot_yaw,
+                    "publish_rate_hz": 2.0,
+                    "use_sim_time": use_sim_time,
+                }],
+            )
+        )
+
         navigation_params = _navigation_params(
             navigation_params_path, output_dir, namespace, use_sim_time
         )
@@ -675,6 +741,29 @@ def _create_multi_robot_actions(context):
             )
         )
 
+    for namespace in namespaces:
+        actions.append(
+            Node(
+                package="rviz_autonomous_exploration_benchmark",
+                executable="frontier_path_tracker.py",
+                name=f"frontier_path_tracker_{namespace}",
+                output="screen",
+                parameters=[{
+                    "global_frame": "map",
+                    "robot_base_frame": f"{namespace}/base_footprint",
+                    "path_topic": f"/{namespace}/explore/traversed_path",
+                    "package_topics": [
+                        f"frontier_exploration_ros2:/{namespace}/explore/traversed_path",
+                    ],
+                    "default_package": "frontier_exploration_ros2",
+                    "active_package_topic": f"/{namespace}/explore/path_tracker/active_package",
+                    "initial_pose_topic": f"/{namespace}/explore/path_tracker/initial_pose",
+                    "reset_topic": "/explore/reset_traveled_path",
+                    "use_sim_time": use_sim_time,
+                }],
+            )
+        )
+
     actions.append(
         Node(
             package="bme_ros2_navigation",
@@ -691,7 +780,6 @@ def _create_multi_robot_actions(context):
                     "publish_rate_hz": 1.0,
                     "use_sim_time": use_sim_time,
                     "vxch_mode": vxch_mode,
-                    "global_map_suffix": global_map_suffix,
                 }
             ],
         )
@@ -748,9 +836,6 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "vxch_mode", default_value="false",
                 description="Suppress per-robot global_map publishing (VXCH decoder takes over)"),
-            DeclareLaunchArgument(
-                "global_map_suffix", default_value="",
-                description="Suffix for per-robot global_map topic, e.g. '_raw' for baseline+DDIL"),
             world_launch,
             OpaqueFunction(function=_create_multi_robot_actions),
         ]

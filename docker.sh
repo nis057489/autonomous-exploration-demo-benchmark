@@ -6,11 +6,20 @@ PROJECT_ROOT="${SCRIPT_DIR}"
 
 DOCKER_IMAGE="${BENCHMARK_DOCKER_IMAGE:-autonomous-exploration-benchmark:jazzy-harmonic}"
 DOCKERFILE_PATH="${PROJECT_ROOT}/docker/Dockerfile"
+
+# Load experiment parameters from experiment.conf if present.
+# Individual env vars always take precedence over conf file values.
+if [[ -f "${PROJECT_ROOT}/experiment.conf" ]]; then
+  # shellcheck source=/dev/null
+  source "${PROJECT_ROOT}/experiment.conf"
+fi
+
 WORLD="${1:-bookstore}"
 
 if [[ $# -gt 1 ]]; then
   echo "Usage: $0 [world_name]" >&2
   echo "  Env vars: ROBOT=<model>  NUM_ROBOTS=<n>" >&2
+  echo "  Experiment params via experiment.conf or env: MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS" >&2
   exit 1
 fi
 
@@ -74,16 +83,25 @@ run_docker() {
   )
 
   if [[ -n "${ROS_DOMAIN_ID:-}" ]]; then
-    docker_args+=(-e ROS_DOMAIN_ID)
+    docker_args+=(-e "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}")
   fi
 
   if [[ -n "${NUM_ROBOTS:-}" ]]; then
-    docker_args+=(-e NUM_ROBOTS)
+    docker_args+=(-e "NUM_ROBOTS=${NUM_ROBOTS}")
   fi
 
   if [[ -n "${ROBOT:-}" ]]; then
-    docker_args+=(-e ROBOT)
+    docker_args+=(-e "ROBOT=${ROBOT}")
   fi
+
+  # Forward experiment parameters into the container.
+  # Use -e VAR=value (not bare -e VAR) so sourced-but-unexported variables are forwarded.
+  for _var in MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS; do
+    if [[ -n "${!_var:-}" ]]; then
+      docker_args+=(-e "${_var}=${!_var}")
+    fi
+  done
+  unset _var
 
   if [[ -n "${DISPLAY:-}" ]]; then
     docker_args+=(-e DISPLAY)
@@ -128,7 +146,7 @@ run_docker() {
     docker_args+=(-v "${PROJECT_ROOT}/results:/opt/benchmark_ws/results")
   fi
 
-  echo "Starting benchmark in Docker (image=${DOCKER_IMAGE}, world=${WORLD}, robot=${ROBOT:-mogi_bot}, num_robots=${NUM_ROBOTS:-1})..."
+  echo "Starting benchmark in Docker (image=${DOCKER_IMAGE}, world=${WORLD}, robot=${ROBOT:-mogi_bot}, num_robots=${NUM_ROBOTS:-1}, map_transport=${MAP_TRANSPORT:-baseline}, bandwidth_kbps=${BANDWIDTH_KBPS:-0}, loss_pct=${LOSS_PCT:-0.0}, delay_ms=${DELAY_MS:-0})..."
   docker "${docker_args[@]}" "${DOCKER_IMAGE}" ./launch.sh "${WORLD}"
 }
 

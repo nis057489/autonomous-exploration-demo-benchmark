@@ -45,7 +45,7 @@ public:
     const auto map_qos = rclcpp::QoS(1)
       .reliable()
       .durability(rclcpp::DurabilityPolicy::TransientLocal);
-    const auto band_qos = rclcpp::QoS(1).best_effort().volatile_();
+    const auto band_qos = rclcpp::QoS(1).best_effort();
 
     manifest_pub_ = create_publisher<voxelcodec_msgs::msg::VoxelManifest>(
       output_base_topic_ + "/manifest", map_qos);

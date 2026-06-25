@@ -51,7 +51,7 @@ def _frontier_params(base_path, namespace, use_sim_time, autostart, control_serv
     params["use_sim_time"] = use_sim_time
     params["autostart"] = autostart
     params["control_service_enabled"] = control_service
-    params["map_topic"] = f"/{namespace}/global_map"
+    params["map_topic"] = f"/{namespace}/nav_map"
     params["costmap_topic"] = f"/{namespace}/global_costmap/costmap"
     params["local_costmap_topic"] = f"/{namespace}/local_costmap/costmap"
     params["navigate_to_pose_action_name"] = "navigate_to_pose"
