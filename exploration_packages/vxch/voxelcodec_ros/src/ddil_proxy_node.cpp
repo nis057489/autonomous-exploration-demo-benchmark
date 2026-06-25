@@ -107,11 +107,13 @@ class DdilProxy : public rclcpp::Node
 public:
   DdilProxy()
   : Node("ddil_proxy"),
-    rng_(std::random_device{}())
+    rng_(0)  // seeded below after parameter declaration
   {
     bandwidth_kbps_ = declare_parameter<double>("bandwidth_kbps", 0.0);
     loss_pct_ = declare_parameter<double>("loss_pct", 0.0);
     delay_ms_ = declare_parameter<double>("delay_ms", 0.0);
+    const int64_t rng_seed = declare_parameter<int64_t>("rng_seed", -1);
+    rng_.seed(rng_seed >= 0 ? static_cast<uint32_t>(rng_seed) : std::random_device{}());
     const auto relay_entries =
       declare_parameter<std::vector<std::string>>("relay_topics", std::vector<std::string>{});
     const auto bypass_entries =

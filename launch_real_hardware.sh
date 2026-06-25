@@ -40,6 +40,7 @@ BANDWIDTH_KBPS="${BANDWIDTH_KBPS:-0}"
 LOSS_PCT="${LOSS_PCT:-0.0}"
 DELAY_MS="${DELAY_MS:-0}"
 HAAR_LEVELS="${HAAR_LEVELS:-4}"
+RANDOM_SEED="${RANDOM_SEED:--1}"
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 
@@ -180,7 +181,8 @@ if (( NUM_ROBOTS > 1 )); then
     bandwidth_kbps:="${BANDWIDTH_KBPS}" \
     loss_pct:="${LOSS_PCT}" \
     delay_ms:="${DELAY_MS}" \
-    haar_levels:="${HAAR_LEVELS}"
+    haar_levels:="${HAAR_LEVELS}" \
+    rng_seed:="${RANDOM_SEED}"
 
   exit $?
 fi

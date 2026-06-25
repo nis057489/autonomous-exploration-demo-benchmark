@@ -19,7 +19,7 @@ WORLD="${1:-bookstore}"
 if [[ $# -gt 1 ]]; then
   echo "Usage: $0 [world_name]" >&2
   echo "  Env vars: ROBOT=<model>  NUM_ROBOTS=<n>" >&2
-  echo "  Experiment params via experiment.conf or env: MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS" >&2
+  echo "  Experiment params via experiment.conf or env: MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS RANDOM_SEED" >&2
   exit 1
 fi
 
@@ -96,7 +96,7 @@ run_docker() {
 
   # Forward experiment parameters into the container.
   # Use -e VAR=value (not bare -e VAR) so sourced-but-unexported variables are forwarded.
-  for _var in MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS; do
+  for _var in MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS RANDOM_SEED; do
     if [[ -n "${!_var:-}" ]]; then
       docker_args+=(-e "${_var}=${!_var}")
     fi

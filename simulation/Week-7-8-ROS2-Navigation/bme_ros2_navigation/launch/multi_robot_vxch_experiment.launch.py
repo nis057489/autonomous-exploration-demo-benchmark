@@ -54,6 +54,7 @@ def _create_all_actions(context):
     bandwidth_kbps = float(LaunchConfiguration("bandwidth_kbps").perform(context))
     loss_pct = float(LaunchConfiguration("loss_pct").perform(context))
     delay_ms = float(LaunchConfiguration("delay_ms").perform(context))
+    rng_seed = int(LaunchConfiguration("rng_seed").perform(context))
     num_robots = int(LaunchConfiguration("num_robots").perform(context))
     use_sim_time_str = LaunchConfiguration("use_sim_time").perform(context)
     use_sim_time = _bool_value(use_sim_time_str)
@@ -82,6 +83,7 @@ def _create_all_actions(context):
         "bandwidth_kbps": bandwidth_kbps,
         "loss_pct": loss_pct,
         "delay_ms": delay_ms,
+        "rng_seed": rng_seed,
         "use_sim_time": use_sim_time,
     }
 
@@ -230,6 +232,9 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "delay_ms", default_value="0",
                 description="Additional forwarding delay in ms"),
+            DeclareLaunchArgument(
+                "rng_seed", default_value="-1",
+                description="RNG seed for DDIL packet-loss reproducibility (-1 = random)"),
 
             # ── Forwarded simulation args ──────────────────────────────────
             DeclareLaunchArgument("world", default_value="bookstore"),
