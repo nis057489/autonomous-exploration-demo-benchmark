@@ -60,6 +60,39 @@ install(
   INCLUDES DESTINATION include
 )
 
+add_executable(occupancy_grid_vxch_node
+  src/occupancy_grid_vxch_node.cpp
+)
+target_compile_features(occupancy_grid_vxch_node PUBLIC cxx_std_17)
+target_link_libraries(occupancy_grid_vxch_node ${PROJECT_NAME})
+ament_target_dependencies(occupancy_grid_vxch_node
+  geometry_msgs
+  nav_msgs
+  rclcpp
+  voxelcodec_msgs
+)
+install(TARGETS occupancy_grid_vxch_node RUNTIME DESTINATION lib/${PROJECT_NAME})
+
+add_executable(vxch_occupancy_grid_node
+  src/vxch_occupancy_grid_node.cpp
+)
+target_compile_features(vxch_occupancy_grid_node PUBLIC cxx_std_17)
+target_link_libraries(vxch_occupancy_grid_node ${PROJECT_NAME})
+ament_target_dependencies(vxch_occupancy_grid_node
+  geometry_msgs
+  nav_msgs
+  rclcpp
+  voxelcodec_msgs
+)
+install(TARGETS vxch_occupancy_grid_node RUNTIME DESTINATION lib/${PROJECT_NAME})
+
+add_executable(ddil_proxy_node
+  src/ddil_proxy_node.cpp
+)
+target_compile_features(ddil_proxy_node PUBLIC cxx_std_17)
+ament_target_dependencies(ddil_proxy_node rclcpp)
+install(TARGETS ddil_proxy_node RUNTIME DESTINATION lib/${PROJECT_NAME})
+
 if(nav2_msgs_FOUND AND nav2_voxel_grid_FOUND)
   add_executable(nav2_voxel_grid_publisher
     src/nav2_voxel_grid_publisher.cpp

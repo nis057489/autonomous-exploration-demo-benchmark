@@ -923,4 +923,52 @@ namespace voxelcodec_ros
     return decoded;
   }
 
+  std::vector<std::uint32_t> reconstruct_haar_from_coeffs(
+    const std::vector<std::int64_t> & coeffs,
+    std::size_t original_len,
+    int levels,
+    int max_bands)
+  {
+    if (levels < 1 || original_len == 0) {
+      throw std::runtime_error("reconstruct_haar_from_coeffs: invalid levels or original_len");
+    }
+
+    std::vector<std::size_t> smooth_lens(static_cast<std::size_t>(levels + 1));
+    smooth_lens[0] = original_len;
+    for (int i = 1; i <= levels; ++i) {
+      smooth_lens[static_cast<std::size_t>(i)] =
+        (smooth_lens[static_cast<std::size_t>(i - 1)] + 1) / 2;
+    }
+
+    std::vector<std::size_t> band_boundaries(static_cast<std::size_t>(levels + 2), 0);
+    for (int i = 0; i <= levels; ++i) {
+      band_boundaries[static_cast<std::size_t>(i + 1)] =
+        smooth_lens[static_cast<std::size_t>(levels - i)];
+    }
+
+    const int bands = std::max(1, std::min(max_bands, levels + 1));
+    const std::size_t output_len = band_boundaries[static_cast<std::size_t>(bands)];
+
+    if (coeffs.size() < output_len) {
+      throw std::runtime_error("reconstruct_haar_from_coeffs: coeffs too short for requested bands");
+    }
+
+    std::vector<std::int64_t> work(coeffs.begin(),
+      coeffs.begin() + static_cast<std::ptrdiff_t>(output_len));
+
+    for (int i = 0; i < bands - 1; ++i) {
+      const int level = levels - 1 - i;
+      haar_inverse_level(
+        work,
+        smooth_lens[static_cast<std::size_t>(level)],
+        smooth_lens[static_cast<std::size_t>(level + 1)]);
+    }
+
+    std::vector<std::uint32_t> values(output_len);
+    for (std::size_t i = 0; i < output_len; ++i) {
+      values[i] = static_cast<std::uint32_t>(work[i] & 0xFFFFFFFFU);
+    }
+    return values;
+  }
+
 } // namespace voxelcodec_ros

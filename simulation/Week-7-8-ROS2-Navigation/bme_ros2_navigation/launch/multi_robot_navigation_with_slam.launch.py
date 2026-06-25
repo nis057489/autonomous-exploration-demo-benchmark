@@ -461,6 +461,8 @@ def _create_multi_robot_actions(context):
     z = float(LaunchConfiguration("z").perform(context))
     yaw = float(LaunchConfiguration("yaw").perform(context))
     spacing = float(LaunchConfiguration("spacing").perform(context))
+    vxch_mode = _bool_value(LaunchConfiguration("vxch_mode").perform(context))
+    global_map_suffix = LaunchConfiguration("global_map_suffix").perform(context)
 
     if num_robots < 1:
         raise RuntimeError("num_robots must be at least 1")
@@ -688,6 +690,8 @@ def _create_multi_robot_actions(context):
                     "global_frame": "map",
                     "publish_rate_hz": 1.0,
                     "use_sim_time": use_sim_time,
+                    "vxch_mode": vxch_mode,
+                    "global_map_suffix": global_map_suffix,
                 }
             ],
         )
@@ -741,6 +745,12 @@ def generate_launch_description():
             DeclareLaunchArgument("spacing", default_value="0.8"),
             DeclareLaunchArgument("use_sim_time", default_value="True"),
             DeclareLaunchArgument("rviz", default_value="true"),
+            DeclareLaunchArgument(
+                "vxch_mode", default_value="false",
+                description="Suppress per-robot global_map publishing (VXCH decoder takes over)"),
+            DeclareLaunchArgument(
+                "global_map_suffix", default_value="",
+                description="Suffix for per-robot global_map topic, e.g. '_raw' for baseline+DDIL"),
             world_launch,
             OpaqueFunction(function=_create_multi_robot_actions),
         ]

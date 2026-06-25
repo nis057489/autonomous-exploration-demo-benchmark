@@ -42,6 +42,23 @@ DecodedChannel decode_haar_progressive(
 /// Returns 0 if the channel is not haar-wavelet encoded.
 int haar_max_bands(const ChannelDescriptor & descriptor);
 
+/// Reconstruct values from a pre-assembled int64 coefficient array.
+/// Used by the VXCH decoder when bands arrive as separate messages and must be
+/// assembled before calling the wavelet inverse.
+/// @param coeffs   Assembled coefficient prefix (bands 0..max_bands-1 concatenated).
+///                 Length must be >= band_boundaries[max_bands] where
+///                 band_boundaries[k+1] = smooth_lens[levels-k].
+/// @param original_len Full grid length (N) needed to compute smooth_lens.
+/// @param levels   Number of Haar levels used during encoding.
+/// @param max_bands Bands to reconstruct (1=coarsest only, levels+1=full).
+/// @return Decoded values, length = band_boundaries[max_bands].
+///         Caller is responsible for upsampling to original_len if max_bands < levels+1.
+std::vector<std::uint32_t> reconstruct_haar_from_coeffs(
+  const std::vector<std::int64_t> & coeffs,
+  std::size_t original_len,
+  int levels,
+  int max_bands);
+
 std::unordered_map<std::string, DecodedChannel> decode_selected(
   const Archive & archive,
   const std::vector<std::string> & channel_names);

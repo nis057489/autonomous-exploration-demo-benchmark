@@ -38,6 +38,11 @@ class TeamMapFusion(Node):
         self.declare_parameter("global_frame", "map")
         self.declare_parameter("publish_rate_hz", 1.0)
         self.declare_parameter("max_cells", 12000000)
+        # vxch_mode: suppress per-robot global_map publishing (VXCH decoder takes over)
+        self.declare_parameter("vxch_mode", False)
+        # global_map_suffix: rename per-robot topic, e.g. "_raw" → /{robot}/global_map_raw
+        # Used in baseline+DDIL mode so DdilProxy can intercept before Nav2/frontier.
+        self.declare_parameter("global_map_suffix", "")
 
         robot_names = list(self.get_parameter("robot_names").value)
         offsets_x = list(self.get_parameter("offsets_x").value)
@@ -58,6 +63,8 @@ class TeamMapFusion(Node):
         publish_rate_hz = max(0.1, float(self.get_parameter("publish_rate_hz").value))
         self.max_cells = int(self.get_parameter("max_cells").value)
         self.last_warn_time = 0.0
+        self.vxch_mode = bool(self.get_parameter("vxch_mode").value)
+        global_map_suffix = str(self.get_parameter("global_map_suffix").value)
 
         self.map_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -79,7 +86,7 @@ class TeamMapFusion(Node):
         )
         self.robot_map_pubs = {
             name: self.create_publisher(
-                OccupancyGrid, f"/{name}/global_map", self.map_qos
+                OccupancyGrid, f"/{name}/global_map{global_map_suffix}", self.map_qos
             )
             for name in robot_names
         }
@@ -122,9 +129,10 @@ class TeamMapFusion(Node):
 
         self.team_map_pub.publish(merged_map)
         self.team_metadata_pub.publish(merged_map.info)
-        for name, publisher in self.robot_map_pubs.items():
-            publisher.publish(merged_map)
-            self.robot_metadata_pubs[name].publish(merged_map.info)
+        if not self.vxch_mode:
+            for name, publisher in self.robot_map_pubs.items():
+                publisher.publish(merged_map)
+                self.robot_metadata_pubs[name].publish(merged_map.info)
 
     def _build_merged_map(self):
         available_states = [
