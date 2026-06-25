@@ -45,7 +45,16 @@ def _load_yaml(path):
         return yaml.safe_load(stream)
 
 
-def _frontier_params(base_path, namespace, use_sim_time, autostart, control_service):
+# Matches _PATH_COLORS in multi_robot_navigation_with_slam.launch.py (values in 0-255).
+_PATH_COLORS_255 = [
+    (255, 85, 0),    # orange-red  (robot1)
+    (0, 100, 255),   # blue        (robot2)
+    (0, 200, 50),    # green       (robot3)
+    (200, 0, 200),   # purple      (robot4+)
+]
+
+
+def _frontier_params(base_path, namespace, use_sim_time, autostart, control_service, color_255):
     data = copy.deepcopy(_load_yaml(base_path))
     params = data.setdefault("frontier_explorer", {}).setdefault("ros__parameters", {})
     params["use_sim_time"] = use_sim_time
@@ -60,6 +69,9 @@ def _frontier_params(base_path, namespace, use_sim_time, autostart, control_serv
     params["frontier_marker_topic"] = f"/{namespace}/explore/frontiers"
     params["selected_frontier_topic"] = f"/{namespace}/explore/selected_frontier"
     params["optimized_map_topic"] = f"/{namespace}/explore/optimized_map"
+    params["frontier_marker_color_r"] = color_255[0] / 255.0
+    params["frontier_marker_color_g"] = color_255[1] / 255.0
+    params["frontier_marker_color_b"] = color_255[2] / 255.0
     return params
 
 
@@ -78,12 +90,14 @@ def _create_explorer_actions(context):
     actions = []
     for index in range(num_robots):
         namespace = f"robot{index + 1}"
+        color_255 = _PATH_COLORS_255[min(index, len(_PATH_COLORS_255) - 1)]
         generated_params = _frontier_params(
             params_file,
             namespace,
             use_sim_time,
             autostart,
             control_service,
+            color_255,
         )
         actions.append(
             Node(
