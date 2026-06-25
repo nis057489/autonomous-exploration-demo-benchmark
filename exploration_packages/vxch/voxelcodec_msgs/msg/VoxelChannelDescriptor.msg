@@ -1,0 +1,10 @@
+string name
+string semantic
+string data_type
+string encoding
+string compression
+uint32 element_count
+uint64 payload_offset
+uint64 compressed_size
+uint64 uncompressed_size
+voxelcodec_msgs/MetadataEntry[] metadata

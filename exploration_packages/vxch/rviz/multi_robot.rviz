@@ -1,0 +1,207 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+
+Visualization Manager:
+  Class: ""
+  Displays:
+
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Color: 80; 80; 80
+      Plane Cell Count: 20
+
+    # ── Own SLAM map (grey) ─────────────────────────────────────────────────
+    # Cartographer publishes with transient_local — match that here.
+    - Alpha: 0.8
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Draw Behind: true
+      Enabled: true
+      Name: "SLAM map (own)"
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map
+
+    # ── tb3_0 peer map — BLUE ──────────────────────────────────────────────
+    # Published by the VXCH subscriber on whichever robot is NOT tb3_0.
+    # If you're running on tb3_1, this is the map tb3_1 received from tb3_0.
+    # If you're on the monitoring laptop, you see it directly.
+    - Alpha: 0.65
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Draw Behind: false
+      Enabled: true
+      Name: "Peer map: tb3_0 via VXCH (blue)"
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map_tb3_0
+
+    # ── tb3_1 peer map — GREEN ─────────────────────────────────────────────
+    - Alpha: 0.65
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Draw Behind: false
+      Enabled: true
+      Name: "Peer map: tb3_1 via VXCH (green)"
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map_tb3_1
+
+    # ── Merged global costmap — shows what nav2 actually plans through ──────
+    - Alpha: 0.35
+      Class: rviz_default_plugins/Map
+      Color Scheme: costmap
+      Draw Behind: false
+      Enabled: true
+      Name: "Global costmap (nav2)"
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /global_costmap/costmap
+
+    # ── LiDAR scan ─────────────────────────────────────────────────────────
+    - Alpha: 1
+      Class: rviz_default_plugins/LaserScan
+      Color: 255; 80; 80
+      Color Transformer: FlatColor
+      Enabled: true
+      Name: "LiDAR (/scan)"
+      Size (m): 0.03
+      Style: Points
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /scan
+
+    # ── tb3_0 LiDAR point cloud (VXCH carries it as PointCloud2) ───────────
+    # Published by the VXCH map subscriber's /map_tb3_0/points output.
+    - Alpha: 0.8
+      Class: rviz_default_plugins/PointCloud2
+      Color: 30; 144; 255
+      Color Transformer: FlatColor
+      Enabled: true
+      Name: "tb3_0 voxel map (blue)"
+      Position Transformer: XYZ
+      Size (m): 0.06
+      Style: Flat Squares
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /tb3_0/vxch/points
+
+    # ── tb3_1 voxel map ─────────────────────────────────────────────────────
+    - Alpha: 0.8
+      Class: rviz_default_plugins/PointCloud2
+      Color: 50; 200; 80
+      Color Transformer: FlatColor
+      Enabled: true
+      Name: "tb3_1 voxel map (green)"
+      Position Transformer: XYZ
+      Size (m): 0.06
+      Style: Flat Squares
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /tb3_1/vxch/points
+
+    # ── explore_lite frontiers ──────────────────────────────────────────────
+    # Publishes frontier markers while actively exploring.
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: "Frontiers (explore_lite)"
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /explore/frontiers
+
+    # ── nav2 planned path ───────────────────────────────────────────────────
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
+      Color: 255; 200; 0
+      Enabled: true
+      Name: "Nav2 plan"
+      Line Style: Lines
+      Line Width: 0.05
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /plan
+
+    # ── TF: shows both robots' base_link positions ──────────────────────────
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Frame Timeout: 15
+      Marker Scale: 0.5
+      Name: TF
+      Show Arrows: false
+      Show Axes: true
+      Show Names: true
+      Value: true
+
+  Enabled: true
+  Global Options:
+    Background Color: 20; 20; 24
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive: false
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/SetInitialPose
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /initialpose
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /goal_pose
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Scale: 80
+      X: 0
+      Y: 0
+      Name: Current View
+
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 900
+  Width: 1400
+  X: 100
+  Y: 100

@@ -1,0 +1,10 @@
+# Request: desired band level (1=coarsest, 0=let node choose max)
+int32 band
+---
+# Response
+int32 current_band
+int32 max_bands
+int32 voxel_count
+int32 unique_voxels
+int64 cumulative_bytes
+int64 total_bytes

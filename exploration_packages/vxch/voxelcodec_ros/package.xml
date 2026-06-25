@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>voxelcodec_ros</name>
+  <version>0.1.0</version>
+  <description>C++ ROS 2 Humble port of the VXCH voxel channel codec.</description>
+  <maintainer email="nick@example.com">Nick</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <build_depend>pkg-config</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>nav_msgs</build_depend>
+  <build_depend>rclcpp</build_depend>
+  <build_depend>sensor_msgs</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>voxelcodec_msgs</build_depend>
+  <build_depend>nlohmann-json3-dev</build_depend>
+  <build_depend>nav2_msgs</build_depend>
+  <build_depend>nav2_voxel_grid</build_depend>
+  <build_depend>pluginlib</build_depend>
+  <build_depend>rviz_common</build_depend>
+  <build_depend>rviz_rendering</build_depend>
+  <build_depend>qtbase5-dev</build_depend>
+
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>rclcpp</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>voxelcodec_msgs</exec_depend>
+  <exec_depend>nlohmann-json3-dev</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>nav2_voxel_grid</exec_depend>
+  <exec_depend>pluginlib</exec_depend>
+  <exec_depend>rviz_common</exec_depend>
+  <exec_depend>rviz_rendering</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

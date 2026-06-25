@@ -1,0 +1,31 @@
+<library path="progressive_panel">
+  <class name="voxelcodec_ros/ProgressivePanel"
+         type="voxelcodec_ros::ProgressivePanel"
+         base_class_type="rviz_common::Panel">
+    <description>
+      Control progressive voxel channel refinement level.
+    </description>
+  </class>
+</library>
+
+<library path="bandwidth_panel">
+  <class name="voxelcodec_ros/BandwidthPanel"
+         type="voxelcodec_ros::BandwidthPanel"
+         base_class_type="rviz_common::Panel">
+    <description>
+      Compare bandwidth of native sensor vs VXCH progressive topic.
+    </description>
+  </class>
+</library>
+
+<library path="voxel_display">
+  <class name="voxelcodec_ros/VoxelDisplay"
+         type="voxelcodec_ros::VoxelDisplay"
+         base_class_type="rviz_common::Display">
+    <description>
+      Display VXCH voxel channels as multi-resolution 3D boxes.
+      Subscribes to VoxelManifest and VoxelChannel topics, rendering
+      coarse octree voxels as larger boxes and fine voxels as smaller ones.
+    </description>
+  </class>
+</library>

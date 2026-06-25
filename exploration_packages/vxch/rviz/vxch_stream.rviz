@@ -1,0 +1,95 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+  - Class: voxelcodec_ros/ProgressivePanel
+    Name: Progressive
+  - Class: voxelcodec_ros/BandwidthPanel
+    Name: Bandwidth
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 10
+      Color: 120; 120; 120
+      Plane: XY
+      Plane Cell Count: 40
+
+    - Class: rviz_default_plugins/PointCloud2
+      Name: VXCH Map (archive)
+      Enabled: true
+      Alpha: 1
+      Color Transformer: FlatColor
+      Color: 30; 144; 255
+      Position Transformer: XYZ
+      Size (m): 0.2
+      Style: Flat Squares
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /voxelcodec/rviz/points
+      Use Fixed Frame: true
+
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Voxelized Native
+      Enabled: true
+      Alpha: 0.3
+      Color Transformer: FlatColor
+      Color: 176; 176; 176
+      Position Transformer: XYZ
+      Size (m): 0.15
+      Style: Flat Squares
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /vxch/voxelized/points
+      Decay Time: 30
+      Use Fixed Frame: true
+
+    - Class: voxelcodec_ros/VoxelDisplay
+      Name: VXCH Voxels
+      Enabled: true
+      Base Topic: /voxelcodec
+      Color Mode: Height
+      Flat Color: 70; 130; 230
+      Alpha: 1
+      Stretch Coarse Voxels: true
+
+  Enabled: true
+  Global Options:
+    Background Color: 20; 20; 24
+    Fixed Frame: map
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/Select
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 250
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Pitch: 0.7
+      Yaw: 0.7
+Window Geometry:
+  Displays:
+    collapsed: false
+  Progressive:
+    collapsed: false
+  Bandwidth:
+    collapsed: false
+  Height: 900
+  Width: 1400
+  X: 100
+  Y: 100

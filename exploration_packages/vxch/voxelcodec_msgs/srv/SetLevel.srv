@@ -1,0 +1,12 @@
+# Request: desired minimum wavemap height to include.
+# Higher values = coarser (fewer, larger voxels).
+# 0 = include all levels down to finest.
+# -1 = let node choose current maximum.
+int32 wvmp_min_height
+---
+# Response
+int32 current_wvmp_min_height
+int32 wvmp_height_max
+int32 wvmp_height_min
+int32 voxel_count
+int32 active_levels
