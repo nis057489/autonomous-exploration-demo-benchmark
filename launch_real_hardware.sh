@@ -41,6 +41,7 @@ LOSS_PCT="${LOSS_PCT:-0.0}"
 DELAY_MS="${DELAY_MS:-0}"
 HAAR_LEVELS="${HAAR_LEVELS:-4}"
 RANDOM_SEED="${RANDOM_SEED:--1}"
+ROBOT_STARTUP_DELAY_S="${ROBOT_STARTUP_DELAY_S:-0.0}"
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 
@@ -182,7 +183,8 @@ if (( NUM_ROBOTS > 1 )); then
     loss_pct:="${LOSS_PCT}" \
     delay_ms:="${DELAY_MS}" \
     haar_levels:="${HAAR_LEVELS}" \
-    rng_seed:="${RANDOM_SEED}"
+    rng_seed:="${RANDOM_SEED}" \
+    robot_startup_delay_s:="${ROBOT_STARTUP_DELAY_S}"
 
   exit $?
 fi

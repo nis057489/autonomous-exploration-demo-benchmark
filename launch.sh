@@ -30,6 +30,7 @@ LOSS_PCT="${LOSS_PCT:-0.0}"
 DELAY_MS="${DELAY_MS:-0}"
 HAAR_LEVELS="${HAAR_LEVELS:-4}"
 RANDOM_SEED="${RANDOM_SEED:--1}"
+ROBOT_STARTUP_DELAY_S="${ROBOT_STARTUP_DELAY_S:-0.0}"
 
 if ! [[ "${NUM_ROBOTS}" =~ ^[0-9]+$ ]] || (( NUM_ROBOTS < 1 )); then
   echo "NUM_ROBOTS must be a positive integer (got '${NUM_ROBOTS}')." >&2
@@ -193,7 +194,8 @@ if (( NUM_ROBOTS > 1 )); then
     loss_pct:="${LOSS_PCT}" \
     delay_ms:="${DELAY_MS}" \
     haar_levels:="${HAAR_LEVELS}" \
-    rng_seed:="${RANDOM_SEED}" &
+    rng_seed:="${RANDOM_SEED}" \
+    robot_startup_delay_s:="${ROBOT_STARTUP_DELAY_S}" &
   STACK_PID=$!
 
   echo "multi_robot_vxch_experiment.launch.py started (pid=${STACK_PID}, world=${WORLD}, robot=${ROBOT}, num_robots=${NUM_ROBOTS}, map_transport=${MAP_TRANSPORT}, bandwidth_kbps=${BANDWIDTH_KBPS}, loss_pct=${LOSS_PCT}, delay_ms=${DELAY_MS}, rng_seed=${RANDOM_SEED})."

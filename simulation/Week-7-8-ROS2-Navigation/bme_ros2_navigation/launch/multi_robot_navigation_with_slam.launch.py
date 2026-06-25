@@ -375,7 +375,7 @@ def _rviz_config(output_dir, namespaces):
             "Value": True,
         },
     ]
-    displays.append(_map_display("Team Global Map", "/map", 0.75))
+    displays.append({**_map_display("Team Global Map", "/map", 0.75), "Enabled": False})
 
     for idx, namespace in enumerate(namespaces):
         color = _PATH_COLORS[min(idx, len(_PATH_COLORS) - 1)]
@@ -417,7 +417,7 @@ def _rviz_config(output_dir, namespaces):
                     "Use rainbow": True,
                     "Value": True,
                 },
-                _map_display(f"{namespace} Local SLAM Map", f"/{namespace}/map", 0.35),
+                {**_map_display(f"{namespace} Local SLAM Map", f"/{namespace}/map", 0.35), "Enabled": False},
                 _map_display(f"{namespace} Nav Map (composite)", f"/{namespace}/nav_map", 0.6),
                 {
                     **_map_display(f"{namespace} Team Map DDIL", f"/{namespace}/team_map_ddil", 0.4),
@@ -818,6 +818,7 @@ def generate_launch_description():
         ),
         launch_arguments={
             "world": LaunchConfiguration("world"),
+            "seed": LaunchConfiguration("seed"),
         }.items(),
     )
 
@@ -833,6 +834,8 @@ def generate_launch_description():
             DeclareLaunchArgument("spacing", default_value="0.8"),
             DeclareLaunchArgument("use_sim_time", default_value="True"),
             DeclareLaunchArgument("rviz", default_value="true"),
+            DeclareLaunchArgument("seed", default_value="-1",
+                description="Gazebo physics RNG seed (-1 = non-deterministic)"),
             DeclareLaunchArgument(
                 "vxch_mode", default_value="false",
                 description="Suppress per-robot global_map publishing (VXCH decoder takes over)"),

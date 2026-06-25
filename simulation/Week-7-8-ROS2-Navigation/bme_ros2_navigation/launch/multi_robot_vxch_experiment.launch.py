@@ -55,6 +55,7 @@ def _create_all_actions(context):
     loss_pct = float(LaunchConfiguration("loss_pct").perform(context))
     delay_ms = float(LaunchConfiguration("delay_ms").perform(context))
     rng_seed = int(LaunchConfiguration("rng_seed").perform(context))
+    robot_startup_delay_s = float(LaunchConfiguration("robot_startup_delay_s").perform(context))
     num_robots = int(LaunchConfiguration("num_robots").perform(context))
     use_sim_time_str = LaunchConfiguration("use_sim_time").perform(context)
     use_sim_time = _bool_value(use_sim_time_str)
@@ -110,6 +111,7 @@ def _create_all_actions(context):
                 "use_sim_time": use_sim_time_str,
                 "rviz": rviz,
                 "vxch_mode": vxch_mode_str,
+                "seed": str(rng_seed),
             }.items(),
         )
     )
@@ -123,6 +125,7 @@ def _create_all_actions(context):
             launch_arguments={
                 "num_robots": str(num_robots),
                 "use_sim_time": use_sim_time_str,
+                "robot_startup_delay_s": str(robot_startup_delay_s),
             }.items(),
         )
     )
@@ -235,6 +238,9 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "rng_seed", default_value="-1",
                 description="RNG seed for DDIL packet-loss reproducibility (-1 = random)"),
+            DeclareLaunchArgument(
+                "robot_startup_delay_s", default_value="0.0",
+                description="Per-robot exploration startup stagger in seconds (robot N waits N * delay)"),
 
             # ── Forwarded simulation args ──────────────────────────────────
             DeclareLaunchArgument("world", default_value="bookstore"),

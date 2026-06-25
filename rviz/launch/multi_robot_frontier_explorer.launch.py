@@ -54,11 +54,12 @@ _PATH_COLORS_255 = [
 ]
 
 
-def _frontier_params(base_path, namespace, use_sim_time, autostart, control_service, color_255):
+def _frontier_params(base_path, namespace, use_sim_time, autostart, control_service, color_255, startup_delay_s):
     data = copy.deepcopy(_load_yaml(base_path))
     params = data.setdefault("frontier_explorer", {}).setdefault("ros__parameters", {})
     params["use_sim_time"] = use_sim_time
     params["autostart"] = autostart
+    params["startup_delay_s"] = startup_delay_s
     params["control_service_enabled"] = control_service
     params["map_topic"] = f"/{namespace}/nav_map"
     params["costmap_topic"] = f"/{namespace}/global_costmap/costmap"
@@ -83,6 +84,7 @@ def _create_explorer_actions(context):
     autostart = _bool_value(LaunchConfiguration("autostart").perform(context))
     control_service = _bool_value(LaunchConfiguration("control_service_enabled").perform(context))
     log_level = LaunchConfiguration("log_level").perform(context)
+    robot_startup_delay_s = float(LaunchConfiguration("robot_startup_delay_s").perform(context))
 
     if num_robots < 1:
         raise RuntimeError("num_robots must be at least 1")
@@ -98,6 +100,7 @@ def _create_explorer_actions(context):
             autostart,
             control_service,
             color_255,
+            startup_delay_s=index * robot_startup_delay_s,
         )
         actions.append(
             Node(
@@ -124,6 +127,9 @@ def generate_launch_description():
             DeclareLaunchArgument("autostart", default_value="true"),
             DeclareLaunchArgument("control_service_enabled", default_value="true"),
             DeclareLaunchArgument("log_level", default_value="info"),
+            DeclareLaunchArgument(
+                "robot_startup_delay_s", default_value="0.0",
+                description="Per-robot startup stagger: robot N waits N * robot_startup_delay_s seconds before starting exploration"),
             OpaqueFunction(function=_create_explorer_actions),
         ]
     )

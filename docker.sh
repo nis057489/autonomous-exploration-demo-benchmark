@@ -96,7 +96,7 @@ run_docker() {
 
   # Forward experiment parameters into the container.
   # Use -e VAR=value (not bare -e VAR) so sourced-but-unexported variables are forwarded.
-  for _var in MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS RANDOM_SEED; do
+  for _var in MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS RANDOM_SEED ROBOT_STARTUP_DELAY_S; do
     if [[ -n "${!_var:-}" ]]; then
       docker_args+=(-e "${_var}=${!_var}")
     fi

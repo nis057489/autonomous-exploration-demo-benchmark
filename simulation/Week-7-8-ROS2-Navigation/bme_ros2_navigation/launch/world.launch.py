@@ -62,7 +62,9 @@ def _resolve_world_path(pkg_bme_ros2_navigation, worlds_root, world_name):
 def _build_world_launch(context, pkg_ros_gz_sim, pkg_bme_ros2_navigation, worlds_root):
     selected_world = LaunchConfiguration('world').perform(context)
     world_path = _resolve_world_path(pkg_bme_ros2_navigation, worlds_root, selected_world)
-    gz_args = f'{world_path} -r -v -v1'
+    seed = int(LaunchConfiguration('seed').perform(context))
+    seed_flag = f' --seed {seed}' if seed >= 0 else ''
+    gz_args = f'{world_path} -r -v -v1{seed_flag}'
 
     return [
         IncludeLaunchDescription(
@@ -111,6 +113,11 @@ def generate_launch_description():
         default_value='bookstore',
         description="World name (e.g. 'bookstore', 'corridor') or absolute world file path",
     )
+    seed_arg = DeclareLaunchArgument(
+        'seed',
+        default_value='-1',
+        description='Gazebo physics RNG seed (-1 = non-deterministic)',
+    )
 
     world_launch = OpaqueFunction(
         function=_build_world_launch,
@@ -119,5 +126,6 @@ def generate_launch_description():
 
     launchDescriptionObject = LaunchDescription()
     launchDescriptionObject.add_action(world_arg)
+    launchDescriptionObject.add_action(seed_arg)
     launchDescriptionObject.add_action(world_launch)
     return launchDescriptionObject
