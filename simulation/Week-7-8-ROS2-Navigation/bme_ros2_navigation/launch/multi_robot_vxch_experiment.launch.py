@@ -122,6 +122,7 @@ def _create_all_actions(context):
                 "rviz": rviz,
                 "vxch_mode": vxch_mode_str,
                 "seed": str(rng_seed),
+                "spawn_positions_json": LaunchConfiguration("spawn_positions_json"),
             }.items(),
         )
     )
@@ -265,6 +266,10 @@ def generate_launch_description():
             DeclareLaunchArgument("spacing", default_value="0.8"),
             DeclareLaunchArgument("use_sim_time", default_value="True"),
             DeclareLaunchArgument("rviz", default_value="true"),
+            DeclareLaunchArgument(
+                "spawn_positions_json", default_value="[]",
+                description="JSON array of {x,y,yaw} dicts, one per robot. "
+                            "Empty array uses automatic grid/line offset."),
 
             OpaqueFunction(function=_create_all_actions),
         ]

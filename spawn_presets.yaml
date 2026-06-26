@@ -1,0 +1,56 @@
+# Robot spawn position presets.
+#
+# Structure: world → preset_name → list of {x, y, yaw} positions.
+# Robot N gets positions[N-1]; cycles if there are more robots than positions.
+#
+# Usage:
+#   SPAWN_PRESET=distributed NUM_ROBOTS=4 ./docker.sh corridor
+#
+# "default" preset: single base position matching the hardcoded defaults in launch.sh.
+#   Multi-robot runs with the default preset still use the automatic grid/line offset
+#   logic (the list is ignored for multi-robot when SPAWN_PRESET=default).
+#
+# "distributed" preset: each robot placed in a distinct section of the map so they
+#   explore independently without overlapping initial frontiers.
+#
+# Corridor layout reference (from corridor.world SDF):
+#   central corridor : x ∈ [-9, 9],      y ∈ [-2,   2]
+#   top-left room    : x ∈ [-6, -3],     y ∈ [ 2, 6.5]
+#   top-right room   : x ∈ [ 3,  6],     y ∈ [ 2, 6.5]
+#   bottom-left room : x ∈ [-5.6, -3.4], y ∈ [-6.5, -2]
+#   bottom-mid room  : x ∈ [-1.1,  1.1], y ∈ [-6.5, -2]
+#   bottom-right room: x ∈ [ 3.4,  5.6], y ∈ [-6.5, -2]
+#
+# Bookstore and warehouse positions are good starting points; tune against the map
+# if robots spawn inside walls.
+
+bookstore:
+  default:
+    - { x: 1.23, y: 6.35, yaw: -3.10 }
+  distributed:
+    - { x: 1.23, y: 6.35, yaw: -3.10 }
+    - { x: -5.00, y: 2.00, yaw: 0.00 }
+    - { x: 5.00, y: -3.00, yaw: 3.14 }
+    - { x: 0.00, y: -5.00, yaw: 1.57 }
+
+corridor:
+  default:
+    - { x: -8.11, y: 0.31, yaw: 0.00 }
+  distributed:
+    - { x: -7.00, y: 0.00, yaw: 0.0000 } # left corridor end
+    - { x: 7.00, y: 0.00, yaw: 3.1416 } # right corridor end
+    - { x: -4.50, y: 4.25, yaw: -1.5707 } # top-left room
+    - { x: 4.50, y: 4.25, yaw: 1.5707 } # top-right room
+    - { x: -4.50, y: -4.25, yaw: 1.5707 } # bottom-left room
+    - { x: 0.00, y: -4.25, yaw: 1.5707 } # bottom-mid room
+    - { x: 4.50, y: -4.25, yaw: 1.5707 } # bottom-right room
+    - { x: 0.00, y: 0.00, yaw: 0.0000 } # center corridor
+
+warehouse:
+  default:
+    - { x: -12.97, y: 8.23, yaw: 1.58 }
+  distributed:
+    - { x: -12.97, y: 8.23, yaw: 1.58 }
+    - { x: 3.34, y: -23.54, yaw: 1.58 }
+    - { x: 1.16, y: 13.22, yaw: 1.58 }
+    - { x: 11.09, y: -10.31, yaw: -1.58 }

@@ -1,4 +1,5 @@
 import copy
+import json
 import math
 import os
 import tempfile
@@ -514,6 +515,8 @@ def _create_multi_robot_actions(context):
     yaw = float(LaunchConfiguration("yaw").perform(context))
     spacing = float(LaunchConfiguration("spacing").perform(context))
     vxch_mode = _bool_value(LaunchConfiguration("vxch_mode").perform(context))
+    spawn_positions_raw = LaunchConfiguration("spawn_positions_json").perform(context)
+    spawn_positions = json.loads(spawn_positions_raw) if spawn_positions_raw else []
 
     if num_robots < 1:
         raise RuntimeError("num_robots must be at least 1")
@@ -545,9 +548,16 @@ def _create_multi_robot_actions(context):
     )
 
     for index, namespace in enumerate(namespaces):
-        robot_x, robot_y, robot_z, robot_yaw = _robot_pose(
-            index, num_robots, x, y, z, yaw, spacing, world
-        )
+        if spawn_positions:
+            pos = spawn_positions[index % len(spawn_positions)]
+            robot_x = float(pos["x"])
+            robot_y = float(pos["y"])
+            robot_z = z
+            robot_yaw = float(pos.get("yaw", yaw))
+        else:
+            robot_x, robot_y, robot_z, robot_yaw = _robot_pose(
+                index, num_robots, x, y, z, yaw, spacing, world
+            )
         robot_offsets_x.append(robot_x)
         robot_offsets_y.append(robot_y)
         robot_offsets_yaw.append(robot_yaw)
@@ -842,6 +852,10 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "vxch_mode", default_value="false",
                 description="Suppress per-robot global_map publishing (VXCH decoder takes over)"),
+            DeclareLaunchArgument(
+                "spawn_positions_json", default_value="[]",
+                description="JSON array of {x,y,yaw} dicts, one per robot. "
+                            "Empty array uses automatic grid/line offset."),
             world_launch,
             OpaqueFunction(function=_create_multi_robot_actions),
         ]

@@ -104,6 +104,46 @@ if [[ "${WORLD}" == "warehouse" ]]; then
   SPAWN_YAW="1.58"
 fi
 
+SPAWN_PRESET="${SPAWN_PRESET:-default}"
+SPAWN_PRESETS_FILE="${PROJECT_ROOT}/spawn_presets.yaml"
+
+# Load per-robot spawn positions from config file.
+# Returns a JSON array like [{"x":1.0,"y":2.0,"yaw":0.0}, ...].
+# Empty array ("[]") means "use the default grid/line offset logic".
+SPAWN_POSITIONS_JSON="[]"
+if [[ -f "${SPAWN_PRESETS_FILE}" ]]; then
+  SPAWN_POSITIONS_JSON=$(WORLD="${WORLD}" SPAWN_PRESET="${SPAWN_PRESET}" \
+    SPAWN_PRESETS_FILE="${SPAWN_PRESETS_FILE}" python3 - <<'PYEOF'
+import yaml, json, os, sys
+world  = os.environ["WORLD"]
+preset = os.environ["SPAWN_PRESET"]
+path   = os.environ["SPAWN_PRESETS_FILE"]
+with open(path) as f:
+    data = yaml.safe_load(f)
+positions = data.get(world, {}).get(preset)
+if positions is None:
+    if preset != "default":
+        print(f"[spawn_presets] WARNING: preset '{preset}' not found for world '{world}'."
+              " Falling back to default spawn.", file=sys.stderr)
+    positions = []
+print(json.dumps(positions))
+PYEOF
+  )
+fi
+
+# For single robot: override base coords from the first preset position (if any).
+# The "default" preset either has no entry or its entry matches the hardcoded values,
+# so this is a no-op for normal runs.
+if [[ "${NUM_ROBOTS}" == "1" ]] && [[ "${SPAWN_POSITIONS_JSON}" != "[]" ]]; then
+  read -r SPAWN_X SPAWN_Y SPAWN_YAW < <(SPAWN_POSITIONS_JSON="${SPAWN_POSITIONS_JSON}" python3 - <<'PYEOF'
+import json, os
+p = json.loads(os.environ["SPAWN_POSITIONS_JSON"])
+if p:
+    print(p[0]["x"], p[0]["y"], p[0].get("yaw", 0))
+PYEOF
+  )
+fi
+
 # Verify critical overlay packages before launching anything.
 if ! ros2 pkg prefix bme_ros2_navigation >/dev/null 2>&1; then
   echo "Workspace overlay is not available. Expected package 'bme_ros2_navigation' was not found." >&2
@@ -195,7 +235,8 @@ if (( NUM_ROBOTS > 1 )); then
     delay_ms:="${DELAY_MS}" \
     haar_levels:="${HAAR_LEVELS}" \
     rng_seed:="${RANDOM_SEED}" \
-    robot_startup_delay_s:="${ROBOT_STARTUP_DELAY_S}" &
+    robot_startup_delay_s:="${ROBOT_STARTUP_DELAY_S}" \
+    spawn_positions_json:="${SPAWN_POSITIONS_JSON}" &
   STACK_PID=$!
 
   echo "multi_robot_vxch_experiment.launch.py started (pid=${STACK_PID}, world=${WORLD}, robot=${ROBOT}, num_robots=${NUM_ROBOTS}, map_transport=${MAP_TRANSPORT}, bandwidth_kbps=${BANDWIDTH_KBPS}, loss_pct=${LOSS_PCT}, delay_ms=${DELAY_MS}, rng_seed=${RANDOM_SEED})."

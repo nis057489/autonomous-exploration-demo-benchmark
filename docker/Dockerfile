@@ -118,6 +118,7 @@ RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
 COPY launch.sh launch.sh
 COPY launch_real_hardware.sh launch_real_hardware.sh
 COPY docker.sh docker.sh
+COPY spawn_presets.yaml spawn_presets.yaml
 COPY experiment.conf experiment.conf
 
 RUN chmod +x ${WORKSPACE_DIR}/launch.sh ${WORKSPACE_DIR}/docker/entrypoint.sh
