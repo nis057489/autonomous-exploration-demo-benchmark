@@ -1,0 +1,58 @@
+slam_toolbox:
+  ros__parameters:
+    # ── Solver ───────────────────────────────────────────────────────────
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_footprint
+    scan_topic: /scan
+    use_scan_matching: true
+    use_scan_barycenter: true
+    mode: mapping
+
+    use_sim_time: false
+    # Looser TF timeout to tolerate real-hardware latency.
+    transform_timeout: 0.5
+    tf_buffer_duration: 30.0
+    map_update_interval: 0.5
+
+    # LDS-01 max range is 3.5 m; LDS-02 is 8.0 m. Set to whichever sensor
+    # is fitted — scans beyond this distance are ignored by the matcher.
+    max_laser_range: 3.5
+    minimum_travel_distance: 0.1
+    minimum_travel_heading: 0.1
+    scan_buffer_size: 20
+    scan_buffer_maximum_scan_distance: 3.5
+    link_match_minimum_response_fine: 0.25
+    link_scan_maximum_distance: 1.5
+
+    loop_search_maximum_distance: 3.0
+    do_loop_closing: true
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45
+
+    correlation_search_space_dimension: 0.8
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.1
+
+    loop_search_space_dimension: 8.0
+    loop_search_space_resolution: 0.05
+    loop_search_space_smear_deviation: 0.03
+
+    resolution: 0.05
+    max_submaps: 15
+
+    debug_logging: false
+    throttle_scans: 1
+    enable_interactive_mode: false
+    use_lifecycle_manager: false
+    use_response_expansion: true
+    stack_size_to_use: 40000000
