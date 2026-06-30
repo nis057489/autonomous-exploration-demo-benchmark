@@ -97,7 +97,9 @@ if ! ros2 pkg prefix bme_ros2_navigation >/dev/null 2>&1 || \
   echo "Local packages not built. Running colcon build..."
   (
     cd "${PROJECT_ROOT}"
-    colcon build --symlink-install
+    colcon build --symlink-install --packages-select \
+      bme_ros2_navigation bme_ros2_navigation_py \
+      rviz_autonomous_exploration_benchmark
   )
 fi
 
