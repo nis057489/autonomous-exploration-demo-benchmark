@@ -97,8 +97,8 @@ frontier_explorer:
     goal_preemption_enabled: true
 
     # Minimum seconds between consecutive goal preemption attempts.
-    # Also effects performance.
-    goal_preemption_min_interval_s: 2.0
+    # Waffle Pi at 0.22 m/s needs ~15 s to travel 3 m — preempting faster just causes churn.
+    goal_preemption_min_interval_s: 20.0
 
     # Skip the active frontier goal if it becomes blocked.
     goal_skip_on_blocked_goal: true
