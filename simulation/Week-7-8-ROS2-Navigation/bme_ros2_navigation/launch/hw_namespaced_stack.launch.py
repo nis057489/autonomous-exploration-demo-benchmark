@@ -146,7 +146,7 @@ def _patch_nav_params(base_path, namespace, output_dir):
     ds["base_frame"] = base_link
     ds["fixed_frame"] = odom
 
-    return _write_yaml(output_dir, f"{namespace}_navigation.yaml", {namespace: data})
+    return _write_yaml(output_dir, f"{namespace}_navigation.yaml", data)
 
 
 def _patch_explore_params(base_path, namespace, output_dir):
@@ -318,19 +318,16 @@ def _create_actions(context):
         TimerAction(
             period=nav2_delay,
             actions=[
-                GroupAction(actions=[
-                    PushROSNamespace(namespace),
-                    IncludeLaunchDescription(
-                        PythonLaunchDescriptionSource(nav2_launch),
-                        launch_arguments={
-                            "namespace": "",
-                            "use_namespace": "False",
-                            "use_sim_time": "false",
-                            "params_file": nav_cfg,
-                            "autostart": "True",
-                        }.items(),
-                    ),
-                ])
+                IncludeLaunchDescription(
+                    PythonLaunchDescriptionSource(nav2_launch),
+                    launch_arguments={
+                        "namespace": namespace,
+                        "use_namespace": "True",
+                        "use_sim_time": "false",
+                        "params_file": nav_cfg,
+                        "autostart": "True",
+                    }.items(),
+                )
             ],
         )
     )
