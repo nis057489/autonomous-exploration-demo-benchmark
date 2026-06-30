@@ -268,7 +268,7 @@ echo "frontier_path_tracker.py started (pid=${TRACKER_PID})."
 
 EXPLORE_CONFIG="${PROJECT_ROOT}/config/frontier_exploration_ros2/config.yaml"
 echo "Starting frontier_exploration_ros2 (params=${EXPLORE_CONFIG})..."
-ros2 launch frontier_exploration_ros2 explore.launch.py \
+ros2 launch frontier_exploration_ros2 frontier_explorer.launch.py \
   use_sim_time:=false \
   params_file:="${EXPLORE_CONFIG}" &
 EXPLORE_PID=$!
