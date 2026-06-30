@@ -146,7 +146,7 @@ def _patch_nav_params(base_path, namespace, output_dir):
     ds["base_frame"] = base_link
     ds["fixed_frame"] = odom
 
-    return _write_yaml(output_dir, f"{namespace}_navigation.yaml", {namespace: data})
+    return _write_yaml(output_dir, f"{namespace}_navigation.yaml", data)
 
 
 def _patch_explore_params(base_path, namespace, output_dir):
