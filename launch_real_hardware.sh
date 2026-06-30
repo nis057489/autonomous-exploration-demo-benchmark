@@ -90,6 +90,17 @@ export TURTLEBOT3_MODEL="${TB3_MODEL}"
 # ── ROS setup ────────────────────────────────────────────────────────────────
 
 source /opt/ros/jazzy/setup.bash
+
+# Build all local packages if any are missing.
+if ! ros2 pkg prefix bme_ros2_navigation >/dev/null 2>&1 || \
+   ! ros2 pkg prefix rviz_autonomous_exploration_benchmark >/dev/null 2>&1; then
+  echo "Local packages not built. Running colcon build..."
+  (
+    cd "${PROJECT_ROOT}"
+    colcon build --symlink-install
+  )
+fi
+
 if [[ -f "${PROJECT_ROOT}/install/setup.bash" ]]; then
   source "${PROJECT_ROOT}/install/setup.bash"
 fi
@@ -191,11 +202,43 @@ ensure_topic_tools() {
   echo "topic_tools installed successfully."
 }
 
+ensure_rviz_benchmark() {
+  if ros2 pkg prefix rviz_autonomous_exploration_benchmark >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Package 'rviz_autonomous_exploration_benchmark' not found. Building from source..."
+
+  local src="${PROJECT_ROOT}/rviz"
+
+  if [[ ! -d "${src}" ]]; then
+    echo "Source directory '${src}' not found." >&2
+    exit 1
+  fi
+
+  echo "Building rviz_autonomous_exploration_benchmark (this may take a minute)..."
+  (
+    cd "${PROJECT_ROOT}"
+    colcon build --packages-select rviz_autonomous_exploration_benchmark --symlink-install
+  )
+
+  # shellcheck source=/dev/null
+  source "${PROJECT_ROOT}/install/setup.bash"
+
+  if ! ros2 pkg prefix rviz_autonomous_exploration_benchmark >/dev/null 2>&1; then
+    echo "Build succeeded but 'rviz_autonomous_exploration_benchmark' is still not found — check build output above." >&2
+    exit 1
+  fi
+
+  echo "rviz_autonomous_exploration_benchmark installed successfully."
+}
+
 check_pkg slam_toolbox
 check_pkg nav2_bringup
 ensure_topic_tools
 ensure_frontier_exploration_ros2
 ensure_bme_ros2_navigation
+ensure_rviz_benchmark
 
 if [[ "${LOCAL_BRINGUP}" == true ]]; then
   check_pkg turtlebot3_bringup
