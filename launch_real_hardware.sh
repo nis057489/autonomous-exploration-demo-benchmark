@@ -100,9 +100,44 @@ check_pkg() {
   fi
 }
 
+ensure_frontier_exploration_ros2() {
+  if ros2 pkg prefix frontier_exploration_ros2 >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Package 'frontier_exploration_ros2' not found. Installing from source..."
+
+  local src_dir="${PROJECT_ROOT}/src/frontier_exploration_ros2"
+  mkdir -p "${PROJECT_ROOT}/src"
+
+  if [[ -d "${src_dir}/.git" ]]; then
+    echo "Source directory exists; pulling latest..."
+    git -C "${src_dir}" pull --ff-only
+  else
+    git clone https://github.com/nis057489/frontier_exploration_ros2.git "${src_dir}"
+  fi
+
+  echo "Building frontier_exploration_ros2 (this may take a minute)..."
+  (
+    cd "${PROJECT_ROOT}"
+    colcon build --packages-select frontier_exploration_ros2 --symlink-install
+  )
+
+  # Re-source workspace so the newly built package is visible.
+  # shellcheck source=/dev/null
+  source "${PROJECT_ROOT}/install/setup.bash"
+
+  if ! ros2 pkg prefix frontier_exploration_ros2 >/dev/null 2>&1; then
+    echo "Build succeeded but 'frontier_exploration_ros2' is still not found — check build output above." >&2
+    exit 1
+  fi
+
+  echo "frontier_exploration_ros2 installed successfully."
+}
+
 check_pkg slam_toolbox
 check_pkg nav2_bringup
-check_pkg frontier_exploration_ros2
+ensure_frontier_exploration_ros2
 
 if [[ "${LOCAL_BRINGUP}" == true ]]; then
   check_pkg turtlebot3_bringup
