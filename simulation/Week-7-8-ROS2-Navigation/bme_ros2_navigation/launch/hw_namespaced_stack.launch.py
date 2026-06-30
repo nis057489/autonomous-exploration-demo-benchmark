@@ -22,14 +22,14 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
-    GroupAction,
+
     IncludeLaunchDescription,
     OpaqueFunction,
     TimerAction,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node, PushROSNamespace
+from launch_ros.actions import Node
 
 
 # ── YAML helpers ──────────────────────────────────────────────────────────────
@@ -236,7 +236,6 @@ def _create_actions(context):
                 package="tf2_ros",
                 executable="static_transform_publisher",
                 name=tf_name,
-                namespace=namespace,
                 arguments=[
                     "--x", str(spawn_x),
                     "--y", str(spawn_y),
@@ -249,7 +248,6 @@ def _create_actions(context):
                 ],
                 output="screen",
                 parameters=[{"use_sim_time": False}],
-                remappings=[("/tf_static", "tf_static")],
             )
         )
 
@@ -299,16 +297,13 @@ def _create_actions(context):
         TimerAction(
             period=slam_delay,
             actions=[
-                GroupAction(actions=[
-                    PushROSNamespace(namespace),
-                    IncludeLaunchDescription(
-                        PythonLaunchDescriptionSource(slam_launch),
-                        launch_arguments={
-                            "use_sim_time": "false",
-                            "slam_params_file": slam_cfg,
-                        }.items(),
-                    ),
-                ])
+                IncludeLaunchDescription(
+                    PythonLaunchDescriptionSource(slam_launch),
+                    launch_arguments={
+                        "use_sim_time": "false",
+                        "slam_params_file": slam_cfg,
+                    }.items(),
+                )
             ],
         )
     )
@@ -338,10 +333,8 @@ def _create_actions(context):
             package="frontier_exploration_ros2",
             executable="frontier_explorer",
             name="frontier_explorer",
-            namespace=namespace,
             output="screen",
             parameters=[explore_cfg, {"use_sim_time": False}],
-            remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
         )
     )
 
