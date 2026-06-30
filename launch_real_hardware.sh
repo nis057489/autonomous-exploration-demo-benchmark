@@ -245,8 +245,8 @@ ros2 launch "${SLAM_LAUNCH}" \
   use_sim_time:=false \
   slam_params_file:="${SLAM_PARAMS}" &
 SLAM_PID=$!
-echo "SLAM started (pid=${SLAM_PID}). Waiting 3 seconds..."
-sleep 3
+echo "SLAM started (pid=${SLAM_PID}). Waiting 8 seconds for first map publication..."
+sleep 8
 
 echo "Starting Nav2 (use_sim_time=false)..."
 ros2 launch "${NAV2_LAUNCH}" \

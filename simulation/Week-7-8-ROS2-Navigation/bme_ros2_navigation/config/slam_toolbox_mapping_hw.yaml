@@ -24,8 +24,8 @@ slam_toolbox:
 
     # LDS-02 (ld08_driver) max range is 8.0 m.
     max_laser_range: 8.0
-    minimum_travel_distance: 0.1
-    minimum_travel_heading: 0.1
+    minimum_travel_distance: 0.0
+    minimum_travel_heading: 0.0
     scan_buffer_size: 20
     scan_buffer_maximum_scan_distance: 8.0
     link_match_minimum_response_fine: 0.25
