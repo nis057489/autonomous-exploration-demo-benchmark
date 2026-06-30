@@ -207,13 +207,10 @@ def _create_actions(context):
     if local_bringup:
         tb3_cfg = _patch_tb3_params(tb3_model, namespace, output_dir)
         actions.append(
-            GroupAction(actions=[
-                PushROSNamespace(namespace),
-                IncludeLaunchDescription(
-                    PythonLaunchDescriptionSource(tb3_launch),
-                    launch_arguments={"param_file": tb3_cfg}.items(),
-                ),
-            ])
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(tb3_launch),
+                launch_arguments={"param_file": tb3_cfg}.items(),
+            )
         )
 
     # ── 2. TF frame renamer: /{namespace}/tf → /tf with namespaced frame IDs ─
