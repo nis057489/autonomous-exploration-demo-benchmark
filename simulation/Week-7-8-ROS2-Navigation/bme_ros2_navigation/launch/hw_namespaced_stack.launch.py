@@ -203,35 +203,31 @@ def _create_actions(context):
 
     actions = []
 
-    # ── 1. turtlebot3_bringup (optional) ──────────────────────────────────────
+    # ── 1. turtlebot3_bringup (optional, namespaced so its TF goes to /{ns}/tf)
     if local_bringup:
         tb3_cfg = _patch_tb3_params(tb3_model, namespace, output_dir)
         actions.append(
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(tb3_launch),
-                launch_arguments={"params_file": tb3_cfg}.items(),
-            )
+            GroupAction(actions=[
+                PushROSNamespace(namespace),
+                IncludeLaunchDescription(
+                    PythonLaunchDescriptionSource(tb3_launch),
+                    launch_arguments={"param_file": tb3_cfg}.items(),
+                ),
+            ])
         )
 
-    # ── 2. TF relays: /{namespace}/tf → /tf ──────────────────────────────────
-    actions.extend([
+    # ── 2. TF frame renamer: /{namespace}/tf → /tf with namespaced frame IDs ─
+    # Replaces simple topic relay — also renames bare frames (odom, base_*)
+    # to {namespace}/odom, {namespace}/base_* so multiple robots can share /tf.
+    actions.append(
         Node(
-            package="topic_tools",
-            executable="relay",
-            name=f"{namespace}_tf_relay",
-            arguments=[f"/{namespace}/tf", "/tf"],
+            package="bme_ros2_navigation_py",
+            executable="tf_frame_renamer",
+            name=f"tf_frame_renamer_{namespace}",
             output="screen",
-            parameters=[{"use_sim_time": False}],
-        ),
-        Node(
-            package="topic_tools",
-            executable="relay",
-            name=f"{namespace}_tf_static_relay",
-            arguments=[f"/{namespace}/tf_static", "/tf_static"],
-            output="screen",
-            parameters=[{"use_sim_time": False}],
-        ),
-    ])
+            parameters=[{"namespace": namespace, "use_sim_time": False}],
+        )
+    )
 
     # ── 3. Static transforms: map → {namespace}/odom and map → {namespace}/map
     for child_frame, tf_name in [
