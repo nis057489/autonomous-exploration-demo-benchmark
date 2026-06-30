@@ -18,7 +18,7 @@ bt_navigator:
 
 controller_server:
   ros__parameters:
-    controller_frequency: 10.0
+    controller_frequency: 12.5
     costmap_update_timeout: 0.30
     min_x_velocity_threshold: 0.03
     min_y_velocity_threshold: 0.5
