@@ -139,9 +139,42 @@ ensure_frontier_exploration_ros2() {
   echo "frontier_exploration_ros2 installed successfully."
 }
 
+ensure_bme_ros2_navigation() {
+  if ros2 pkg prefix bme_ros2_navigation >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Package 'bme_ros2_navigation' not found. Building from source..."
+
+  local nav_src="${PROJECT_ROOT}/simulation/Week-7-8-ROS2-Navigation"
+
+  if [[ ! -d "${nav_src}/bme_ros2_navigation" ]]; then
+    echo "Source directory '${nav_src}/bme_ros2_navigation' not found." >&2
+    exit 1
+  fi
+
+  echo "Building bme_ros2_navigation (this may take a minute)..."
+  (
+    cd "${PROJECT_ROOT}"
+    colcon build --packages-select bme_ros2_navigation bme_ros2_navigation_py \
+      --symlink-install
+  )
+
+  # shellcheck source=/dev/null
+  source "${PROJECT_ROOT}/install/setup.bash"
+
+  if ! ros2 pkg prefix bme_ros2_navigation >/dev/null 2>&1; then
+    echo "Build succeeded but 'bme_ros2_navigation' is still not found — check build output above." >&2
+    exit 1
+  fi
+
+  echo "bme_ros2_navigation installed successfully."
+}
+
 check_pkg slam_toolbox
 check_pkg nav2_bringup
 ensure_frontier_exploration_ros2
+ensure_bme_ros2_navigation
 
 if [[ "${LOCAL_BRINGUP}" == true ]]; then
   check_pkg turtlebot3_bringup
