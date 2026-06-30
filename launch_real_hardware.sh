@@ -42,6 +42,10 @@ DELAY_MS="${DELAY_MS:-0}"
 HAAR_LEVELS="${HAAR_LEVELS:-4}"
 RANDOM_SEED="${RANDOM_SEED:--1}"
 ROBOT_STARTUP_DELAY_S="${ROBOT_STARTUP_DELAY_S:-0.0}"
+ROBOT_ID="${ROBOT_ID:-}"
+SPAWN_X="${SPAWN_X:-0.0}"
+SPAWN_Y="${SPAWN_Y:-0.0}"
+SPAWN_YAW="${SPAWN_YAW:-0.0}"
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 
@@ -224,8 +228,32 @@ if (( NUM_ROBOTS > 1 )); then
   exit $?
 fi
 
-# ── 1) Optional: local TurtleBot3 bringup ────────────────────────────────────
+# ── Single-robot path ────────────────────────────────────────────────────────
 
+EXPLORE_CONFIG="${PROJECT_ROOT}/config/frontier_exploration_ros2/config.yaml"
+
+if [[ -n "${ROBOT_ID}" ]]; then
+  # ── Namespaced mode: ROBOT_ID=N ./launch_real_hardware.sh ──────────────────
+  NAMESPACE="robot${ROBOT_ID}"
+  echo "Namespaced mode: namespace=${NAMESPACE}, spawn=(${SPAWN_X}, ${SPAWN_Y}, yaw=${SPAWN_YAW})"
+
+  ros2 launch bme_ros2_navigation hw_namespaced_stack.launch.py \
+    namespace:="${NAMESPACE}" \
+    nav_params_file:="${NAVIGATION_PARAMS}" \
+    slam_params_file:="${SLAM_PARAMS}" \
+    explore_config:="${EXPLORE_CONFIG}" \
+    local_bringup:="${LOCAL_BRINGUP}" \
+    tb3_model:="${TB3_MODEL}" \
+    spawn_x:="${SPAWN_X}" \
+    spawn_y:="${SPAWN_Y}" \
+    spawn_yaw:="${SPAWN_YAW}"
+
+  exit $?
+fi
+
+# ── Non-namespaced single-robot mode (original behaviour) ────────────────────
+
+# 1) Optional: local TurtleBot3 bringup
 BRINGUP_PID=""
 if [[ "${LOCAL_BRINGUP}" == true ]]; then
   echo "Starting turtlebot3_bringup (model=${TB3_MODEL})..."
@@ -235,8 +263,7 @@ if [[ "${LOCAL_BRINGUP}" == true ]]; then
   sleep 5
 fi
 
-# ── 2) SLAM Toolbox + Nav2 ───────────────────────────────────────────────────
-
+# 2) SLAM Toolbox + Nav2
 SLAM_LAUNCH="$(ros2 pkg prefix slam_toolbox)/share/slam_toolbox/launch/online_async_launch.py"
 NAV2_LAUNCH="$(ros2 pkg prefix nav2_bringup)/share/nav2_bringup/launch/navigation_launch.py"
 
@@ -255,8 +282,7 @@ ros2 launch "${NAV2_LAUNCH}" \
 NAV_PID=$!
 echo "Nav2 started (pid=${NAV_PID})."
 
-# ── 3) Path tracker ──────────────────────────────────────────────────────────
-
+# 3) Path tracker
 ros2 run rviz_autonomous_exploration_benchmark frontier_path_tracker.py \
   --ros-args \
   --params-file "${TRACKER_PARAMS}" \
@@ -264,17 +290,13 @@ ros2 run rviz_autonomous_exploration_benchmark frontier_path_tracker.py \
 TRACKER_PID=$!
 echo "frontier_path_tracker.py started (pid=${TRACKER_PID})."
 
-# ── 4) Frontier exploration ───────────────────────────────────────────────────
-
-EXPLORE_CONFIG="${PROJECT_ROOT}/config/frontier_exploration_ros2/config.yaml"
+# 4) Frontier exploration
 echo "Starting frontier_exploration_ros2 (params=${EXPLORE_CONFIG})..."
 ros2 launch frontier_exploration_ros2 frontier_explorer.launch.py \
   use_sim_time:=false \
   params_file:="${EXPLORE_CONFIG}" &
 EXPLORE_PID=$!
 echo "frontier_exploration_ros2 started (pid=${EXPLORE_PID})."
-
-# ── Done ─────────────────────────────────────────────────────────────────────
 
 echo ""
 echo "Full stack is running. Press Ctrl+C to stop all."
