@@ -63,6 +63,10 @@ frontier_explorer:
     # Start exploration immediately at launch.
     autostart: true
 
+    # Wait this many seconds after node start before sending the first goal,
+    # giving Nav2 time to finish configuring its lifecycle nodes.
+    startup_delay_s: 15.0
+
     # Keep the optional runtime control service available for manual stop/start flows.
     control_service_enabled: false
 
@@ -135,13 +139,13 @@ frontier_explorer:
     # It does not command the robot directly; it estimates how fast a frontier
     # can be reached when building the first row of the cost matrix.
     # Larger values reduce the time penalty of distant frontiers.
-    max_linear_speed_vmax: 0.5
+    max_linear_speed_vmax: 0.22
 
     # Max angular speed used in the heading-change part of time lower bound.
     # This matters most when candidate frontiers require large initial turns.
     # Larger values reduce the penalty of reorientation-heavy options.
     # Example: low values prefer frontiers already near the current heading.
-    max_angular_speed_wmax: 1.0
+    max_angular_speed_wmax: 1.8
 
     # Effective sensor range subtracted inside the paper's path-cost term.
     # Larger values reduce the effective traversal penalty between frontiers.
@@ -211,7 +215,7 @@ frontier_explorer:
     goal_preemption_complete_if_within_m: 0.50
 
     # LiDAR range in meters used by the map-based visible reveal gate above.
-    goal_preemption_lidar_range_m: 10.0
+    goal_preemption_lidar_range_m: 8.0
 
     # LiDAR field of view in degrees used by the visible reveal gate above.
     goal_preemption_lidar_fov_deg: 360.0
