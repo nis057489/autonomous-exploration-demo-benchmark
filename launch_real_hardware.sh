@@ -171,8 +171,29 @@ ensure_bme_ros2_navigation() {
   echo "bme_ros2_navigation installed successfully."
 }
 
+ensure_topic_tools() {
+  if ros2 pkg prefix topic_tools >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Package 'topic_tools' not found. Installing via apt..."
+  sudo apt-get update -qq
+  sudo apt-get install -y ros-jazzy-topic-tools
+
+  # shellcheck source=/dev/null
+  source /opt/ros/jazzy/setup.bash
+
+  if ! ros2 pkg prefix topic_tools >/dev/null 2>&1; then
+    echo "Install succeeded but 'topic_tools' is still not found — check apt output above." >&2
+    exit 1
+  fi
+
+  echo "topic_tools installed successfully."
+}
+
 check_pkg slam_toolbox
 check_pkg nav2_bringup
+ensure_topic_tools
 ensure_frontier_exploration_ros2
 ensure_bme_ros2_navigation
 
