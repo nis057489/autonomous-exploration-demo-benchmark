@@ -52,16 +52,19 @@ class TFFrameRenamer(Node):
         self._pub_tf_ns = self.create_publisher(TFMessage, f"/{ns}/tf", reliable)
         self._pub_static = self.create_publisher(TFMessage, "/tf_static", latching)
 
-        self.create_subscription(TFMessage, f"/{ns}/tf", self._cb_tf, best_effort)
-        self.create_subscription(TFMessage, f"/{ns}/tf_static", self._cb_static, latching)
+        # C++ TransformBroadcaster always publishes to absolute /tf and /tf_static,
+        # regardless of ROS_NAMESPACE. Subscribe globally and filter by frame name.
+        self.create_subscription(TFMessage, "/tf", self._cb_tf, best_effort)
+        self.create_subscription(TFMessage, "/tf_static", self._cb_static, latching)
 
         self.get_logger().info(
-            f"tf_frame_renamer: subscribing to /{ns}/tf[_static], "
+            f"tf_frame_renamer: subscribing to /tf[_static] (global), "
             f"publishing to /tf, /{ns}/tf, /tf_static. prefix='{self._prefix}'"
         )
 
     def _rename_frame(self, frame: str) -> str:
-        if frame in _GLOBAL_FRAMES or frame.startswith(self._prefix):
+        # Skip global frames and any frame that is already namespaced (contains /)
+        if frame in _GLOBAL_FRAMES or "/" in frame:
             return frame
         return self._prefix + frame
 
