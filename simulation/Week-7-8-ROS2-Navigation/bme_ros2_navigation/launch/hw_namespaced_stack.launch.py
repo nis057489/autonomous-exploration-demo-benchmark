@@ -209,7 +209,7 @@ def _create_actions(context):
         actions.append(
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(tb3_launch),
-                launch_arguments={"param_file": tb3_cfg}.items(),
+                launch_arguments={"tb3_param_dir": tb3_cfg}.items(),
             )
         )
 
