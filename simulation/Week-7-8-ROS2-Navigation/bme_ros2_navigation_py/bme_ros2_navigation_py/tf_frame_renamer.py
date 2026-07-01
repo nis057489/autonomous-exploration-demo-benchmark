@@ -4,15 +4,16 @@ Subscribes to /{namespace}/tf and /{namespace}/tf_static, prefixes any bare
 (non-namespaced, non-global) frame IDs with the robot namespace, then
 republishes to /tf, /{namespace}/tf, and /tf_static.
 
-Publishing to both /tf (global) and /{ns}/tf (namespaced) is necessary because:
-- C++ tf2_ros::TransformListener (Nav2) subscribes to relative "tf" → /{ns}/tf
-- Python tf2_ros.TransformListener (frontier_path_tracker, RViz) subscribes to /tf
+Two publish targets for dynamic TF:
+  /tf            — global, for Python tf2_ros listeners (RViz, frontier_path_tracker)
+  /{ns}/tf       — namespaced, for C++ tf2_ros listeners (Nav2 costmap etc.)
 
-Usage:
-  ros2 run bme_ros2_navigation_py tf_frame_renamer --ros-args \
-      -p namespace:=robot1
+Loop guard: we track the renamed-message signature (stamp+child_frame_id) of each
+message we publish. When we receive our own republish on /{ns}/tf the signature
+matches the cache → skip.
 """
 
+import collections
 import copy
 import sys
 
@@ -21,9 +22,9 @@ from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from tf2_msgs.msg import TFMessage
 
-# Frames that belong to the shared global coordinate system and should
-# never be prefixed with the robot namespace.
 _GLOBAL_FRAMES = {"map", "world", "earth"}
+
+_SIG_CACHE_SIZE = 500  # stamps to remember for loop detection
 
 
 class TFFrameRenamer(Node):
@@ -36,9 +37,9 @@ class TFFrameRenamer(Node):
             sys.exit(1)
 
         self._prefix = ns + "/"
+        # OrderedDict keeps insertion order so we can evict oldest entries cheaply.
+        self._seen_sigs: collections.OrderedDict = collections.OrderedDict()
 
-        # RELIABLE publisher satisfies both RELIABLE (Python TF, RViz) and
-        # BEST_EFFORT (C++ Nav2 TF) subscribers.
         reliable = QoSProfile(
             depth=100,
             reliability=QoSReliabilityPolicy.RELIABLE,
@@ -55,20 +56,15 @@ class TFFrameRenamer(Node):
             durability=QoSDurabilityPolicy.VOLATILE,
         )
 
-        # Global /tf — for Python TF listeners and RViz
+        # Dynamic TF publishers
         self._pub_tf = self.create_publisher(TFMessage, "/tf", reliable)
-        # Namespaced /{ns}/tf — for Nav2 C++ TF listeners (relative "tf" subscription)
         self._pub_tf_ns = self.create_publisher(TFMessage, f"/{ns}/tf", reliable)
-        # Global /tf_static — relayed from /{ns}/tf_static
+        # Static TF publisher
         self._pub_static = self.create_publisher(TFMessage, "/tf_static", latching)
 
-        # BEST_EFFORT subscription receives from any publisher reliability level.
-        self.create_subscription(
-            TFMessage, f"/{ns}/tf", self._cb_tf, best_effort
-        )
-        self.create_subscription(
-            TFMessage, f"/{ns}/tf_static", self._cb_static, latching
-        )
+        # Subscribe to /{ns}/tf with BEST_EFFORT to receive from any publisher reliability.
+        self.create_subscription(TFMessage, f"/{ns}/tf", self._cb_tf, best_effort)
+        self.create_subscription(TFMessage, f"/{ns}/tf_static", self._cb_static, latching)
 
         self.get_logger().info(
             f"tf_frame_renamer: relaying /{ns}/tf[_static] → /tf[_static] and /{ns}/tf, "
@@ -89,19 +85,26 @@ class TFFrameRenamer(Node):
             out.transforms.append(new_t)
         return out
 
-    def _any_renamed(self, original: TFMessage, renamed: TFMessage) -> bool:
-        """Return True if any frame ID was actually changed by renaming."""
-        for orig_t, new_t in zip(original.transforms, renamed.transforms):
-            if (orig_t.header.frame_id != new_t.header.frame_id or
-                    orig_t.child_frame_id != new_t.child_frame_id):
-                return True
-        return False
+    def _msg_sig(self, msg: TFMessage):
+        """Fingerprint based on (stamp, child_frame_id) of each transform."""
+        return tuple(
+            (t.header.stamp.sec, t.header.stamp.nanosec, t.child_frame_id)
+            for t in msg.transforms
+        )
 
     def _cb_tf(self, msg: TFMessage) -> None:
         renamed = self._rename_msg(msg)
-        if not self._any_renamed(msg, renamed):
-            # All frames already namespaced — this is our own republish; skip to break loop.
+        sig = self._msg_sig(renamed)
+
+        # Skip messages we already published (our own /{ns}/tf republish looping back).
+        if sig in self._seen_sigs:
             return
+
+        # Evict oldest entries to keep cache bounded.
+        while len(self._seen_sigs) >= _SIG_CACHE_SIZE:
+            self._seen_sigs.popitem(last=False)
+        self._seen_sigs[sig] = True
+
         self._pub_tf.publish(renamed)
         self._pub_tf_ns.publish(renamed)
 
