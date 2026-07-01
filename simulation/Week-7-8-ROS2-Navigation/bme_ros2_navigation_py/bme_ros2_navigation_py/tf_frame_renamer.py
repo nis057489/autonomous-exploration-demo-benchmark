@@ -52,9 +52,24 @@ class TFFrameRenamer(Node):
         # diff_drive_controller's C++ TransformBroadcaster always publishes to /tf
         self.create_subscription(TFMessage, "/tf", self._cb, best_effort)
 
+        self._recv_count = 0
+        self._fwd_count = 0
+        # Warn if nothing arrives on /tf within 5 s of startup
+        self.create_timer(5.0, self._check_alive)
+
         self.get_logger().info(
             f"tf_frame_renamer: /tf → (rename bare→{self._ns}/) → /{self._ns}/tf + /tf"
         )
+
+    def _check_alive(self) -> None:
+        self.get_logger().info(
+            f"[tf_frame_renamer] received={self._recv_count} forwarded={self._fwd_count}"
+        )
+        if self._recv_count == 0:
+            self.get_logger().warn(
+                "No transforms received on /tf yet — diff_drive_controller may not be "
+                "publishing TF, or QoS mismatch on /tf"
+            )
 
     def _rename_frame(self, frame_id: str) -> str:
         if "/" not in frame_id and frame_id in _BARE_FRAMES:
@@ -73,6 +88,7 @@ class TFFrameRenamer(Node):
         return out
 
     def _cb(self, msg: TFMessage) -> None:
+        self._recv_count += 1
         # Drop messages more than 1s old (avoids replaying DDS queue backlog).
         now = self.get_clock().now().nanoseconds
         for t in msg.transforms:
@@ -91,6 +107,7 @@ class TFFrameRenamer(Node):
         )
 
         self._pub_ns.publish(renamed)
+        self._fwd_count += 1
         if any_renamed:
             self._pub_global.publish(renamed)
 
