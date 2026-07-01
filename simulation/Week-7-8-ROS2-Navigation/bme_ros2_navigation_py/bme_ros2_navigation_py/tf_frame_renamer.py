@@ -91,6 +91,14 @@ class TFFrameRenamer(Node):
         if sig in self._seen_sigs:
             return
 
+        # Drop messages whose timestamp is more than 1 second in the past.
+        # Prevents replaying the backlog of queued messages on startup.
+        now = self.get_clock().now().nanoseconds
+        for t in renamed.transforms:
+            stamp_ns = t.header.stamp.sec * 1_000_000_000 + t.header.stamp.nanosec
+            if stamp_ns > 0 and (now - stamp_ns) > 1_000_000_000:
+                return
+
         while len(self._seen_sigs) >= _SIG_CACHE_SIZE:
             self._seen_sigs.popitem(last=False)
         self._seen_sigs[sig] = True
