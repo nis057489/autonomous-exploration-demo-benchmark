@@ -14,6 +14,7 @@ Publishes renamed frames to BOTH:
 Subscribes BEST_EFFORT to /tf to accept whatever the hardware publishes.
 """
 
+import copy
 import sys
 
 import rclpy
@@ -79,22 +80,14 @@ class TFFrameRenamer(Node):
     def _rename_msg(self, msg: TFMessage) -> TFMessage:
         out = TFMessage()
         for t in msg.transforms:
-            new_t = type(t)()
-            new_t.header = t.header
+            new_t = copy.deepcopy(t)
             new_t.header.frame_id = self._rename_frame(t.header.frame_id)
             new_t.child_frame_id = self._rename_frame(t.child_frame_id)
-            new_t.transform = t.transform
             out.transforms.append(new_t)
         return out
 
     def _cb(self, msg: TFMessage) -> None:
         self._recv_count += 1
-        # Drop messages more than 1s old (avoids replaying DDS queue backlog).
-        now = self.get_clock().now().nanoseconds
-        for t in msg.transforms:
-            stamp_ns = t.header.stamp.sec * 1_000_000_000 + t.header.stamp.nanosec
-            if stamp_ns > 0 and (now - stamp_ns) > 1_000_000_000:
-                return
 
         renamed = self._rename_msg(msg)
 
