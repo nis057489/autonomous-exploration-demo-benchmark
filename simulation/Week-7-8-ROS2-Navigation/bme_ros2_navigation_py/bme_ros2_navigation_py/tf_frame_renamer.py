@@ -2,7 +2,11 @@
 """
 Subscribes to /{namespace}/tf and /{namespace}/tf_static, prefixes any bare
 (non-namespaced, non-global) frame IDs with the robot namespace, then
-republishes to /tf and /tf_static.
+republishes to /tf, /{namespace}/tf, and /tf_static.
+
+Publishing to both /tf (global) and /{ns}/tf (namespaced) is necessary because:
+- C++ tf2_ros::TransformListener (Nav2) subscribes to relative "tf" → /{ns}/tf
+- Python tf2_ros.TransformListener (frontier_path_tracker, RViz) subscribes to /tf
 
 Usage:
   ros2 run bme_ros2_navigation_py tf_frame_renamer --ros-args \
@@ -33,6 +37,13 @@ class TFFrameRenamer(Node):
 
         self._prefix = ns + "/"
 
+        # RELIABLE publisher satisfies both RELIABLE (Python TF, RViz) and
+        # BEST_EFFORT (C++ Nav2 TF) subscribers.
+        reliable = QoSProfile(
+            depth=100,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.VOLATILE,
+        )
         latching = QoSProfile(
             depth=100,
             reliability=QoSReliabilityPolicy.RELIABLE,
@@ -44,9 +55,14 @@ class TFFrameRenamer(Node):
             durability=QoSDurabilityPolicy.VOLATILE,
         )
 
-        self._pub_tf = self.create_publisher(TFMessage, "/tf", best_effort)
+        # Global /tf — for Python TF listeners and RViz
+        self._pub_tf = self.create_publisher(TFMessage, "/tf", reliable)
+        # Namespaced /{ns}/tf — for Nav2 C++ TF listeners (relative "tf" subscription)
+        self._pub_tf_ns = self.create_publisher(TFMessage, f"/{ns}/tf", reliable)
+        # Global /tf_static — relayed from /{ns}/tf_static
         self._pub_static = self.create_publisher(TFMessage, "/tf_static", latching)
 
+        # BEST_EFFORT subscription receives from any publisher reliability level.
         self.create_subscription(
             TFMessage, f"/{ns}/tf", self._cb_tf, best_effort
         )
@@ -55,7 +71,7 @@ class TFFrameRenamer(Node):
         )
 
         self.get_logger().info(
-            f"tf_frame_renamer: relaying /{ns}/tf[_static] → /tf[_static], "
+            f"tf_frame_renamer: relaying /{ns}/tf[_static] → /tf[_static] and /{ns}/tf, "
             f"prefixing bare frames with '{self._prefix}'"
         )
 
@@ -73,10 +89,24 @@ class TFFrameRenamer(Node):
             out.transforms.append(new_t)
         return out
 
+    def _any_renamed(self, original: TFMessage, renamed: TFMessage) -> bool:
+        """Return True if any frame ID was actually changed by renaming."""
+        for orig_t, new_t in zip(original.transforms, renamed.transforms):
+            if (orig_t.header.frame_id != new_t.header.frame_id or
+                    orig_t.child_frame_id != new_t.child_frame_id):
+                return True
+        return False
+
     def _cb_tf(self, msg: TFMessage) -> None:
-        self._pub_tf.publish(self._rename_msg(msg))
+        renamed = self._rename_msg(msg)
+        if not self._any_renamed(msg, renamed):
+            # All frames already namespaced — this is our own republish; skip to break loop.
+            return
+        self._pub_tf.publish(renamed)
+        self._pub_tf_ns.publish(renamed)
 
     def _cb_static(self, msg: TFMessage) -> None:
+        # Relay /{ns}/tf_static → /tf_static. No loop risk (different topics).
         self._pub_static.publish(self._rename_msg(msg))
 
 
