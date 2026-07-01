@@ -38,7 +38,11 @@ class TFFrameRenamer(Node):
             reliability=QoSReliabilityPolicy.RELIABLE,
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
-        best_effort = QoSProfile(depth=100)
+        best_effort = QoSProfile(
+            depth=100,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.VOLATILE,
+        )
 
         self._pub_tf = self.create_publisher(TFMessage, "/tf", best_effort)
         self._pub_static = self.create_publisher(TFMessage, "/tf_static", latching)
