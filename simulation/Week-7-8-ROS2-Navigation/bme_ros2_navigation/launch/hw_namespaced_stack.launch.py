@@ -22,7 +22,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
-
+    GroupAction,
     IncludeLaunchDescription,
     OpaqueFunction,
     TimerAction,
@@ -30,6 +30,7 @@ from launch.actions import (
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.actions import PushRosNamespace
 
 
 # ── YAML helpers ──────────────────────────────────────────────────────────────
@@ -207,6 +208,10 @@ def _patch_explore_params(base_path, namespace, output_dir):
 
 def _create_actions(context):
     namespace = LaunchConfiguration("namespace").perform(context)
+    # Absolute so it always wins, even if an included launch file (e.g.
+    # turtlebot3_bringup) has already pushed a namespace onto the shared
+    # launch context — a relative namespace would stack on top of it.
+    abs_namespace = f"/{namespace}"
     nav_params_file = LaunchConfiguration("nav_params_file").perform(context)
     slam_params_file = LaunchConfiguration("slam_params_file").perform(context)
     explore_config = LaunchConfiguration("explore_config").perform(context)
@@ -260,6 +265,7 @@ def _create_actions(context):
             package="bme_ros2_navigation_py",
             executable="tf_frame_renamer",
             name=f"tf_frame_renamer_{namespace}",
+            namespace=abs_namespace,
             output="screen",
             parameters=[{"namespace": namespace, "use_sim_time": False}],
         )
@@ -275,6 +281,7 @@ def _create_actions(context):
                 package="tf2_ros",
                 executable="static_transform_publisher",
                 name=tf_name,
+                namespace=abs_namespace,
                 arguments=[
                     "--x", str(spawn_x),
                     "--y", str(spawn_y),
@@ -296,6 +303,7 @@ def _create_actions(context):
             package="bme_ros2_navigation",
             executable="per_robot_map_compositor.py",
             name=f"per_robot_map_compositor_{namespace}",
+            namespace=abs_namespace,
             output="screen",
             parameters=[{
                 "robot_name": namespace,
@@ -314,6 +322,7 @@ def _create_actions(context):
             package="rviz_autonomous_exploration_benchmark",
             executable="frontier_path_tracker.py",
             name=f"frontier_path_tracker_{namespace}",
+            namespace=abs_namespace,
             output="screen",
             parameters=[{
                 "global_frame": "map",
@@ -336,13 +345,16 @@ def _create_actions(context):
         TimerAction(
             period=slam_delay,
             actions=[
-                IncludeLaunchDescription(
-                    PythonLaunchDescriptionSource(slam_launch),
-                    launch_arguments={
-                        "use_sim_time": "false",
-                        "slam_params_file": slam_cfg,
-                    }.items(),
-                )
+                GroupAction([
+                    PushRosNamespace(abs_namespace),
+                    IncludeLaunchDescription(
+                        PythonLaunchDescriptionSource(slam_launch),
+                        launch_arguments={
+                            "use_sim_time": "false",
+                            "slam_params_file": slam_cfg,
+                        }.items(),
+                    ),
+                ])
             ],
         )
     )
@@ -372,6 +384,7 @@ def _create_actions(context):
             package="frontier_exploration_ros2",
             executable="frontier_explorer",
             name="frontier_explorer",
+            namespace=abs_namespace,
             output="screen",
             parameters=[explore_cfg, {"use_sim_time": False}],
         )
