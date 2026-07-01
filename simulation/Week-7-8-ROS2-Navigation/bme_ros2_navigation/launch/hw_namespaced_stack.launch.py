@@ -34,9 +34,36 @@ from launch_ros.actions import Node
 
 # ── YAML helpers ──────────────────────────────────────────────────────────────
 
+def _deep_merge(base, override):
+    for key, value in override.items():
+        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+
+
 def _load_yaml(path):
+    """Load YAML, merging duplicate top-level keys (turtlebot3's param files have two /**:)."""
+    class MergingLoader(yaml.SafeLoader):
+        pass
+
+    def construct_mapping(loader, node, deep=False):
+        loader.flatten_mapping(node)
+        pairs = loader.construct_pairs(node, deep=deep)
+        result = {}
+        for key, value in pairs:
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                _deep_merge(result[key], value)
+            else:
+                result[key] = value
+        return result
+
+    MergingLoader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+        construct_mapping,
+    )
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return yaml.load(f, Loader=MergingLoader)  # noqa: S506
 
 
 def _write_yaml(directory, name, data):
@@ -71,7 +98,12 @@ def _costmap_params(data, costmap_name):
 # ── Per-component config patchers ─────────────────────────────────────────────
 
 def _patch_tb3_params(tb3_model, namespace, output_dir):
-    """Merge with default bringup params, override frame IDs for this namespace."""
+    """Merge with default bringup params, override frame IDs for this namespace.
+
+    diff_drive_controller publishes the odom→base_footprint TF; its odometry
+    frame_id/child_frame_id are the actual TF frame names used at runtime.
+    robot_state_publisher uses frame_prefix to namespace the URDF joint frames.
+    """
     try:
         default_path = os.path.join(
             get_package_share_directory("turtlebot3_bringup"), "param", f"{tb3_model}.yaml"
@@ -80,10 +112,17 @@ def _patch_tb3_params(tb3_model, namespace, output_dir):
     except Exception:
         data = {}
 
-    p = _node_params(data, "turtlebot3_node")
-    p["odom_frame"] = f"{namespace}/odom"
-    p["base_frame"] = f"{namespace}/base_footprint"
+    # Patch diff_drive_controller odometry frame IDs (the actual TF publishers).
+    ddc = (
+        data.setdefault("/**", {})
+            .setdefault("diff_drive_controller", {})
+            .setdefault("ros__parameters", {})
+            .setdefault("odometry", {})
+    )
+    ddc["frame_id"] = f"{namespace}/odom"
+    ddc["child_frame_id"] = f"{namespace}/base_footprint"
 
+    # robot_state_publisher frame_prefix namespaces all URDF joint frames.
     rsp = _node_params(data, "robot_state_publisher")
     rsp["frame_prefix"] = f"{namespace}/"
 
