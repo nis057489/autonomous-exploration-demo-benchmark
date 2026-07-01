@@ -3,14 +3,6 @@
 Subscribes to /{namespace}/tf and /{namespace}/tf_static, prefixes any bare
 (non-namespaced, non-global) frame IDs with the robot namespace, then
 republishes to /tf, /{namespace}/tf, and /tf_static.
-
-Two publish targets for dynamic TF:
-  /tf            — global, for Python tf2_ros listeners (RViz, frontier_path_tracker)
-  /{ns}/tf       — namespaced, for C++ tf2_ros listeners (Nav2 costmap etc.)
-
-Loop guard: we track the renamed-message signature (stamp+child_frame_id) of each
-message we publish. When we receive our own republish on /{ns}/tf the signature
-matches the cache → skip.
 """
 
 import collections
@@ -23,8 +15,7 @@ from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from tf2_msgs.msg import TFMessage
 
 _GLOBAL_FRAMES = {"map", "world", "earth"}
-
-_SIG_CACHE_SIZE = 500  # stamps to remember for loop detection
+_SIG_CACHE_SIZE = 500
 
 
 class TFFrameRenamer(Node):
@@ -37,8 +28,9 @@ class TFFrameRenamer(Node):
             sys.exit(1)
 
         self._prefix = ns + "/"
-        # OrderedDict keeps insertion order so we can evict oldest entries cheaply.
         self._seen_sigs: collections.OrderedDict = collections.OrderedDict()
+        self._tf_rx_count = 0
+        self._static_rx_count = 0
 
         reliable = QoSProfile(
             depth=100,
@@ -56,19 +48,16 @@ class TFFrameRenamer(Node):
             durability=QoSDurabilityPolicy.VOLATILE,
         )
 
-        # Dynamic TF publishers
         self._pub_tf = self.create_publisher(TFMessage, "/tf", reliable)
         self._pub_tf_ns = self.create_publisher(TFMessage, f"/{ns}/tf", reliable)
-        # Static TF publisher
         self._pub_static = self.create_publisher(TFMessage, "/tf_static", latching)
 
-        # Subscribe to /{ns}/tf with BEST_EFFORT to receive from any publisher reliability.
         self.create_subscription(TFMessage, f"/{ns}/tf", self._cb_tf, best_effort)
         self.create_subscription(TFMessage, f"/{ns}/tf_static", self._cb_static, latching)
 
         self.get_logger().info(
-            f"tf_frame_renamer: relaying /{ns}/tf[_static] → /tf[_static] and /{ns}/tf, "
-            f"prefixing bare frames with '{self._prefix}'"
+            f"tf_frame_renamer: subscribing to /{ns}/tf[_static], "
+            f"publishing to /tf, /{ns}/tf, /tf_static. prefix='{self._prefix}'"
         )
 
     def _rename_frame(self, frame: str) -> str:
@@ -86,7 +75,6 @@ class TFFrameRenamer(Node):
         return out
 
     def _msg_sig(self, msg: TFMessage):
-        """Fingerprint based on (stamp, child_frame_id) of each transform."""
         return tuple(
             (t.header.stamp.sec, t.header.stamp.nanosec, t.child_frame_id)
             for t in msg.transforms
@@ -96,21 +84,27 @@ class TFFrameRenamer(Node):
         renamed = self._rename_msg(msg)
         sig = self._msg_sig(renamed)
 
-        # Skip messages we already published (our own /{ns}/tf republish looping back).
         if sig in self._seen_sigs:
             return
 
-        # Evict oldest entries to keep cache bounded.
         while len(self._seen_sigs) >= _SIG_CACHE_SIZE:
             self._seen_sigs.popitem(last=False)
         self._seen_sigs[sig] = True
+
+        self._tf_rx_count += 1
+        if self._tf_rx_count <= 3 or self._tf_rx_count % 200 == 0:
+            frames = [(t.header.frame_id, t.child_frame_id) for t in renamed.transforms]
+            self.get_logger().info(f"[TF relay #{self._tf_rx_count}] {frames}")
 
         self._pub_tf.publish(renamed)
         self._pub_tf_ns.publish(renamed)
 
     def _cb_static(self, msg: TFMessage) -> None:
-        # Relay /{ns}/tf_static → /tf_static. No loop risk (different topics).
-        self._pub_static.publish(self._rename_msg(msg))
+        renamed = self._rename_msg(msg)
+        self._static_rx_count += 1
+        frames = [(t.header.frame_id, t.child_frame_id) for t in renamed.transforms]
+        self.get_logger().info(f"[TF_STATIC relay #{self._static_rx_count}] {frames}")
+        self._pub_static.publish(renamed)
 
 
 def main():
