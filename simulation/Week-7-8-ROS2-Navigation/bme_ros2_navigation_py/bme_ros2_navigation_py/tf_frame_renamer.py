@@ -29,6 +29,7 @@ class TFFrameRenamer(Node):
 
         self._prefix = ns + "/"
         self._seen_sigs: collections.OrderedDict = collections.OrderedDict()
+        self._seen_static: set = set()
         self._tf_rx_count = 0
         self._static_rx_count = 0
 
@@ -104,6 +105,14 @@ class TFFrameRenamer(Node):
 
     def _cb_static(self, msg: TFMessage) -> None:
         renamed = self._rename_msg(msg)
+        # Content-based dedup: static frames don't move, so identical (parent, child)
+        # pairs mean we've already relayed this transform. Prevents TRANSIENT_LOCAL loop.
+        sig = frozenset(
+            (t.header.frame_id, t.child_frame_id) for t in renamed.transforms
+        )
+        if sig in self._seen_static:
+            return
+        self._seen_static.add(sig)
         self._static_rx_count += 1
         frames = [(t.header.frame_id, t.child_frame_id) for t in renamed.transforms]
         self.get_logger().info(f"[TF_STATIC relay #{self._static_rx_count}] {frames}")
