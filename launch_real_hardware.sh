@@ -104,72 +104,52 @@ check_pkg() {
   fi
 }
 
-ensure_frontier_exploration_ros2() {
-  if ros2 pkg prefix frontier_exploration_ros2 >/dev/null 2>&1; then
+# Same in-tree packages the Dockerfile builds (exploration_packages/*, simulation, rviz) —
+# build whatever's missing/stale in one pass instead of cloning/building packages individually.
+ensure_workspace_built() {
+  local -a required_pkgs=(
+    bme_ros2_navigation bme_ros2_navigation_py rviz_autonomous_exploration_benchmark
+    frontier_exploration_ros2 voxelcodec_msgs voxelcodec_ros
+  )
+
+  local pkg
+  local needs_build=false
+  for pkg in "${required_pkgs[@]}"; do
+    if ! ros2 pkg prefix "${pkg}" >/dev/null 2>&1; then
+      needs_build=true
+      break
+    fi
+  done
+
+  if [[ "${needs_build}" == false ]]; then
     return 0
   fi
 
-  echo "Package 'frontier_exploration_ros2' not found. Installing from source..."
-
-  local src_dir="${PROJECT_ROOT}/src/frontier_exploration_ros2"
-  mkdir -p "${PROJECT_ROOT}/src"
-
-  if [[ -d "${src_dir}/.git" ]]; then
-    echo "Source directory exists; pulling latest..."
-    git -C "${src_dir}" pull --ff-only
-  else
-    git clone https://github.com/nis057489/frontier_exploration_ros2.git "${src_dir}"
-  fi
-
-  echo "Building frontier_exploration_ros2 (this may take a minute)..."
+  echo "Workspace packages missing/out of date. Building workspace (this may take a while)..."
   (
     cd "${PROJECT_ROOT}"
-    colcon build --packages-select frontier_exploration_ros2 --symlink-install
+    colcon build --symlink-install
   )
 
-  # Re-source workspace so the newly built package is visible.
+  # Re-source workspace so newly built packages are visible.
   # shellcheck source=/dev/null
   set +u
   source "${PROJECT_ROOT}/install/setup.bash"
   set -u
 
-  if ! ros2 pkg prefix frontier_exploration_ros2 >/dev/null 2>&1; then
-    echo "Build succeeded but 'frontier_exploration_ros2' is still not found — check build output above." >&2
-    exit 1
-  fi
+  for pkg in "${required_pkgs[@]}"; do
+    if ! ros2 pkg prefix "${pkg}" >/dev/null 2>&1; then
+      echo "Build succeeded but '${pkg}' is still not found — check build output above." >&2
+      exit 1
+    fi
+  done
 
-  echo "frontier_exploration_ros2 installed successfully."
-}
-
-ensure_vxch() {
-  if ros2 pkg prefix voxelcodec_ros >/dev/null 2>&1; then
-    return 0
-  fi
-
-  echo "Package 'voxelcodec_ros' not found. Building from source (exploration_packages/vxch)..."
-  (
-    cd "${PROJECT_ROOT}"
-    colcon build --packages-select voxelcodec_msgs voxelcodec_ros --symlink-install
-  )
-
-  # Re-source workspace so the newly built packages are visible.
-  # shellcheck source=/dev/null
-  set +u
-  source "${PROJECT_ROOT}/install/setup.bash"
-  set -u
-
-  if ! ros2 pkg prefix voxelcodec_ros >/dev/null 2>&1; then
-    echo "Build succeeded but 'voxelcodec_ros' is still not found — check build output above." >&2
-    exit 1
-  fi
-
-  echo "voxelcodec_ros installed successfully."
+  echo "Workspace build complete."
 }
 
 check_pkg slam_toolbox
 check_pkg nav2_bringup
-ensure_frontier_exploration_ros2
-ensure_vxch
+ensure_workspace_built
 
 if [[ "${LOCAL_BRINGUP}" == true ]]; then
   check_pkg turtlebot3_bringup
