@@ -99,10 +99,16 @@ def _costmap_params(data, costmap_name):
 # ── Per-component config patchers ─────────────────────────────────────────────
 
 def _patch_tb3_params(tb3_model, namespace, output_dir):
-    """Merge with default bringup params, override frame IDs for this namespace.
+    """Merge with default bringup params for this namespace.
 
-    diff_drive_controller publishes the odom→base_footprint TF; its odometry
-    frame_id/child_frame_id are the actual TF frame names used at runtime.
+    diff_drive_controller runs under ROS namespace /{namespace} and already
+    prepends its own node namespace to the odometry frame_id/child_frame_id
+    it publishes — leave them at their bare defaults (odom, base_footprint)
+    here. Pre-namespacing them in config double-prefixes the frames (e.g.
+    "{namespace}/{namespace}/odom"), corrupting the TF tree. tf_frame_renamer
+    is the single place that renames bare frames, as a safety net for
+    whichever of the two (namespace push vs. tf_frame_renamer) actually
+    applies the prefix.
     robot_state_publisher uses frame_prefix to namespace the URDF joint frames.
     """
     try:
@@ -112,16 +118,6 @@ def _patch_tb3_params(tb3_model, namespace, output_dir):
         data = copy.deepcopy(_load_yaml(default_path)) if os.path.isfile(default_path) else {}
     except Exception:
         data = {}
-
-    # Patch diff_drive_controller odometry frame IDs (the actual TF publishers).
-    ddc = (
-        data.setdefault("/**", {})
-            .setdefault("diff_drive_controller", {})
-            .setdefault("ros__parameters", {})
-            .setdefault("odometry", {})
-    )
-    ddc["frame_id"] = f"{namespace}/odom"
-    ddc["child_frame_id"] = f"{namespace}/base_footprint"
 
     # robot_state_publisher frame_prefix namespaces all URDF joint frames.
     rsp = _node_params(data, "robot_state_publisher")
