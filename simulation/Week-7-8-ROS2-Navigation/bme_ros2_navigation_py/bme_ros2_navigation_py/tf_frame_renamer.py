@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
-Bridges /tf (absolute, published by C++ TransformBroadcaster under any namespace)
-to /{ns}/tf (relative, subscribed by Nav2's C++ TransformListener).
+Bridges /tf and /tf_static (absolute, published by C++ TransformBroadcaster /
+StaticTransformBroadcaster regardless of node namespace) to /{ns}/tf and
+/{ns}/tf_static (relative, subscribed by Nav2's C++ TransformListener).
 
-Also renames bare frame IDs (odom, base_footprint, base_link, base_scan) to
-{namespace}/frame so the namespaced Nav2 stack finds its expected frames.
-Already-namespaced frames (containing '/') pass through unchanged.
+Also renames any still-bare frame IDs (odom, base_footprint, base_link,
+base_scan) to {namespace}/frame, as a safety net for sources that don't
+apply the namespace prefix themselves. Already-namespaced frames (containing
+'/') pass through unchanged.
 
 Publishes renamed frames to BOTH:
-  - /{ns}/tf  (RELIABLE) — Nav2 C++ TransformListener
-  - /tf       (RELIABLE) — RViz, Python tf2_ros.TransformListener
+  - /{ns}/tf(_static)  — Nav2 C++ TransformListener
+  - /tf(_static)        — RViz, Python tf2_ros.TransformListener
 
-Subscribes BEST_EFFORT to /tf to accept whatever the hardware publishes.
+Subscribes BEST_EFFORT to /tf (dynamic transforms may be published best-effort)
+and RELIABLE/TRANSIENT_LOCAL to /tf_static (matching StaticTransformBroadcaster).
 """
 
 import copy
@@ -34,24 +37,40 @@ class TFFrameRenamer(Node):
             self.get_logger().fatal("Parameter 'namespace' must be non-empty")
             sys.exit(1)
 
-        reliable = QoSProfile(
+        reliable_volatile = QoSProfile(
             depth=100,
             reliability=QoSReliabilityPolicy.RELIABLE,
             durability=QoSDurabilityPolicy.VOLATILE,
         )
-        best_effort = QoSProfile(
+        best_effort_volatile = QoSProfile(
             depth=100,
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             durability=QoSDurabilityPolicy.VOLATILE,
         )
+        reliable_transient_local = QoSProfile(
+            depth=100,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
 
         # /{ns}/tf — Nav2 C++ TransformListener (subscribes to relative "tf")
-        self._pub_ns = self.create_publisher(TFMessage, f"/{self._ns}/tf", reliable)
+        self._pub_ns = self.create_publisher(TFMessage, f"/{self._ns}/tf", reliable_volatile)
         # /tf — RViz and Python tf2_ros.TransformListener (RELIABLE)
-        self._pub_global = self.create_publisher(TFMessage, "/tf", reliable)
+        self._pub_global = self.create_publisher(TFMessage, "/tf", reliable_volatile)
+
+        self._pub_ns_static = self.create_publisher(
+            TFMessage, f"/{self._ns}/tf_static", reliable_transient_local
+        )
+        self._pub_global_static = self.create_publisher(
+            TFMessage, "/tf_static", reliable_transient_local
+        )
 
         # diff_drive_controller's C++ TransformBroadcaster always publishes to /tf
-        self.create_subscription(TFMessage, "/tf", self._cb, best_effort)
+        self.create_subscription(TFMessage, "/tf", self._cb, best_effort_volatile)
+        # robot_state_publisher's StaticTransformBroadcaster publishes to /tf_static
+        self.create_subscription(
+            TFMessage, "/tf_static", self._cb_static, reliable_transient_local
+        )
 
         self._recv_count = 0
         self._fwd_count = 0
@@ -59,7 +78,8 @@ class TFFrameRenamer(Node):
         self.create_timer(5.0, self._check_alive)
 
         self.get_logger().info(
-            f"tf_frame_renamer: /tf → (rename bare→{self._ns}/) → /{self._ns}/tf + /tf"
+            f"tf_frame_renamer: /tf(_static) → (rename bare→{self._ns}/) → "
+            f"/{self._ns}/tf(_static) + /tf(_static)"
         )
 
     def _check_alive(self) -> None:
@@ -86,6 +106,13 @@ class TFFrameRenamer(Node):
             out.transforms.append(new_t)
         return out
 
+    def _any_renamed(self, msg: TFMessage, renamed: TFMessage) -> bool:
+        return any(
+            orig.header.frame_id != ren.header.frame_id
+            or orig.child_frame_id != ren.child_frame_id
+            for orig, ren in zip(msg.transforms, renamed.transforms)
+        )
+
     def _cb(self, msg: TFMessage) -> None:
         self._recv_count += 1
 
@@ -93,16 +120,17 @@ class TFFrameRenamer(Node):
 
         # Avoid re-publishing our own output back to /tf (loop guard):
         # only publish to /tf when at least one frame was actually renamed.
-        any_renamed = any(
-            orig.header.frame_id != ren.header.frame_id
-            or orig.child_frame_id != ren.child_frame_id
-            for orig, ren in zip(msg.transforms, renamed.transforms)
-        )
-
         self._pub_ns.publish(renamed)
         self._fwd_count += 1
-        if any_renamed:
+        if self._any_renamed(msg, renamed):
             self._pub_global.publish(renamed)
+
+    def _cb_static(self, msg: TFMessage) -> None:
+        renamed = self._rename_msg(msg)
+
+        self._pub_ns_static.publish(renamed)
+        if self._any_renamed(msg, renamed):
+            self._pub_global_static.publish(renamed)
 
 
 def main():

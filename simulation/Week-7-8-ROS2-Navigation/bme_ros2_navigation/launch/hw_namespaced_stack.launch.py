@@ -98,33 +98,6 @@ def _costmap_params(data, costmap_name):
 
 # ── Per-component config patchers ─────────────────────────────────────────────
 
-def _patch_tb3_params(tb3_model, namespace, output_dir):
-    """Merge with default bringup params for this namespace.
-
-    diff_drive_controller runs under ROS namespace /{namespace} and already
-    prepends its own node namespace to the odometry frame_id/child_frame_id
-    it publishes — leave them at their bare defaults (odom, base_footprint)
-    here. Pre-namespacing them in config double-prefixes the frames (e.g.
-    "{namespace}/{namespace}/odom"), corrupting the TF tree. tf_frame_renamer
-    is the single place that renames bare frames, as a safety net for
-    whichever of the two (namespace push vs. tf_frame_renamer) actually
-    applies the prefix.
-    robot_state_publisher uses frame_prefix to namespace the URDF joint frames.
-    """
-    try:
-        default_path = os.path.join(
-            get_package_share_directory("turtlebot3_bringup"), "param", f"{tb3_model}.yaml"
-        )
-        data = copy.deepcopy(_load_yaml(default_path)) if os.path.isfile(default_path) else {}
-    except Exception:
-        data = {}
-
-    # robot_state_publisher frame_prefix namespaces all URDF joint frames.
-    rsp = _node_params(data, "robot_state_publisher")
-    rsp["frame_prefix"] = f"{namespace}/"
-
-    return _write_yaml(output_dir, f"{namespace}_tb3.yaml", data)
-
 
 def _patch_slam_params(base_path, namespace, output_dir):
     data = copy.deepcopy(_load_yaml(base_path))
@@ -214,7 +187,6 @@ def _create_actions(context):
     local_bringup = LaunchConfiguration("local_bringup").perform(context).lower() in (
         "1", "true", "yes", "on"
     )
-    tb3_model = LaunchConfiguration("tb3_model").perform(context)
     spawn_x = float(LaunchConfiguration("spawn_x").perform(context))
     spawn_y = float(LaunchConfiguration("spawn_y").perform(context))
     spawn_yaw = float(LaunchConfiguration("spawn_yaw").perform(context))
@@ -243,19 +215,24 @@ def _create_actions(context):
 
     actions = []
 
-    # ── 1. turtlebot3_bringup (optional, namespaced so its TF goes to /{ns}/tf)
+    # ── 1. turtlebot3_bringup (optional). Passing `namespace` through activates
+    # turtlebot3_bringup's own frame-prefixing (xacro namespace:= arg for
+    # robot_state_publisher, namespace ROS param for turtlebot3_ros), so both
+    # already publish namespaced frame IDs. Both still publish to the global
+    # /tf and /tf_static topics though (hardcoded absolute in tf2_ros,
+    # unaffected by node namespace) — tf_frame_renamer bridges those to
+    # /{namespace}/tf(+_static), where Nav2 (namespaced) actually listens.
     if local_bringup:
-        tb3_cfg = _patch_tb3_params(tb3_model, namespace, output_dir)
         actions.append(
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(tb3_launch),
-                launch_arguments={"tb3_param_dir": tb3_cfg}.items(),
+                launch_arguments={"namespace": namespace}.items(),
             )
         )
 
-    # ── 2. TF frame renamer: /{namespace}/tf → /tf with namespaced frame IDs ─
-    # Replaces simple topic relay — also renames bare frames (odom, base_*)
-    # to {namespace}/odom, {namespace}/base_* so multiple robots can share /tf.
+    # ── 2. TF frame renamer: /tf(+_static) → /{namespace}/tf(+_static) ───────
+    # Also renames any still-bare frames (odom, base_*) to {namespace}/odom,
+    # {namespace}/base_* as a safety net, so multiple robots can share /tf.
     actions.append(
         Node(
             package="bme_ros2_navigation_py",
