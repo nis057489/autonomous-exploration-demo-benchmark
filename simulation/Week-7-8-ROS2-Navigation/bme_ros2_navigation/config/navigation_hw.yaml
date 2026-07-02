@@ -1,3 +1,13 @@
+lifecycle_manager_navigation:
+  ros__parameters:
+    # Real hardware (Pi) can stall long enough under CPU contention (SLAM +
+    # full Nav2 stack + exploration nodes all sharing a few cores) that a
+    # server misses its bond heartbeat even though it's still alive. A missed
+    # heartbeat makes the lifecycle_manager tear down the *entire* nav2 group,
+    # not just the one server. Disable bond-based liveness checking on hw
+    # (sim never needs this — plenty of host CPU there).
+    bond_timeout: 0.0
+
 bt_navigator:
   ros__parameters:
     global_frame: map
