@@ -139,9 +139,33 @@ ensure_frontier_exploration_ros2() {
   echo "frontier_exploration_ros2 installed successfully."
 }
 
+ensure_vxch() {
+  if ros2 pkg prefix voxelcodec_ros >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Package 'voxelcodec_ros' not found. Building from source (exploration_packages/vxch)..."
+  (
+    cd "${PROJECT_ROOT}"
+    colcon build --packages-select voxelcodec_msgs voxelcodec_ros --symlink-install
+  )
+
+  # Re-source workspace so the newly built packages are visible.
+  # shellcheck source=/dev/null
+  source "${PROJECT_ROOT}/install/setup.bash"
+
+  if ! ros2 pkg prefix voxelcodec_ros >/dev/null 2>&1; then
+    echo "Build succeeded but 'voxelcodec_ros' is still not found — check build output above." >&2
+    exit 1
+  fi
+
+  echo "voxelcodec_ros installed successfully."
+}
+
 check_pkg slam_toolbox
 check_pkg nav2_bringup
 ensure_frontier_exploration_ros2
+ensure_vxch
 
 if [[ "${LOCAL_BRINGUP}" == true ]]; then
   check_pkg turtlebot3_bringup
