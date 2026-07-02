@@ -129,7 +129,9 @@ ensure_frontier_exploration_ros2() {
 
   # Re-source workspace so the newly built package is visible.
   # shellcheck source=/dev/null
+  set +u
   source "${PROJECT_ROOT}/install/setup.bash"
+  set -u
 
   if ! ros2 pkg prefix frontier_exploration_ros2 >/dev/null 2>&1; then
     echo "Build succeeded but 'frontier_exploration_ros2' is still not found — check build output above." >&2
@@ -152,7 +154,9 @@ ensure_vxch() {
 
   # Re-source workspace so the newly built packages are visible.
   # shellcheck source=/dev/null
+  set +u
   source "${PROJECT_ROOT}/install/setup.bash"
+  set -u
 
   if ! ros2 pkg prefix voxelcodec_ros >/dev/null 2>&1; then
     echo "Build succeeded but 'voxelcodec_ros' is still not found — check build output above." >&2
