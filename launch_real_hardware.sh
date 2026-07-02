@@ -128,7 +128,13 @@ ensure_workspace_built() {
   echo "Workspace packages missing/out of date. Building workspace (this may take a while)..."
   (
     cd "${PROJECT_ROOT}"
-    colcon build --symlink-install
+    colcon build --symlink-install --packages-select \
+      explore_lite_msgs explore \
+      nav2_wavefront_frontier_exploration \
+      bme_ros2_navigation bme_ros2_navigation_py \
+      rviz_autonomous_exploration_benchmark \
+      frontier_exploration_ros2 frontier_exploration_ros2_rviz \
+      voxelcodec_msgs voxelcodec_ros
   )
 
   # Re-source workspace so newly built packages are visible.
