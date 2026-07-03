@@ -105,7 +105,11 @@ def _patch_slam_params(base_path, namespace, output_dir):
     p["map_frame"] = f"{namespace}/map"
     p["base_frame"] = f"{namespace}/base_footprint"
     p["scan_topic"] = f"/{namespace}/scan"
-    p["transform_publish_period"] = 0.0
+    # 0.0 doesn't mean "publish every update" -- slam_toolbox's transform
+    # publish thread returns immediately and never runs at all when this is 0,
+    # so map -> odom is never published. See slam_toolbox_localization.yaml's
+    # own "#if 0 never publishes odometry" note.
+    p["transform_publish_period"] = 0.02
     p["use_sim_time"] = False
     return _write_yaml(output_dir, f"{namespace}_slam.yaml", data)
 
