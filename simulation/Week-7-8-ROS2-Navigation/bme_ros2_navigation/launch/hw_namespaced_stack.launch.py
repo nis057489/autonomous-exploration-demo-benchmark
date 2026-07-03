@@ -25,6 +25,7 @@ from launch.actions import (
     GroupAction,
     IncludeLaunchDescription,
     OpaqueFunction,
+    SetEnvironmentVariable,
     TimerAction,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -393,6 +394,17 @@ def _create_actions(context):
 
 def generate_launch_description():
     return LaunchDescription([
+        # Set here (not just in the wrapper shell script) so it's guaranteed to
+        # reach every process this launch tree spawns, regardless of whether the
+        # invoking shell's exported env actually survives to this point. Without
+        # this, two robots on the same ROS_DOMAIN_ID over the network cross-talk:
+        # tf_frame_renamer bridges the bare, unnamespaced /tf that
+        # TransformBroadcaster always publishes regardless of node namespace, so
+        # one robot's renamer can pick up another robot's raw driver frames and
+        # mislabel them with its own namespace ("two or more unconnected trees",
+        # "extrapolation into the past").
+        SetEnvironmentVariable("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST"),
+        SetEnvironmentVariable("ROS_STATIC_PEERS", os.environ.get("VIZ_LAPTOP_IP", "192.168.100.20")),
         DeclareLaunchArgument("namespace",
                               description="ROS namespace for this robot, e.g. robot1"),
         DeclareLaunchArgument("nav_params_file",
