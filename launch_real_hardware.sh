@@ -2,24 +2,27 @@
 # Launch the autonomous exploration stack on a real TurtleBot3 (ROS 2 Jazzy).
 #
 # Usage:
-#   ./launch_real_hardware.sh [--local-bringup] [--model burger|waffle|waffle_pi] [--num-robots <n>]
+#   ./launch_real_hardware.sh [--no-local-bringup] [--model burger|waffle|waffle_pi] [--num-robots <n>]
 #
 # Flags:
-#   --local-bringup   Also launch turtlebot3_bringup on this machine (useful when the
-#                     workstation IS the robot, or when testing via USB-to-OpenCR).
-#                     Omit this flag when the robot's Raspberry Pi is running its own
-#                     bringup and you are only launching the navigation/exploration side.
-#   --model <name>    TurtleBot3 model (burger | waffle | waffle_pi). Defaults to the
-#                     TURTLEBOT3_MODEL env var, then falls back to waffle_pi.
-#   --num-robots <n>  Number of robots (default 1). When >1 the script launches the
-#                     multi-robot VXCH experiment stack instead of the single-robot path.
-#                     Each robot must already be running turtlebot3_bringup independently.
+#   --no-local-bringup  Skip launching turtlebot3_bringup on this machine (single-robot
+#                       mode only; on by default). Pass this if the robot's Raspberry Pi
+#                       is running its own bringup and you are only launching the
+#                       navigation/exploration side.
+#   --local-bringup     Explicitly launch turtlebot3_bringup on this machine. This is
+#                       already the default for single-robot mode; the flag is kept for
+#                       backward compatibility.
+#   --model <name>      TurtleBot3 model (burger | waffle | waffle_pi). Defaults to the
+#                       TURTLEBOT3_MODEL env var, then falls back to waffle_pi.
+#   --num-robots <n>    Number of robots (default 1). When >1 the script launches the
+#                       multi-robot VXCH experiment stack instead of the single-robot path.
+#                       Each robot must already be running turtlebot3_bringup independently
+#                       (local bringup does not apply in multi-robot mode).
 #
 # Experiment parameters are read from experiment.conf (project root) or env vars:
 #   MAP_TRANSPORT, BANDWIDTH_KBPS, LOSS_PCT, DELAY_MS, HAAR_LEVELS
 #
 # What this script does NOT do (run these yourself, on the robot or on another terminal):
-#   - turtlebot3_bringup robot.launch.py  (unless --local-bringup is given, single-robot only)
 #   - RViz (open it manually, or pass rviz:=true to the launch file)
 
 set -eo pipefail
@@ -45,7 +48,7 @@ ROBOT_STARTUP_DELAY_S="${ROBOT_STARTUP_DELAY_S:-0.0}"
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 
-LOCAL_BRINGUP=false
+LOCAL_BRINGUP=true
 TB3_MODEL="${TURTLEBOT3_MODEL:-}"
 NUM_ROBOTS="${NUM_ROBOTS:-1}"
 ROBOT_ID="${ROBOT_ID:-}"
