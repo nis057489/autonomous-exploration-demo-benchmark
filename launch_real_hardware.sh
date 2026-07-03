@@ -128,15 +128,25 @@ set -u
 
 # ── Build workspace (fast if nothing changed) ────────────────────────────────
 
-if [[ "${REBUILD}" == true ]]; then
-  echo "Cleaning old build artifacts..."
+# Check if install tree is valid
+NEEDS_BUILD=false
+if [[ ! -f "${PROJECT_ROOT}/install/bme_ros2_navigation_py/lib/bme_ros2_navigation_py/tf_frame_renamer" ]]; then
+  NEEDS_BUILD=true
+fi
+
+if [[ "${REBUILD}" == true ]] || [[ "${NEEDS_BUILD}" == true ]]; then
+  if [[ "${NEEDS_BUILD}" == true ]]; then
+    echo "Install tree incomplete. Building workspace..."
+  else
+    echo "Rebuilding workspace..."
+  fi
+  
   (
     cd "${PROJECT_ROOT}"
     rm -rf build/explore_lite_msgs build/nav2_wfd build/frontier_exploration_ros2 build/bme_ros2_navigation_py 2>/dev/null || true
     rm -rf install/roadmap_explorer 2>/dev/null || true
   )
 
-  echo "Building workspace (skipping roadmap_explorer and other non-essential packages)..."
   (
     cd "${PROJECT_ROOT}"
     colcon build --symlink-install \
