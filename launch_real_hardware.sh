@@ -143,36 +143,52 @@ _create_bme_ros2_navigation_py_libexec() {
 
 _create_bme_ros2_navigation_py_libexec
 
-INSTALL_COMPLETE=true
-if [[ ! -f "${PROJECT_ROOT}/install/bme_ros2_navigation_py/share/bme_ros2_navigation_py/local_setup.bash" ]] || [[ ! -f "${PROJECT_ROOT}/install/bme_ros2_navigation/share/bme_ros2_navigation/local_setup.bash" ]] || [[ ! -x "${PROJECT_ROOT}/install/bme_ros2_navigation_py/libexec/bme_ros2_navigation_py/tf_frame_renamer" ]]; then
-  INSTALL_COMPLETE=false
-fi
+MISSING_PKGS=()
+_pkg_missing() {
+  local pkg="$1"
+  for existing in "${MISSING_PKGS[@]}"; do
+    [[ "$existing" == "$pkg" ]] && return 0
+  done
+  MISSING_PKGS+=("$pkg")
+}
 
-if [[ "${REBUILD}" == true ]] || [[ "${INSTALL_COMPLETE}" == false ]]; then
+_check_install_file() {
+  local path="$1"
+  local pkg="$2"
+  if [[ ! -f "$path" ]]; then
+    _pkg_missing "$pkg"
+  fi
+}
+
+_check_install_exec() {
+  local path="$1"
+  local pkg="$2"
+  if [[ ! -x "$path" ]]; then
+    _pkg_missing "$pkg"
+  fi
+}
+
+_check_install_file "${PROJECT_ROOT}/install/bme_ros2_navigation_py/share/bme_ros2_navigation_py/local_setup.bash" bme_ros2_navigation_py
+_check_install_exec "${PROJECT_ROOT}/install/bme_ros2_navigation_py/libexec/bme_ros2_navigation_py/tf_frame_renamer" bme_ros2_navigation_py
+_check_install_file "${PROJECT_ROOT}/install/bme_ros2_navigation/share/bme_ros2_navigation/local_setup.bash" bme_ros2_navigation
+_check_install_file "${PROJECT_ROOT}/install/frontier_exploration_ros2/share/frontier_exploration_ros2/local_setup.bash" frontier_exploration_ros2
+_check_install_file "${PROJECT_ROOT}/install/explore_lite/share/explore_lite/local_setup.bash" explore_lite
+_check_install_file "${PROJECT_ROOT}/install/explore_lite_msgs/share/explore_lite_msgs/local_setup.bash" explore_lite_msgs
+_check_install_file "${PROJECT_ROOT}/install/nav2_wfd/share/nav2_wfd/local_setup.bash" nav2_wfd
+
+if [[ "${REBUILD}" == true ]] || [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
   if [[ "${REBUILD}" == true ]]; then
-    echo "Rebuilding workspace..."
+    echo "Rebuilding selected workspace packages..."
+    BUILD_PACKAGES=(bme_ros2_navigation bme_ros2_navigation_py frontier_exploration_ros2 explore_lite explore_lite_msgs nav2_wfd)
   else
-    echo "Install tree incomplete or missing packages; building workspace..."
+    echo "Missing install packages: ${MISSING_PKGS[*]}. Building only those packages..."
+    BUILD_PACKAGES=("${MISSING_PKGS[@]}")
   fi
 
-  echo "Cleaning old build artifacts..."
+  echo "Building workspace: ${BUILD_PACKAGES[*]}"
   (
     cd "${PROJECT_ROOT}"
-    rm -rf build/explore_lite_msgs build/nav2_wfd build/frontier_exploration_ros2 build/bme_ros2_navigation_py 2>/dev/null || true
-    rm -rf install/roadmap_explorer 2>/dev/null || true
-  )
-
-  echo "Building workspace (skipping roadmap_explorer and other non-essential packages)..."
-  (
-    cd "${PROJECT_ROOT}"
-    colcon build --symlink-install \
-      --packages-select \
-      bme_ros2_navigation \
-      bme_ros2_navigation_py \
-      frontier_exploration_ros2 \
-      explore_lite \
-      explore_lite_msgs \
-      nav2_wfd
+    colcon build --symlink-install --packages-select "${BUILD_PACKAGES[@]}"
   )
   _create_bme_ros2_navigation_py_libexec
 else
