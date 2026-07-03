@@ -369,6 +369,16 @@ if (( NUM_ROBOTS > 1 )); then
   exit $?
 fi
 
+# Each robot's per-robot invocation must not see other robots' DDS traffic --
+# tf_frame_renamer bridges the bare, unnamespaced /tf that TransformBroadcaster
+# always publishes regardless of node namespace, and with multiple robots on
+# the same ROS_DOMAIN_ID over the network, one robot's renamer can pick up
+# another robot's raw driver frames and mislabel them with its own namespace
+# (symptoms: "two or more unconnected trees", "extrapolation into the past").
+# This does not apply to the --num-robots base-station path above, which
+# intentionally coordinates with independently-running remote robots.
+export ROS_LOCALHOST_ONLY=1
+
 # ── 1) Optional: local TurtleBot3 bringup ────────────────────────────────────
 
 BRINGUP_PID=""
