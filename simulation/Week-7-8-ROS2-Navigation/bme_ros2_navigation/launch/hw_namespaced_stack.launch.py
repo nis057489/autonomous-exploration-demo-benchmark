@@ -188,6 +188,14 @@ def _patch_explore_params(base_path, namespace, output_dir):
     p["frontier_marker_topic"] = f"/{namespace}/explore/frontiers"
     p["selected_frontier_topic"] = f"/{namespace}/explore/selected_frontier"
     p["optimized_map_topic"] = f"/{namespace}/explore/optimized_map"
+    # The frontier_explorer Node() below passes this file straight through as
+    # a --params-file with no namespace-aware rewriting (same issue fixed for
+    # slam_toolbox above). A bare "frontier_explorer:" key does not bind to
+    # the node once it's namespaced as /{namespace}/frontier_explorer, so
+    # every override here was being silently dropped -- confirmed live via
+    # "Could not transform base_footprint -> map" (the bare, un-namespaced
+    # default) instead of using robot_base_frame's override.
+    data[f"/{namespace}/frontier_explorer"] = data.pop("frontier_explorer")
     return _write_yaml(output_dir, f"{namespace}_explore.yaml", data)
 
 
