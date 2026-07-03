@@ -111,6 +111,16 @@ def _patch_slam_params(base_path, namespace, output_dir):
     # own "#if 0 never publishes odometry" note.
     p["transform_publish_period"] = 0.02
     p["use_sim_time"] = False
+    # slam_toolbox's online_async_launch.py passes this file straight through
+    # as a --params-file with no namespace-aware rewriting (unlike
+    # nav2_bringup's navigation_launch.py, which wraps params via
+    # RewrittenYaml). A bare "slam_toolbox:" top-level key does not bind to
+    # the node once it's pushed into the /{namespace} namespace -- ROS 2
+    # silently ignores the whole file and slam_toolbox falls back to its
+    # hardcoded defaults (confirmed via a live get_parameters query: every
+    # override here was being dropped). The key must be the node's
+    # fully-qualified name instead.
+    data[f"/{namespace}/slam_toolbox"] = data.pop("slam_toolbox")
     return _write_yaml(output_dir, f"{namespace}_slam.yaml", data)
 
 
