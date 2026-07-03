@@ -238,8 +238,12 @@ def _create_actions(context):
         )
     )
 
+    # Only bridge map -> {namespace}/map here. slam_toolbox itself publishes
+    # {namespace}/map -> {namespace}/odom once active; also statically publishing
+    # map -> {namespace}/odom would give that frame two competing parents,
+    # leaving tf2 with disconnected/unstable trees (costmap "out of map bounds"
+    # and "no map received" warnings trace back to this).
     for child_frame, tf_name in [
-        (f"{namespace}/odom", f"{namespace}_map_to_odom"),
         (f"{namespace}/map", f"{namespace}_map_to_slam_map"),
     ]:
         actions.append(
