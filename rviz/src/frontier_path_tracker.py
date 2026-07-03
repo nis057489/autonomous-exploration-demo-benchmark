@@ -51,8 +51,6 @@ class FrontierPathTracker(Node):
             [
                 "frontier_exploration_ros2_mrtsp:/explore/traversed_path",
                 "frontier_exploration_ros2_nearest:/explore/traversed_path/frontier_exploration_ros2_nearest",
-                "m_explore_ros2:/explore/traversed_path/m_explore_ros2",
-                "nav2_wavefront_frontier_exploration:/explore/traversed_path/nav2_wavefront_frontier_exploration",
             ],
         )
         self.declare_parameter("active_package_topic", "/explore/path_tracker/active_package")

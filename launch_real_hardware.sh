@@ -172,14 +172,11 @@ _check_install_file "${PROJECT_ROOT}/install/bme_ros2_navigation_py/share/bme_ro
 _check_install_exec "${PROJECT_ROOT}/install/bme_ros2_navigation_py/libexec/bme_ros2_navigation_py/tf_frame_renamer" bme_ros2_navigation_py
 _check_install_file "${PROJECT_ROOT}/install/bme_ros2_navigation/share/bme_ros2_navigation/local_setup.bash" bme_ros2_navigation
 _check_install_file "${PROJECT_ROOT}/install/frontier_exploration_ros2/share/frontier_exploration_ros2/local_setup.bash" frontier_exploration_ros2
-_check_install_file "${PROJECT_ROOT}/install/explore_lite/share/explore_lite/local_setup.bash" explore_lite
-_check_install_file "${PROJECT_ROOT}/install/explore_lite_msgs/share/explore_lite_msgs/local_setup.bash" explore_lite_msgs
-_check_install_file "${PROJECT_ROOT}/install/nav2_wfd/share/nav2_wfd/local_setup.bash" nav2_wfd
 
 if [[ "${REBUILD}" == true ]] || [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
   if [[ "${REBUILD}" == true ]]; then
     echo "Rebuilding selected workspace packages..."
-    BUILD_PACKAGES=(bme_ros2_navigation bme_ros2_navigation_py frontier_exploration_ros2 explore_lite explore_lite_msgs nav2_wfd)
+    BUILD_PACKAGES=(bme_ros2_navigation bme_ros2_navigation_py frontier_exploration_ros2)
   else
     echo "Missing install packages: ${MISSING_PKGS[*]}. Building only those packages..."
     BUILD_PACKAGES=("${MISSING_PKGS[@]}")
