@@ -121,6 +121,22 @@ if [[ -f "${PROJECT_ROOT}/install/setup.bash" ]]; then
 fi
 set -u
 
+# ── Build workspace (fast if nothing changed) ────────────────────────────────
+
+echo "Building workspace (skipping roadmap_explorer and other non-essential packages)..."
+(
+  cd "${PROJECT_ROOT}"
+  colcon build --symlink-install \
+    --packages-select \
+    bme_ros2_navigation \
+    bme_ros2_navigation_py \
+    frontier_exploration_ros2 \
+    rviz_autonomous_exploration_benchmark \
+    explore_lite \
+    explore_lite_msgs \
+    nav2_wfd
+)
+
 # ── Validate required packages ───────────────────────────────────────────────
 
 check_pkg() {
