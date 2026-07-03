@@ -519,20 +519,20 @@ Visualization Manager:
       Color Scheme: map
       Draw Behind: false
       Enabled: true
-      Name: Map
+      Name: robot1 Map (dup, fixed topic)
       Topic:
         Depth: 5
         Durability Policy: Volatile
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /map
+        Value: /robot1/map
       Update Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /map_updates
+        Value: /robot1/map_updates
       Use Timestamp: false
       Value: true
     - Alpha: 0.699999988079071
@@ -542,7 +542,7 @@ Visualization Manager:
       Color Scheme: map
       Draw Behind: false
       Enabled: true
-      Name: Map
+      Name: robot1 Local Costmap Obstacle Layer
       Topic:
         Depth: 5
         Durability Policy: Volatile
