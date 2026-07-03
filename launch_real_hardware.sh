@@ -175,11 +175,14 @@ _check_install_file "${PROJECT_ROOT}/install/bme_ros2_navigation_py/share/bme_ro
 _check_install_exec "${PROJECT_ROOT}/install/bme_ros2_navigation_py/libexec/bme_ros2_navigation_py/tf_frame_renamer" bme_ros2_navigation_py
 _check_install_file "${PROJECT_ROOT}/install/bme_ros2_navigation/share/bme_ros2_navigation/local_setup.bash" bme_ros2_navigation
 _check_install_file "${PROJECT_ROOT}/install/frontier_exploration_ros2/share/frontier_exploration_ros2/local_setup.bash" frontier_exploration_ros2
+_check_install_file "${PROJECT_ROOT}/install/rviz_autonomous_exploration_benchmark/share/rviz_autonomous_exploration_benchmark/local_setup.bash" rviz_autonomous_exploration_benchmark
+_check_install_file "${PROJECT_ROOT}/install/voxelcodec_msgs/share/voxelcodec_msgs/local_setup.bash" voxelcodec_msgs
+_check_install_file "${PROJECT_ROOT}/install/voxelcodec_ros/share/voxelcodec_ros/local_setup.bash" voxelcodec_ros
 
 if [[ "${REBUILD}" == true ]] || [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
   if [[ "${REBUILD}" == true ]]; then
     echo "Rebuilding selected workspace packages..."
-    BUILD_PACKAGES=(bme_ros2_navigation bme_ros2_navigation_py frontier_exploration_ros2)
+    BUILD_PACKAGES=(bme_ros2_navigation bme_ros2_navigation_py frontier_exploration_ros2 rviz_autonomous_exploration_benchmark voxelcodec_msgs voxelcodec_ros)
   else
     echo "Missing install packages: ${MISSING_PKGS[*]}. Building only those packages..."
     BUILD_PACKAGES=("${MISSING_PKGS[@]}")
