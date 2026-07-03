@@ -114,14 +114,94 @@ class PerRobotMapCompositor(Node):
     def _merge_local_onto_team(
         self, local: OccupancyGrid, team: OccupancyGrid
     ) -> OccupancyGrid | None:
-        """Start from a copy of the team map; write local SLAM cells on top."""
+        """Canvas is the union of team's bounds and this robot's own (offset-
+        transformed) local bounds -- not just team's bounds alone. team_map_ddil
+        only carries *other* robots' areas (this robot is deliberately excluded
+        from its own team fusion), so if this robot's own explored area doesn't
+        spatially overlap a peer's, using team's bounds as the whole canvas would
+        silently drop this robot's own surroundings entirely (every local cell
+        falls outside team's bounds and _stamp_local_cells discards it) -- nav2
+        then has no real local costmap data to plan against.
+        """
+        res = min(team.info.resolution, local.info.resolution)
+        if res <= 0.0:
+            res = team.info.resolution or local.info.resolution
+            if res <= 0.0:
+                return None
+
+        team_min_x = team.info.origin.position.x
+        team_min_y = team.info.origin.position.y
+        team_max_x = team_min_x + team.info.width * team.info.resolution
+        team_max_y = team_min_y + team.info.height * team.info.resolution
+
+        local_bounds = self._local_global_bounds(local)
+        if local_bounds is not None:
+            local_min_x, local_min_y, local_max_x, local_max_y = local_bounds
+            min_x = min(team_min_x, local_min_x)
+            min_y = min(team_min_y, local_min_y)
+            max_x = max(team_max_x, local_max_x)
+            max_y = max(team_max_y, local_max_y)
+        else:
+            min_x, min_y, max_x, max_y = team_min_x, team_min_y, team_max_x, team_max_y
+
+        origin_x = math.floor(min_x / res) * res
+        origin_y = math.floor(min_y / res) * res
+        width = max(1, int(math.ceil((max_x - origin_x) / res)) + 1)
+        height = max(1, int(math.ceil((max_y - origin_y) / res)) + 1)
+
         out = OccupancyGrid()
         out.header.frame_id = team.header.frame_id
-        out.info = team.info
-        out.data = list(team.data)
+        out.info.resolution = res
+        out.info.width = width
+        out.info.height = height
+        out.info.origin.position.x = origin_x
+        out.info.origin.position.y = origin_y
+        out.info.origin.orientation.w = 1.0
+        out.data = [-1] * (width * height)
 
+        self._copy_team_cells(team, out)
         self._stamp_local_cells(local, out)
         return out
+
+    def _local_global_bounds(self, local: OccupancyGrid):
+        """This robot's own local map bounds, transformed into the shared map frame."""
+        map_info = local.info
+        if map_info.width == 0 or map_info.height == 0 or map_info.resolution <= 0.0:
+            return None
+
+        map_yaw = _yaw_from_quaternion(map_info.origin.orientation)
+        map_w = map_info.width * map_info.resolution
+        map_h = map_info.height * map_info.resolution
+        corners_local = [(0.0, 0.0), (map_w, 0.0), (map_w, map_h), (0.0, map_h)]
+
+        min_x = min_y = math.inf
+        max_x = max_y = -math.inf
+        for lx, ly in corners_local:
+            mx, my = _apply_pose(map_info.origin.position.x, map_info.origin.position.y, map_yaw, lx, ly)
+            gx, gy = _apply_pose(self._offset_x, self._offset_y, self._offset_yaw, mx, my)
+            min_x, min_y = min(min_x, gx), min(min_y, gy)
+            max_x, max_y = max(max_x, gx), max(max_y, gy)
+        return min_x, min_y, max_x, max_y
+
+    def _copy_team_cells(self, team: OccupancyGrid, canvas: OccupancyGrid):
+        """Copy team's cells into canvas at team's (axis-aligned) position within it."""
+        res_dst = canvas.info.resolution
+        col_offset = round((team.info.origin.position.x - canvas.info.origin.position.x) / res_dst)
+        row_offset = round((team.info.origin.position.y - canvas.info.origin.position.y) / res_dst)
+        out_w = canvas.info.width
+        out_h = canvas.info.height
+        data_out = canvas.data
+        data_in = team.data
+
+        for row in range(team.info.height):
+            out_row = row_offset + row
+            if not (0 <= out_row < out_h):
+                continue
+            for col in range(team.info.width):
+                out_col = col_offset + col
+                if not (0 <= out_col < out_w):
+                    continue
+                data_out[out_row * out_w + out_col] = data_in[row * team.info.width + col]
 
     def _local_to_global(self, local: OccupancyGrid) -> OccupancyGrid | None:
         """When no team map is available, transform the local SLAM map to global frame."""
