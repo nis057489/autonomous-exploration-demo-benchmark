@@ -375,9 +375,14 @@ fi
 # the same ROS_DOMAIN_ID over the network, one robot's renamer can pick up
 # another robot's raw driver frames and mislabel them with its own namespace
 # (symptoms: "two or more unconnected trees", "extrapolation into the past").
-# This does not apply to the --num-robots base-station path above, which
-# intentionally coordinates with independently-running remote robots.
-export ROS_LOCALHOST_ONLY=1
+# ROS_LOCALHOST_ONLY would also block the visualization laptop, so instead
+# restrict automatic discovery to this machine and explicitly allowlist the
+# laptop as a static peer -- the two robots never discover each other, but
+# RViz on the laptop still can. This does not apply to the --num-robots
+# base-station path above, which intentionally coordinates with
+# independently-running remote robots.
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+export ROS_STATIC_PEERS="${VIZ_LAPTOP_IP:-192.168.100.20}"
 
 # ── 1) Optional: local TurtleBot3 bringup ────────────────────────────────────
 
