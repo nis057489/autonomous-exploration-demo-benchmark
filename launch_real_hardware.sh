@@ -128,7 +128,18 @@ set -u
 
 # ── Build workspace (fast if nothing changed) ────────────────────────────────
 
-if [[ "${REBUILD}" == true ]]; then
+INSTALL_COMPLETE=true
+if [[ ! -f "${PROJECT_ROOT}/install/bme_ros2_navigation_py/share/bme_ros2_navigation_py/local_setup.bash" ]] || [[ ! -f "${PROJECT_ROOT}/install/bme_ros2_navigation/share/bme_ros2_navigation/local_setup.bash" ]]; then
+  INSTALL_COMPLETE=false
+fi
+
+if [[ "${REBUILD}" == true ]] || [[ "${INSTALL_COMPLETE}" == false ]]; then
+  if [[ "${REBUILD}" == true ]]; then
+    echo "Rebuilding workspace..."
+  else
+    echo "Install tree incomplete or missing packages; building workspace..."
+  fi
+
   echo "Cleaning old build artifacts..."
   (
     cd "${PROJECT_ROOT}"
