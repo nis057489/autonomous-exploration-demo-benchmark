@@ -123,6 +123,13 @@ set -u
 
 # ── Build workspace (fast if nothing changed) ────────────────────────────────
 
+echo "Cleaning old build artifacts..."
+(
+  cd "${PROJECT_ROOT}"
+  rm -rf build/explore_lite_msgs build/nav2_wfd build/frontier_exploration_ros2 build/bme_ros2_navigation_py 2>/dev/null || true
+  rm -rf install/roadmap_explorer 2>/dev/null || true
+)
+
 echo "Building workspace (skipping roadmap_explorer and other non-essential packages)..."
 (
   cd "${PROJECT_ROOT}"
