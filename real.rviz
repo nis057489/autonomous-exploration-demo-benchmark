@@ -240,7 +240,7 @@ Visualization Manager:
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: false
-      Enabled: false
+      Enabled: true
       Name: robot1 Local SLAM Map
       Topic:
         Depth: 5
@@ -256,7 +256,7 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /robot1/map_updates
       Use Timestamp: false
-      Value: false
+      Value: true
     - Alpha: 0.6000000238418579
       Binary representation: false
       Binary threshold: 100
