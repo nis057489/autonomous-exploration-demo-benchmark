@@ -190,7 +190,11 @@ if [[ "${REBUILD}" == true ]] || [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
   _create_bme_ros2_navigation_py_libexec
   # Re-source so newly (re)built packages' environment hooks (e.g. PYTHONPATH
   # entries for ament_python --symlink-install packages) take effect in this shell.
+  # colcon's generated setup.bash references unset vars (e.g. COLCON_TRACE), so
+  # nounset must be off while sourcing it, same as the initial source above.
+  set +u
   source "${PROJECT_ROOT}/install/setup.bash"
+  set -u
 else
   echo "Skipping build (pass --rebuild to rebuild workspace)."
 fi
