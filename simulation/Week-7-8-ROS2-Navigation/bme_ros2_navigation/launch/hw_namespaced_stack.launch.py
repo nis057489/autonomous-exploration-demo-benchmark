@@ -200,6 +200,170 @@ def _patch_explore_params(base_path, namespace, output_dir):
     return _write_yaml(output_dir, f"{namespace}_explore.yaml", data)
 
 
+# ── Distributed team map sharing ───────────────────────────────────────────────
+
+def _parse_peers(peers_str):
+    """Parse "name@ip@x@y@yaw,name2@ip2@x2@y2@yaw2" into a list of dicts.
+
+    x/y/yaw are the peer's spawn offset in the shared map frame (same
+    convention as this robot's own --robot-offset-x/y/yaw), needed to place
+    the peer's map correctly since this robot can't see the peer's TF at all
+    (each robot's discovery is intentionally isolated -- see the
+    ROS_STATIC_PEERS notes in generate_launch_description below).
+    """
+    peers = []
+    for entry in peers_str.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.split("@")
+        if len(parts) != 5:
+            raise ValueError(f"Invalid peer entry '{entry}', expected name@ip@x@y@yaw")
+        name, ip, x, y, yaw = parts
+        peers.append({"name": name, "ip": ip, "x": float(x), "y": float(y), "yaw": float(yaw)})
+    return peers
+
+
+def _team_map_share_actions(
+    namespace, peers, map_transport, bandwidth_kbps, loss_pct, delay_ms, haar_levels, laptop_ip
+):
+    """Per-peer DDIL relay (+ vxch encode/decode) feeding this robot's own
+    team_map_fusion instance, entirely local except for the relay nodes
+    themselves, which are the only processes given broadened discovery
+    (this robot's ROS_STATIC_PEERS + that one peer) via additional_env --
+    not a global SetEnvironmentVariable, since ros2 launch runs actions
+    concurrently/async and a global env mutation could easily leak into
+    the main stack depending on scheduling, silently reopening the
+    tf_frame_renamer cross-talk bug this whole isolation scheme exists to
+    prevent.
+    """
+    if not peers:
+        return []
+
+    actions = []
+    total_bands = haar_levels + 1
+
+    if map_transport == "vxch":
+        # Encode our own local map once, for any peer to pull. Purely local
+        # (reads our own /{namespace}/map), no broadened visibility needed.
+        actions.append(
+            Node(
+                package="voxelcodec_ros",
+                executable="occupancy_grid_vxch_node",
+                name=f"vxch_encoder_{namespace}",
+                output="screen",
+                parameters=[{
+                    "input_topic": f"/{namespace}/map",
+                    "output_base_topic": f"/{namespace}/vxch/map",
+                    "haar_levels": haar_levels,
+                    "compression": "zstd",
+                    "stream_id": namespace,
+                    "use_sim_time": False,
+                }],
+            )
+        )
+
+    for i, peer in enumerate(peers):
+        peer_name = peer["name"]
+        # Only these relay nodes get broadened peer visibility; everything
+        # else in this launch keeps the restrictive default set in
+        # generate_launch_description.
+        peer_env = {
+            "ROS_AUTOMATIC_DISCOVERY_RANGE": "LOCALHOST",
+            "ROS_STATIC_PEERS": f"{laptop_ip};{peer['ip']}",
+        }
+        seed = 42 + i
+
+        if map_transport == "vxch":
+            robot_ddil_base = f"/{namespace}/incoming/{peer_name}"
+            relay_topics = [
+                f"/{peer_name}/vxch/map/band_{k} {robot_ddil_base}/band_{k}"
+                " voxelcodec_msgs/msg/VoxelChannel"
+                for k in range(total_bands)
+            ]
+            relay_topics.append(
+                f"/{peer_name}/vxch/map/manifest {robot_ddil_base}/manifest"
+                " voxelcodec_msgs/msg/VoxelManifest reliable"
+            )
+            actions.append(
+                Node(
+                    package="voxelcodec_ros",
+                    executable="ddil_proxy_node",
+                    name=f"ddil_proxy_{namespace}_from_{peer_name}",
+                    output="screen",
+                    additional_env=peer_env,
+                    parameters=[{
+                        "bandwidth_kbps": bandwidth_kbps,
+                        "loss_pct": loss_pct,
+                        "delay_ms": delay_ms,
+                        "rng_seed": seed,
+                        "relay_topics": relay_topics,
+                        "use_sim_time": False,
+                    }],
+                )
+            )
+            actions.append(
+                Node(
+                    package="voxelcodec_ros",
+                    executable="vxch_occupancy_grid_node",
+                    name=f"vxch_decoder_{namespace}_from_{peer_name}",
+                    output="screen",
+                    parameters=[{
+                        "input_base_topic": robot_ddil_base,
+                        "output_topic": f"{robot_ddil_base}/map",
+                        "haar_levels": haar_levels,
+                        "publish_rate_hz": 1.0,
+                        "use_sim_time": False,
+                    }],
+                )
+            )
+        else:
+            actions.append(
+                Node(
+                    package="voxelcodec_ros",
+                    executable="ddil_proxy_node",
+                    name=f"ddil_proxy_{namespace}_from_{peer_name}",
+                    output="screen",
+                    additional_env=peer_env,
+                    parameters=[{
+                        "bandwidth_kbps": bandwidth_kbps,
+                        "loss_pct": loss_pct,
+                        "delay_ms": delay_ms,
+                        "rng_seed": seed,
+                        "relay_topics": [
+                            f"/{peer_name}/map /{namespace}/incoming/{peer_name}/map"
+                            " nav_msgs/msg/OccupancyGrid reliable"
+                        ],
+                        "use_sim_time": False,
+                    }],
+                )
+            )
+
+    actions.append(
+        Node(
+            package="bme_ros2_navigation",
+            executable="team_map_fusion.py",
+            name=f"team_map_fusion_{namespace}",
+            output="screen",
+            parameters=[{
+                "robot_names": [p["name"] for p in peers],
+                "offsets_x": [p["x"] for p in peers],
+                "offsets_y": [p["y"] for p in peers],
+                "offsets_yaw": [p["yaw"] for p in peers],
+                "global_frame": "map",
+                "publish_rate_hz": 1.0,
+                "map_topic_template": f"/{namespace}/incoming/{{name}}/map",
+                "output_topic": f"/{namespace}/team_map_ddil",
+                "output_metadata_topic": f"/{namespace}/team_map_ddil_metadata",
+                "publish_per_robot_maps": False,
+                "use_sim_time": False,
+            }],
+        )
+    )
+
+    return actions
+
+
 # ── Main action builder ──────────────────────────────────────────────────────────────
 
 def _create_actions(context):
@@ -214,6 +378,13 @@ def _create_actions(context):
     spawn_x = float(LaunchConfiguration("spawn_x").perform(context))
     spawn_y = float(LaunchConfiguration("spawn_y").perform(context))
     spawn_yaw = float(LaunchConfiguration("spawn_yaw").perform(context))
+    peers = _parse_peers(LaunchConfiguration("peers").perform(context))
+    map_transport = LaunchConfiguration("map_transport").perform(context)
+    bandwidth_kbps = float(LaunchConfiguration("bandwidth_kbps").perform(context))
+    loss_pct = float(LaunchConfiguration("loss_pct").perform(context))
+    delay_ms = float(LaunchConfiguration("delay_ms").perform(context))
+    haar_levels = int(LaunchConfiguration("haar_levels").perform(context))
+    laptop_ip = os.environ.get("VIZ_LAPTOP_IP", "192.168.100.20")
 
     output_dir = tempfile.mkdtemp(prefix=f"bme_hw_{namespace}_")
 
@@ -389,6 +560,13 @@ def _create_actions(context):
         )
     )
 
+    actions.extend(
+        _team_map_share_actions(
+            namespace, peers, map_transport, bandwidth_kbps, loss_pct, delay_ms,
+            haar_levels, laptop_ip,
+        )
+    )
+
     return actions
 
 
@@ -420,5 +598,15 @@ def generate_launch_description():
                               description="Robot starting X in the shared map frame"),
         DeclareLaunchArgument("spawn_y", default_value="0.0"),
         DeclareLaunchArgument("spawn_yaw", default_value="0.0"),
+        DeclareLaunchArgument(
+            "peers", default_value="",
+            description="Comma-separated name@ip@x@y@yaw for every other robot in the "
+                        "team, for distributed map sharing. Empty = no map sharing."),
+        DeclareLaunchArgument("map_transport", default_value="baseline",
+                              description="'baseline' or 'vxch' -- how peer maps are relayed"),
+        DeclareLaunchArgument("bandwidth_kbps", default_value="0"),
+        DeclareLaunchArgument("loss_pct", default_value="0.0"),
+        DeclareLaunchArgument("delay_ms", default_value="0"),
+        DeclareLaunchArgument("haar_levels", default_value="4"),
         OpaqueFunction(function=_create_actions),
     ])

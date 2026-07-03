@@ -45,6 +45,10 @@ DELAY_MS="${DELAY_MS:-0}"
 HAAR_LEVELS="${HAAR_LEVELS:-4}"
 RANDOM_SEED="${RANDOM_SEED:--1}"
 ROBOT_STARTUP_DELAY_S="${ROBOT_STARTUP_DELAY_S:-0.0}"
+# ROBOT_HOSTS: every robot in the team, "name@ip@x@y@yaw" comma-separated, for
+# distributed map sharing (each robot's own launch excludes itself to get its
+# peer list). Empty = no map sharing.
+ROBOT_HOSTS="${ROBOT_HOSTS:-}"
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 
@@ -273,7 +277,24 @@ fi
 
 # ── Real robot namespaced stack (per-robot local hardware launch) ───────────
 if [[ -n "${ROBOT_ID}" ]]; then
+  # Build this robot's peer list from ROBOT_HOSTS, excluding itself.
+  PEERS=""
+  if [[ -n "${ROBOT_HOSTS}" ]]; then
+    IFS=',' read -ra _robot_hosts <<< "${ROBOT_HOSTS}"
+    for _host in "${_robot_hosts[@]}"; do
+      _host="$(echo "${_host}" | xargs)"
+      [[ -z "${_host}" ]] && continue
+      _host_name="${_host%%@*}"
+      if [[ "${_host_name}" != "${ROBOT_ID}" ]]; then
+        PEERS+="${PEERS:+,}${_host}"
+      fi
+    done
+  fi
+
   echo "Starting namespaced hardware stack for robot '${ROBOT_ID}'..."
+  if [[ -n "${PEERS}" ]]; then
+    echo "Distributed map sharing (map_transport=${MAP_TRANSPORT}) with peers: ${PEERS}"
+  fi
   ros2 launch bme_ros2_navigation hw_namespaced_stack.launch.py \
     namespace:="${ROBOT_ID}" \
     nav_params_file:="${NAVIGATION_PARAMS}" \
@@ -283,7 +304,13 @@ if [[ -n "${ROBOT_ID}" ]]; then
     tb3_model:="${TB3_MODEL}" \
     spawn_x:="${ROBOT_OFFSET_X}" \
     spawn_y:="${ROBOT_OFFSET_Y}" \
-    spawn_yaw:="${ROBOT_OFFSET_YAW}"
+    spawn_yaw:="${ROBOT_OFFSET_YAW}" \
+    peers:="${PEERS}" \
+    map_transport:="${MAP_TRANSPORT}" \
+    bandwidth_kbps:="${BANDWIDTH_KBPS}" \
+    loss_pct:="${LOSS_PCT}" \
+    delay_ms:="${DELAY_MS}" \
+    haar_levels:="${HAAR_LEVELS}"
   exit $?
 fi
 

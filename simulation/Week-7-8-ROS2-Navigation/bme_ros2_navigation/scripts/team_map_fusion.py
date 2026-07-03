@@ -43,6 +43,20 @@ class TeamMapFusion(Node):
         # global_map_suffix: rename per-robot topic, e.g. "_raw" → /{robot}/global_map_raw
         # Used in baseline+DDIL mode so DdilProxy can intercept before Nav2/frontier.
         self.declare_parameter("global_map_suffix", "")
+        # map_topic_template: where to subscribe for each robot_names entry. Defaults to
+        # the centralized-fusion layout (subscribe directly to each robot's own local
+        # map); the distributed per-robot role overrides this to read the already-local,
+        # already-DDIL'd copies of *other* robots' maps instead (e.g.
+        # "/{namespace}/incoming/{name}/map"), since a single machine can't see every
+        # robot's raw /{name}/map directly.
+        self.declare_parameter("map_topic_template", "/{name}/map")
+        self.declare_parameter("output_topic", "/map")
+        self.declare_parameter("output_metadata_topic", "/map_metadata")
+        # publish_per_robot_maps: the centralized-fusion role also republishes the same
+        # merged result to /{robot}/global_map(_metadata) per robot, which the DDIL
+        # proxies then intercept. The distributed per-robot role only wants a single
+        # output_topic and doesn't need this.
+        self.declare_parameter("publish_per_robot_maps", True)
 
         robot_names = list(self.get_parameter("robot_names").value)
         offsets_x = list(self.get_parameter("offsets_x").value)
@@ -65,6 +79,10 @@ class TeamMapFusion(Node):
         self.last_warn_time = 0.0
         self.vxch_mode = bool(self.get_parameter("vxch_mode").value)
         global_map_suffix = str(self.get_parameter("global_map_suffix").value)
+        map_topic_template = str(self.get_parameter("map_topic_template").value)
+        output_topic = str(self.get_parameter("output_topic").value)
+        output_metadata_topic = str(self.get_parameter("output_metadata_topic").value)
+        self.publish_per_robot_maps = bool(self.get_parameter("publish_per_robot_maps").value)
 
         self.map_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -80,27 +98,31 @@ class TeamMapFusion(Node):
             )
         }
 
-        self.team_map_pub = self.create_publisher(OccupancyGrid, "/map", self.map_qos)
+        self.team_map_pub = self.create_publisher(OccupancyGrid, output_topic, self.map_qos)
         self.team_metadata_pub = self.create_publisher(
-            MapMetaData, "/map_metadata", self.map_qos
+            MapMetaData, output_metadata_topic, self.map_qos
         )
-        self.robot_map_pubs = {
-            name: self.create_publisher(
-                OccupancyGrid, f"/{name}/global_map{global_map_suffix}", self.map_qos
-            )
-            for name in robot_names
-        }
-        self.robot_metadata_pubs = {
-            name: self.create_publisher(
-                MapMetaData, f"/{name}/global_map_metadata", self.map_qos
-            )
-            for name in robot_names
-        }
+        if self.publish_per_robot_maps:
+            self.robot_map_pubs = {
+                name: self.create_publisher(
+                    OccupancyGrid, f"/{name}/global_map{global_map_suffix}", self.map_qos
+                )
+                for name in robot_names
+            }
+            self.robot_metadata_pubs = {
+                name: self.create_publisher(
+                    MapMetaData, f"/{name}/global_map_metadata", self.map_qos
+                )
+                for name in robot_names
+            }
+        else:
+            self.robot_map_pubs = {}
+            self.robot_metadata_pubs = {}
 
         self.map_subscriptions = [
             self.create_subscription(
                 OccupancyGrid,
-                f"/{name}/map",
+                map_topic_template.format(name=name),
                 lambda msg, robot_name=name: self._map_callback(robot_name, msg),
                 self.map_qos,
             )
@@ -109,8 +131,7 @@ class TeamMapFusion(Node):
 
         self.timer = self.create_timer(1.0 / publish_rate_hz, self._publish_merged_map)
         self.get_logger().info(
-            "team_map_fusion publishing /map and per-robot /global_map topics from: "
-            + ", ".join(robot_names)
+            f"team_map_fusion publishing {output_topic} from: " + ", ".join(robot_names)
         )
 
     def _map_callback(self, robot_name, msg):
