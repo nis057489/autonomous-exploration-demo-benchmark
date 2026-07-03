@@ -31,6 +31,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.actions import PushRosNamespace
+from launch_ros.actions import SetRemap
 
 
 # ── YAML helpers ──────────────────────────────────────────────────────────────
@@ -328,6 +329,14 @@ def _create_actions(context):
             actions=[
                 GroupAction([
                     PushRosNamespace(abs_namespace),
+                    # slam_toolbox publishes "map"/"map_metadata" as absolute
+                    # topics ("/map", "/map_metadata") in its own source, so
+                    # node namespacing alone never prefixes them -- without
+                    # this, the real map data goes to the bare global /map
+                    # and per_robot_map_compositor (subscribed to
+                    # {namespace}/map) never sees it.
+                    SetRemap(src="/map", dst=f"{abs_namespace}/map"),
+                    SetRemap(src="/map_metadata", dst=f"{abs_namespace}/map_metadata"),
                     IncludeLaunchDescription(
                         PythonLaunchDescriptionSource(slam_launch),
                         launch_arguments={
