@@ -1,0 +1,9 @@
+string input_topic
+string output_topic
+uint64 msgs_received
+uint64 msgs_dropped
+uint64 msgs_deduped
+uint64 msgs_sent
+uint64 bytes_sent
+float32 msgs_per_sec
+float32 kbytes_per_sec
