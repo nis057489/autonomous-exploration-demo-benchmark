@@ -4,14 +4,14 @@ Panels:
     Name: Displays
     Property Tree Widget:
       Expanded:
-        - /robot2 LaserScan1
+        - /robot1 LaserScan1
       Splitter Ratio: 0.3035952150821686
     Tree Height: 848
   - Class: rviz_common/Time
     Experimental: false
     Name: Time
     SyncMode: 0
-    SyncSource: robot1 LaserScan
+    SyncSource: ""
   - Class: rviz_autonomous_exploration_benchmark/ExplorationControlPanel
     Name: Exploration Control
 Visualization Manager:
@@ -66,10 +66,6 @@ Visualization Manager:
           Value: true
         robot1/odom:
           Value: true
-        robot1/wheel_left_link:
-          Value: true
-        robot1/wheel_right_link:
-          Value: true
       Marker Scale: 1
       Name: TF
       Show Arrows: false
@@ -78,26 +74,8 @@ Visualization Manager:
       Tree:
         map:
           robot1/map:
-            {}
-          robot1/odom:
-            robot1/base_footprint:
-              robot1/base_link:
-                robot1/base_scan:
-                  {}
-                robot1/camera_link:
-                  robot1/camera_rgb_frame:
-                    robot1/camera_rgb_optical_frame:
-                      {}
-                robot1/caster_back_left_link:
-                  {}
-                robot1/caster_back_right_link:
-                  {}
-                robot1/imu_link:
-                  {}
-                robot1/wheel_left_link:
-                  {}
-                robot1/wheel_right_link:
-                  {}
+            robot1/odom:
+              {}
       Update Interval: 0
       Value: true
     - Alpha: 0.75
@@ -286,7 +264,7 @@ Visualization Manager:
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: false
-      Enabled: false
+      Enabled: true
       Name: robot1 Team Map DDIL
       Topic:
         Depth: 5
@@ -302,7 +280,7 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /robot1/team_map_ddil_updates
       Use Timestamp: false
-      Value: false
+      Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: robot1 Frontiers
@@ -360,7 +338,58 @@ Visualization Manager:
         Expand Joint Details: false
         Expand Link Details: false
         Expand Tree: false
-        Link Tree Style: ""
+        Link Tree Style: Links in Alphabetic Order
+        robot2/base_footprint:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        robot2/base_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        robot2/base_scan:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        robot2/camera_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        robot2/camera_rgb_frame:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        robot2/camera_rgb_optical_frame:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        robot2/caster_back_left_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        robot2/caster_back_right_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        robot2/imu_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        robot2/wheel_left_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        robot2/wheel_right_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
       Mass Properties:
         Inertia: false
         Mass: false
@@ -432,7 +461,7 @@ Visualization Manager:
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: false
-      Enabled: true
+      Enabled: false
       Name: robot2 Nav Map (composite)
       Topic:
         Depth: 5
@@ -448,7 +477,7 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /robot2/nav_map_updates
       Use Timestamp: false
-      Value: true
+      Value: false
     - Alpha: 0.4000000059604645
       Binary representation: false
       Binary threshold: 100
@@ -519,29 +548,6 @@ Visualization Manager:
       Color Scheme: map
       Draw Behind: false
       Enabled: true
-      Name: robot1 Map (dup, fixed topic)
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /robot1/map
-      Update Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /robot1/map_updates
-      Use Timestamp: false
-      Value: true
-    - Alpha: 0.699999988079071
-      Binary representation: false
-      Binary threshold: 100
-      Class: rviz_default_plugins/Map
-      Color Scheme: map
-      Draw Behind: false
-      Enabled: true
       Name: robot1 Local Costmap Obstacle Layer
       Topic:
         Depth: 5
@@ -558,52 +564,6 @@ Visualization Manager:
         Value: /robot1/local_costmap/obstacle_layer_updates
       Use Timestamp: false
       Value: true
-    - Alpha: 0.699999988079071
-      Binary representation: false
-      Binary threshold: 100
-      Class: rviz_default_plugins/Map
-      Color Scheme: map
-      Draw Behind: false
-      Enabled: false
-      Name: Map
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /robot1/team_map_ddil
-      Update Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /robot1/team_map_ddil_updates
-      Use Timestamp: false
-      Value: false
-    - Alpha: 0.699999988079071
-      Binary representation: false
-      Binary threshold: 100
-      Class: rviz_default_plugins/Map
-      Color Scheme: map
-      Draw Behind: false
-      Enabled: false
-      Name: Map
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /map
-      Update Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /map_updates
-      Use Timestamp: false
-      Value: false
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -632,25 +592,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 44.70929718017578
+      Distance: 77.0798568725586
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -0.6814653277397156
-        Y: 0.316665381193161
-        Z: -2.6640114784240723
+        X: 0.6184492111206055
+        Y: -0.1604022979736328
+        Z: -3.120882749557495
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.7600002288818359
+      Pitch: 1.0450000762939453
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 5.303184509277344
+      Yaw: 4.618183612823486
     Saved: ~
 Window Geometry:
   Displays:
@@ -665,4 +625,4 @@ Window Geometry:
     collapsed: false
   Width: 1600
   X: 188
-  Y: 50
+  Y: 15
