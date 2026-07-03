@@ -326,16 +326,18 @@ def _create_actions(context):
         TimerAction(
             period=nav2_delay,
             actions=[
-                IncludeLaunchDescription(
-                    PythonLaunchDescriptionSource(nav2_launch),
-                    launch_arguments={
-                        "namespace": namespace,
-                        "use_namespace": "True",
-                        "use_sim_time": "false",
-                        "params_file": nav_cfg,
-                        "autostart": "True",
-                    }.items(),
-                )
+                GroupAction([
+                    PushRosNamespace(abs_namespace),
+                    IncludeLaunchDescription(
+                        PythonLaunchDescriptionSource(nav2_launch),
+                        launch_arguments={
+                            "namespace": namespace,
+                            "use_sim_time": "false",
+                            "params_file": nav_cfg,
+                            "autostart": "True",
+                        }.items(),
+                    ),
+                ])
             ],
         )
     )
