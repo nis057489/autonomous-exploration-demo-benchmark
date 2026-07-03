@@ -126,10 +126,25 @@ if [[ -f "${PROJECT_ROOT}/install/setup.bash" ]]; then
 fi
 set -u
 
+_create_bme_ros2_navigation_py_libexec() {
+  local base="${PROJECT_ROOT}/install/bme_ros2_navigation_py"
+  local src="${base}/lib/bme_ros2_navigation_py"
+  local dst="${base}/libexec/bme_ros2_navigation_py"
+
+  if [[ -x "${src}/tf_frame_renamer" ]] && [[ ! -x "${dst}/tf_frame_renamer" ]]; then
+    echo "Creating libexec symlink for bme_ros2_navigation_py executables..."
+    mkdir -p "${base}/libexec"
+    rm -rf "${dst}" 2>/dev/null || true
+    ln -s "../lib/bme_ros2_navigation_py" "${dst}"
+  fi
+}
+
 # ── Build workspace (fast if nothing changed) ────────────────────────────────
 
+_create_bme_ros2_navigation_py_libexec
+
 INSTALL_COMPLETE=true
-if [[ ! -f "${PROJECT_ROOT}/install/bme_ros2_navigation_py/share/bme_ros2_navigation_py/local_setup.bash" ]] || [[ ! -f "${PROJECT_ROOT}/install/bme_ros2_navigation/share/bme_ros2_navigation/local_setup.bash" ]]; then
+if [[ ! -f "${PROJECT_ROOT}/install/bme_ros2_navigation_py/share/bme_ros2_navigation_py/local_setup.bash" ]] || [[ ! -f "${PROJECT_ROOT}/install/bme_ros2_navigation/share/bme_ros2_navigation/local_setup.bash" ]] || [[ ! -x "${PROJECT_ROOT}/install/bme_ros2_navigation_py/libexec/bme_ros2_navigation_py/tf_frame_renamer" ]]; then
   INSTALL_COMPLETE=false
 fi
 
@@ -159,6 +174,7 @@ if [[ "${REBUILD}" == true ]] || [[ "${INSTALL_COMPLETE}" == false ]]; then
       explore_lite_msgs \
       nav2_wfd
   )
+  _create_bme_ros2_navigation_py_libexec
 else
   echo "Skipping build (pass --rebuild to rebuild workspace)."
 fi
