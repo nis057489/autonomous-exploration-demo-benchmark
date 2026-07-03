@@ -45,9 +45,13 @@ ROBOT_STARTUP_DELAY_S="${ROBOT_STARTUP_DELAY_S:-0.0}"
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 
-LOCAL_BRINGUP=true
+LOCAL_BRINGUP=false
 TB3_MODEL="${TURTLEBOT3_MODEL:-}"
 NUM_ROBOTS="${NUM_ROBOTS:-1}"
+ROBOT_ID="${ROBOT_ID:-}"
+ROBOT_OFFSET_X="${ROBOT_OFFSET_X:-0.0}"
+ROBOT_OFFSET_Y="${ROBOT_OFFSET_Y:-0.0}"
+ROBOT_OFFSET_YAW="${ROBOT_OFFSET_YAW:-0.0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -55,8 +59,28 @@ while [[ $# -gt 0 ]]; do
       LOCAL_BRINGUP=true
       shift
       ;;
+    --no-local-bringup)
+      LOCAL_BRINGUP=false
+      shift
+      ;;
     --model)
       TB3_MODEL="$2"
+      shift 2
+      ;;
+    --robot-id|--robot-name|--namespace)
+      ROBOT_ID="$2"
+      shift 2
+      ;;
+    --robot-offset-x)
+      ROBOT_OFFSET_X="$2"
+      shift 2
+      ;;
+    --robot-offset-y)
+      ROBOT_OFFSET_Y="$2"
+      shift 2
+      ;;
+    --robot-offset-yaw)
+      ROBOT_OFFSET_YAW="$2"
       shift 2
       ;;
     --num-robots)
@@ -65,7 +89,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: $0 [--local-bringup] [--model burger|waffle|waffle_pi] [--num-robots <n>]" >&2
+      echo "Usage: $0 [--local-bringup|--no-local-bringup] [--model burger|waffle|waffle_pi] [--robot-id <name>] [--robot-offset-x <x>] [--robot-offset-y <y>] [--robot-offset-yaw <yaw>] [--num-robots <n>]" >&2
       exit 1
       ;;
   esac
@@ -73,6 +97,12 @@ done
 
 if ! [[ "${NUM_ROBOTS}" =~ ^[0-9]+$ ]] || (( NUM_ROBOTS < 1 )); then
   echo "NUM_ROBOTS must be a positive integer (got '${NUM_ROBOTS}')." >&2
+  exit 1
+fi
+
+if [[ -n "${ROBOT_ID}" ]] && (( NUM_ROBOTS > 1 )); then
+  echo "Error: --robot-id cannot be used with --num-robots > 1." >&2
+  echo "Use --robot-id on each robot and start the base-station multi-robot experiment separately." >&2
   exit 1
 fi
 
@@ -137,10 +167,27 @@ ensure_frontier_exploration_ros2() {
 
 check_pkg slam_toolbox
 check_pkg nav2_bringup
+check_pkg bme_ros2_navigation
 ensure_frontier_exploration_ros2
 
 if [[ "${LOCAL_BRINGUP}" == true ]]; then
   check_pkg turtlebot3_bringup
+fi
+
+# ── Real robot namespaced stack (per-robot local hardware launch) ───────────
+if [[ -n "${ROBOT_ID}" ]]; then
+  echo "Starting namespaced hardware stack for robot '${ROBOT_ID}'..."
+  ros2 launch bme_ros2_navigation hw_namespaced_stack.launch.py \
+    namespace:="${ROBOT_ID}" \
+    nav_params_file:="${NAVIGATION_PARAMS}" \
+    slam_params_file:="${SLAM_PARAMS}" \
+    explore_config:="${EXPLORE_CONFIG}" \
+    local_bringup:="${LOCAL_BRINGUP}" \
+    tb3_model:="${TB3_MODEL}" \
+    spawn_x:="${ROBOT_OFFSET_X}" \
+    spawn_y:="${ROBOT_OFFSET_Y}" \
+    spawn_yaw:="${ROBOT_OFFSET_YAW}"
+  exit $?
 fi
 
 # ── Nav2 process cleanup (same as launch.sh) ─────────────────────────────────
@@ -197,13 +244,14 @@ cleanup_existing_nav2
 # If you have a robot-specific nav params file, point NAVIGATION_PARAMS at it instead.
 NAVIGATION_PARAMS="${PROJECT_ROOT}/simulation/Week-7-8-ROS2-Navigation/bme_ros2_navigation/config/navigation_hw.yaml"
 SLAM_PARAMS="${PROJECT_ROOT}/simulation/Week-7-8-ROS2-Navigation/bme_ros2_navigation/config/slam_toolbox_mapping_hw.yaml"
+EXPLORE_CONFIG="${PROJECT_ROOT}/config/frontier_exploration_ros2/config.yaml"
 
 TRACKER_PARAMS="${PROJECT_ROOT}/install/rviz_autonomous_exploration_benchmark/share/rviz_autonomous_exploration_benchmark/config/frontier_path_tracker.yaml"
 if [[ ! -f "${TRACKER_PARAMS}" ]]; then
   TRACKER_PARAMS="${PROJECT_ROOT}/rviz/src/frontier_path_tracker.yaml"
 fi
 
-# ── Multi-robot path ─────────────────────────────────────────────────────────
+# ── Real robot namespaced stack (per-robot local hardware launch) ───────────
 
 if (( NUM_ROBOTS > 1 )); then
   echo "Multi-robot mode: ${NUM_ROBOTS} robots, map_transport=${MAP_TRANSPORT}, bandwidth_kbps=${BANDWIDTH_KBPS}, loss_pct=${LOSS_PCT}, delay_ms=${DELAY_MS}."
