@@ -52,6 +52,7 @@ ROBOT_ID="${ROBOT_ID:-}"
 ROBOT_OFFSET_X="${ROBOT_OFFSET_X:-0.0}"
 ROBOT_OFFSET_Y="${ROBOT_OFFSET_Y:-0.0}"
 ROBOT_OFFSET_YAW="${ROBOT_OFFSET_YAW:-0.0}"
+REBUILD=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -61,6 +62,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-local-bringup)
       LOCAL_BRINGUP=false
+      shift
+      ;;
+    --rebuild)
+      REBUILD=true
       shift
       ;;
     --model)
@@ -89,7 +94,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: $0 [--local-bringup|--no-local-bringup] [--model burger|waffle|waffle_pi] [--robot-id <name>] [--robot-offset-x <x>] [--robot-offset-y <y>] [--robot-offset-yaw <yaw>] [--num-robots <n>]" >&2
+      echo "Usage: $0 [--local-bringup|--no-local-bringup] [--rebuild] [--model burger|waffle|waffle_pi] [--robot-id <name>] [--robot-offset-x <x>] [--robot-offset-y <y>] [--robot-offset-yaw <yaw>] [--num-robots <n>]" >&2
       exit 1
       ;;
   esac
@@ -123,25 +128,29 @@ set -u
 
 # ── Build workspace (fast if nothing changed) ────────────────────────────────
 
-echo "Cleaning old build artifacts..."
-(
-  cd "${PROJECT_ROOT}"
-  rm -rf build/explore_lite_msgs build/nav2_wfd build/frontier_exploration_ros2 build/bme_ros2_navigation_py 2>/dev/null || true
-  rm -rf install/roadmap_explorer 2>/dev/null || true
-)
+if [[ "${REBUILD}" == true ]]; then
+  echo "Cleaning old build artifacts..."
+  (
+    cd "${PROJECT_ROOT}"
+    rm -rf build/explore_lite_msgs build/nav2_wfd build/frontier_exploration_ros2 build/bme_ros2_navigation_py 2>/dev/null || true
+    rm -rf install/roadmap_explorer 2>/dev/null || true
+  )
 
-echo "Building workspace (skipping roadmap_explorer and other non-essential packages)..."
-(
-  cd "${PROJECT_ROOT}"
-  colcon build --symlink-install \
-    --packages-select \
-    bme_ros2_navigation \
-    bme_ros2_navigation_py \
-    frontier_exploration_ros2 \
-    explore_lite \
-    explore_lite_msgs \
-    nav2_wfd
-)
+  echo "Building workspace (skipping roadmap_explorer and other non-essential packages)..."
+  (
+    cd "${PROJECT_ROOT}"
+    colcon build --symlink-install \
+      --packages-select \
+      bme_ros2_navigation \
+      bme_ros2_navigation_py \
+      frontier_exploration_ros2 \
+      explore_lite \
+      explore_lite_msgs \
+      nav2_wfd
+  )
+else
+  echo "Skipping build (pass --rebuild to rebuild workspace)."
+fi
 
 # ── Validate required packages ───────────────────────────────────────────────
 
@@ -194,6 +203,19 @@ ensure_frontier_exploration_ros2
 
 if [[ "${LOCAL_BRINGUP}" == true ]]; then
   check_pkg turtlebot3_bringup
+fi
+
+# ── Config file paths ─────────────────────────────────────────────────────────
+
+# Reuse the existing sim nav params — they are already tuned to TB3 velocity limits.
+# If you have a robot-specific nav params file, point NAVIGATION_PARAMS at it instead.
+NAVIGATION_PARAMS="${PROJECT_ROOT}/simulation/Week-7-8-ROS2-Navigation/bme_ros2_navigation/config/navigation_hw.yaml"
+SLAM_PARAMS="${PROJECT_ROOT}/simulation/Week-7-8-ROS2-Navigation/bme_ros2_navigation/config/slam_toolbox_mapping_hw.yaml"
+EXPLORE_CONFIG="${PROJECT_ROOT}/config/frontier_exploration_ros2/config.yaml"
+
+TRACKER_PARAMS="${PROJECT_ROOT}/install/rviz_autonomous_exploration_benchmark/share/rviz_autonomous_exploration_benchmark/config/frontier_path_tracker.yaml"
+if [[ ! -f "${TRACKER_PARAMS}" ]]; then
+  TRACKER_PARAMS="${PROJECT_ROOT}/rviz/src/frontier_path_tracker.yaml"
 fi
 
 # ── Real robot namespaced stack (per-robot local hardware launch) ───────────
