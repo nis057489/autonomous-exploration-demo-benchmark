@@ -110,13 +110,20 @@ frontier_explorer:
     # Minimum seconds to wait before selecting the next frontier after a successful goal.
     post_goal_min_settle: 1.50
 
-    # Enable temporary suppression for frontiers that repeatedly fail or stall.
-    # Use if you are having issues with SLAM or Nav2.
-    frontier_suppression_enabled: false
+    # Enable suppression for frontiers that repeatedly fail or stall.
+    # Use if you are having issues with SLAM or Nav2, or to give up on unreachable waypoints
+    # (e.g. behind glass) after frontier_suppression_attempt_threshold failed attempts.
+    frontier_suppression_enabled: true
 
-    # Behavior when frontiers exist but all of them are temporarily suppressed: stay or return_to_start. 
+    # Behavior when frontiers exist but all of them are suppressed: stay or return_to_start.
     # Requires `frontier_suppression_enabled: true`
     all_frontiers_suppressed_behavior: return_to_start
+
+    # Avoid picking frontiers that fall within map area the team already knows about (per the
+    # raw team-fused map, not just this robot's own already-merged nav_map), or that are close
+    # to a teammate's last known position. Falls back to a no-op automatically on single-robot
+    # runs (no team map / no peers configured).
+    team_awareness_enabled: true
 
 
     # --------------- Algorithm Configuration - Advanced Users --------------- #
@@ -258,4 +265,28 @@ frontier_explorer:
 
     # Maximum number of active suppressed regions kept in memory.
     frontier_suppression_max_regions: 64
+
+    # Once an area has failed frontier_suppression_attempt_threshold times, give up on it for
+    # good instead of letting the suppression region expire after frontier_suppression_timeout_s.
+    # Use for waypoints that will never be reachable (e.g. behind glass). Set to false to keep
+    # the old behavior of every suppressed area eventually becoming eligible again.
+    frontier_suppression_permanent_after_threshold: true
+
+
+    # --------------- Team Awareness --------------- #
+    # Requires `team_awareness_enabled: true`. Topic names below are set per-robot by the
+    # multi-robot launch files; the values here are single-robot-safe defaults.
+
+    # Raw team-fused map topic (e.g. team_map_ddil), independent from map_topic/nav_map above
+    # which is already merged with this robot's own local map and can no longer distinguish
+    # "I explored this" from "the team told me about this."
+    team_map_topic: team_map_ddil
+
+    # Extra radius in meters (added to the frontier's own goal-point cell) to check against the
+    # team map before accepting a candidate as still-unknown to the team.
+    team_known_check_radius_m: 0.0
+
+    # Skip candidate waypoints within this many meters of a teammate's last known position
+    # (relayed via each peer's own pose topic in peer_pose_topics). 0 disables this check.
+    peer_avoidance_radius_m: 1.0
 

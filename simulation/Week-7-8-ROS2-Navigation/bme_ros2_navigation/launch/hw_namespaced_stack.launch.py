@@ -176,7 +176,7 @@ def _patch_nav_params(base_path, namespace, output_dir):
     return _write_yaml(output_dir, f"{namespace}_navigation.yaml", data)
 
 
-def _patch_explore_params(base_path, namespace, output_dir):
+def _patch_explore_params(base_path, namespace, peers, peer_avoidance_radius_m, output_dir):
     data = copy.deepcopy(_load_yaml(base_path))
     p = data.setdefault("frontier_explorer", {}).setdefault(
         "ros__parameters", {})
@@ -189,6 +189,14 @@ def _patch_explore_params(base_path, namespace, output_dir):
     p["frontier_marker_topic"] = f"/{namespace}/explore/frontiers"
     p["selected_frontier_topic"] = f"/{namespace}/explore/selected_frontier"
     p["optimized_map_topic"] = f"/{namespace}/explore/optimized_map"
+    # Team awareness: avoid re-exploring cells the team map already resolved (raw
+    # team_map_ddil, not the already-locally-merged nav_map above) and avoid waypoints too
+    # close to a teammate's last known position (relayed via pose_relay_* in
+    # _team_map_share_actions, independent of the map_transport bandwidth model).
+    p["team_map_topic"] = f"/{namespace}/team_map_ddil"
+    p["own_pose_topic"] = f"/{namespace}/explore/pose"
+    p["peer_pose_topics"] = [f"/{namespace}/incoming/{peer['name']}/pose" for peer in peers]
+    p["peer_avoidance_radius_m"] = peer_avoidance_radius_m
     # The frontier_explorer Node() below passes this file straight through as
     # a --params-file with no namespace-aware rewriting (same issue fixed for
     # slam_toolbox above). A bare "frontier_explorer:" key does not bind to
@@ -273,6 +281,27 @@ def _team_map_share_actions(
             "ROS_STATIC_PEERS": f"{laptop_ip};{peer['ip']}",
         }
         seed = 42 + i
+
+        # Lightweight peer-position beacon for waypoint-avoidance, kept independent of the
+        # map_transport bandwidth/loss/delay model above -- position updates are cheap and
+        # must not be conflated with what the vxch data-efficiency experiment is measuring.
+        # Reuses the same peer_env broadening as the map relays: only this one named topic
+        # crosses to the peer, never raw /tf (which would reopen the tf_frame_renamer
+        # crosstalk bug the ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST isolation prevents).
+        actions.append(
+            Node(
+                package="topic_tools",
+                executable="relay",
+                name=f"pose_relay_{namespace}_from_{peer_name}",
+                output="screen",
+                additional_env=peer_env,
+                arguments=[
+                    f"/{peer_name}/explore/pose",
+                    f"/{namespace}/incoming/{peer_name}/pose",
+                ],
+                parameters=[{"use_sim_time": False}],
+            )
+        )
 
         if map_transport == "vxch":
             robot_ddil_base = f"/{namespace}/incoming/{peer_name}"
@@ -384,13 +413,15 @@ def _create_actions(context):
     loss_pct = float(LaunchConfiguration("loss_pct").perform(context))
     delay_ms = float(LaunchConfiguration("delay_ms").perform(context))
     haar_levels = int(LaunchConfiguration("haar_levels").perform(context))
+    peer_avoidance_radius_m = float(LaunchConfiguration("peer_avoidance_radius_m").perform(context))
     laptop_ip = os.environ.get("VIZ_LAPTOP_IP", "192.168.100.20")
 
     output_dir = tempfile.mkdtemp(prefix=f"bme_hw_{namespace}_")
 
     slam_cfg = _patch_slam_params(slam_params_file, namespace, output_dir)
     nav_cfg = _patch_nav_params(nav_params_file, namespace, output_dir)
-    explore_cfg = _patch_explore_params(explore_config, namespace, output_dir)
+    explore_cfg = _patch_explore_params(
+        explore_config, namespace, peers, peer_avoidance_radius_m, output_dir)
 
     slam_launch = os.path.join(
         get_package_share_directory("slam_toolbox"),
@@ -608,5 +639,9 @@ def generate_launch_description():
         DeclareLaunchArgument("loss_pct", default_value="0.0"),
         DeclareLaunchArgument("delay_ms", default_value="0"),
         DeclareLaunchArgument("haar_levels", default_value="4"),
+        DeclareLaunchArgument(
+            "peer_avoidance_radius_m", default_value="1.0",
+            description="Skip candidate waypoints within this many meters of a teammate's "
+                        "last known position. 0 disables peer-proximity filtering."),
         OpaqueFunction(function=_create_actions),
     ])

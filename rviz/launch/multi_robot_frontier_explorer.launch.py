@@ -70,6 +70,10 @@ def _frontier_params(base_path, namespace, use_sim_time, autostart, control_serv
     params["frontier_marker_topic"] = f"/{namespace}/explore/frontiers"
     params["selected_frontier_topic"] = f"/{namespace}/explore/selected_frontier"
     params["optimized_map_topic"] = f"/{namespace}/explore/optimized_map"
+    # Team awareness: raw (pre-local-merge) team-fused map, same topic backing nav_map above.
+    # Peer-position avoidance is left inactive here (no peer_pose_topics wired for the
+    # simulation stack yet) -- team_known_check still applies via team_map_topic.
+    params["team_map_topic"] = f"/{namespace}/team_map_ddil"
     params["frontier_marker_color_r"] = color_255[0] / 255.0
     params["frontier_marker_color_g"] = color_255[1] / 255.0
     params["frontier_marker_color_b"] = color_255[2] / 255.0
