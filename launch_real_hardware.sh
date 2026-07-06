@@ -43,6 +43,7 @@ BANDWIDTH_KBPS="${BANDWIDTH_KBPS:-0}"
 LOSS_PCT="${LOSS_PCT:-0.0}"
 DELAY_MS="${DELAY_MS:-0}"
 HAAR_LEVELS="${HAAR_LEVELS:-4}"
+PEER_AVOIDANCE_RADIUS_M="${PEER_AVOIDANCE_RADIUS_M:-1.0}"
 RANDOM_SEED="${RANDOM_SEED:--1}"
 ROBOT_STARTUP_DELAY_S="${ROBOT_STARTUP_DELAY_S:-0.0}"
 # ROBOT_HOSTS: every robot in the team, "name@ip@x@y@yaw" comma-separated, for
@@ -310,7 +311,8 @@ if [[ -n "${ROBOT_ID}" ]]; then
     bandwidth_kbps:="${BANDWIDTH_KBPS}" \
     loss_pct:="${LOSS_PCT}" \
     delay_ms:="${DELAY_MS}" \
-    haar_levels:="${HAAR_LEVELS}"
+    haar_levels:="${HAAR_LEVELS}" \
+    peer_avoidance_radius_m:="${PEER_AVOIDANCE_RADIUS_M}"
   exit $?
 fi
 
