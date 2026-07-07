@@ -176,6 +176,22 @@ def _patch_nav_params(base_path, namespace, output_dir):
     return _write_yaml(output_dir, f"{namespace}_navigation.yaml", data)
 
 
+#  Matches _PATH_COLORS in multi_robot_navigation_with_slam.launch.py and
+#  _PATH_COLORS_255 in rviz/launch/multi_robot_frontier_explorer.launch.py
+#  (values in 0-255).
+_PATH_COLORS_255 = [
+    (255, 85, 0),    # orange-red  (robot1)
+    (0, 100, 255),   # blue        (robot2)
+    (0, 200, 50),    # green       (robot3)
+    (200, 0, 200),   # purple      (robot4+)
+]
+
+
+def _robot_index(namespace):
+    digits = "".join(ch for ch in namespace if ch.isdigit())
+    return (int(digits) - 1) if digits else 0
+
+
 def _patch_explore_params(base_path, namespace, output_dir):
     data = copy.deepcopy(_load_yaml(base_path))
     p = data.setdefault("frontier_explorer", {}).setdefault(
@@ -189,6 +205,10 @@ def _patch_explore_params(base_path, namespace, output_dir):
     p["frontier_marker_topic"] = f"/{namespace}/explore/frontiers"
     p["selected_frontier_topic"] = f"/{namespace}/explore/selected_frontier"
     p["optimized_map_topic"] = f"/{namespace}/explore/optimized_map"
+    color_255 = _PATH_COLORS_255[min(_robot_index(namespace), len(_PATH_COLORS_255) - 1)]
+    p["frontier_marker_color_r"] = color_255[0] / 255.0
+    p["frontier_marker_color_g"] = color_255[1] / 255.0
+    p["frontier_marker_color_b"] = color_255[2] / 255.0
     # The frontier_explorer Node() below passes this file straight through as
     # a --params-file with no namespace-aware rewriting (same issue fixed for
     # slam_toolbox above). A bare "frontier_explorer:" key does not bind to

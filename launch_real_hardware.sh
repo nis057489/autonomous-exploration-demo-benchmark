@@ -223,17 +223,12 @@ ensure_frontier_exploration_ros2() {
     return 0
   fi
 
-  echo "Package 'frontier_exploration_ros2' not found. Installing from source..."
+  echo "Package 'frontier_exploration_ros2' not found. Initializing submodule..."
 
-  local src_dir="${PROJECT_ROOT}/src/frontier_exploration_ros2"
-  mkdir -p "${PROJECT_ROOT}/src"
+  local submodule_dir="${PROJECT_ROOT}/exploration_packages/frontier_exploration_ros2"
 
-  if [[ -d "${src_dir}/.git" ]]; then
-    echo "Source directory exists; pulling latest..."
-    git -C "${src_dir}" pull --ff-only
-  else
-    git clone https://github.com/nis057489/frontier_exploration_ros2.git "${src_dir}"
-  fi
+  (cd "${PROJECT_ROOT}" && git submodule sync --recursive -- "${submodule_dir}" \
+    && git submodule update --init --recursive -- "${submodule_dir}")
 
   echo "Building frontier_exploration_ros2 (this may take a minute)..."
   (

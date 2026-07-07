@@ -26,7 +26,7 @@ for entry in "${ROBOTS[@]}"; do
   echo "==> Launching ${robot_id} on ${ip}"
 
   # Command exactly as you'd type it at an interactive SSH prompt.
-  launch_line="cd ${REPO_DIR} && git pull && ./launch_real_hardware.sh --robot-id ${robot_id} --robot-offset-x ${offset_x} --robot-offset-y ${offset_y} --robot-offset-yaw ${offset_yaw} --local-bringup"
+  launch_line="cd ${REPO_DIR} && git pull && git submodule sync --recursive && git submodule update --init --recursive && ./launch_real_hardware.sh --robot-id ${robot_id} --robot-offset-x ${offset_x} --robot-offset-y ${offset_y} --robot-offset-yaw ${offset_yaw} --local-bringup"
 
   # tmux runs its panes as login shells by default, same as a fresh
   # interactive SSH session, and send-keys types the line in as if you'd
