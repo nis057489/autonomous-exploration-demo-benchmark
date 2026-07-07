@@ -1,3 +1,4 @@
 [submodule "exploration_packages/frontier_exploration_ros2"]
 	path = exploration_packages/frontier_exploration_ros2
-	url = https://github.com/mertgulerx/frontier_exploration_ros2.git
+	url = https://github.com/nis057489/frontier_exploration_ros2.git
+	branch = vxch_4
