@@ -58,8 +58,6 @@ COPY simulation simulation
 COPY rviz rviz
 
 # Third-party exploration packages — effectively never change.
-COPY exploration_packages/m-explore-ros2 exploration_packages/m-explore-ros2
-COPY exploration_packages/nav2_wavefront_frontier_exploration exploration_packages/nav2_wavefront_frontier_exploration
 COPY exploration_packages/roadmap-explorer exploration_packages/roadmap-explorer
 
 
@@ -71,8 +69,6 @@ RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
 # Build stable third-party packages first — these layers are almost never invalidated.
 RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
     colcon build --symlink-install --packages-select \
-        explore_lite_msgs explore \
-        nav2_wavefront_frontier_exploration \
         roadmap_explorer_msgs roadmap_explorer roadmap_explorer_rviz_plugins"
 
 # Simulation and benchmark rviz package — change occasionally.
