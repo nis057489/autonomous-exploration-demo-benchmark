@@ -1,5 +1,13 @@
 # Turtlebot3 Multi-Robot SLAM
 
+## Launch from your laptop
+
+`./launch_multi_robot.sh` SSHes into all 3 robots below and runs each of
+their commands inside a detached tmux session named `exploration`.
+
+`./stop_multi_robot.sh` sends Ctrl-C into each robot's session for a clean
+shutdown (`--force` to kill the sessions outright instead).
+
 ## Robot1
 
 ```sh
