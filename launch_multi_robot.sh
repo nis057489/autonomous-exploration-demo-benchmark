@@ -23,10 +23,24 @@ ROBOTS=(
 
 for entry in "${ROBOTS[@]}"; do
   read -r robot_id ip offset_x offset_y offset_yaw <<< "$entry"
+
+  echo "==> Syncing repo on ${robot_id} on ${ip}"
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
+    "cd ${REPO_DIR} && git pull && git submodule sync --recursive && git submodule update --init --recursive"
+
+  # Push the local experiment.conf as-is, bypassing git entirely, *after* the
+  # git pull above so it isn't blocked by "local changes would be overwritten
+  # by merge". This way DDIL params (MAP_TRANSPORT, BANDWIDTH_KBPS, ...)
+  # always match what's on this laptop even if the change isn't committed/
+  # pushed yet, or the robot's checkout is on a different branch than git
+  # pull would fast-forward.
+  echo "==> Pushing experiment.conf to ${robot_id} on ${ip}"
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "cat > ${REPO_DIR}/experiment.conf" < experiment.conf
+
   echo "==> Launching ${robot_id} on ${ip}"
 
   # Command exactly as you'd type it at an interactive SSH prompt.
-  launch_line="cd ${REPO_DIR} && git pull && git submodule sync --recursive && git submodule update --init --recursive && ./launch_real_hardware.sh --robot-id ${robot_id} --robot-offset-x ${offset_x} --robot-offset-y ${offset_y} --robot-offset-yaw ${offset_yaw} --local-bringup"
+  launch_line="cd ${REPO_DIR} && ./launch_real_hardware.sh --robot-id ${robot_id} --robot-offset-x ${offset_x} --robot-offset-y ${offset_y} --robot-offset-yaw ${offset_yaw} --local-bringup"
 
   # tmux runs its panes as login shells by default, same as a fresh
   # interactive SSH session, and send-keys types the line in as if you'd

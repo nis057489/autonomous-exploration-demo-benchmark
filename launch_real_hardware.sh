@@ -55,6 +55,7 @@ ROBOT_HOSTS="${ROBOT_HOSTS:-}"
 LOCAL_BRINGUP=true
 TB3_MODEL="${TURTLEBOT3_MODEL:-}"
 NUM_ROBOTS="${NUM_ROBOTS:-1}"
+NUM_ROBOTS_FROM_CLI=false
 ROBOT_ID="${ROBOT_ID:-}"
 ROBOT_OFFSET_X="${ROBOT_OFFSET_X:-0.0}"
 ROBOT_OFFSET_Y="${ROBOT_OFFSET_Y:-0.0}"
@@ -97,6 +98,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --num-robots)
       NUM_ROBOTS="$2"
+      NUM_ROBOTS_FROM_CLI=true
       shift 2
       ;;
     *)
@@ -112,10 +114,20 @@ if ! [[ "${NUM_ROBOTS}" =~ ^[0-9]+$ ]] || (( NUM_ROBOTS < 1 )); then
   exit 1
 fi
 
-if [[ -n "${ROBOT_ID}" ]] && (( NUM_ROBOTS > 1 )); then
+if [[ -n "${ROBOT_ID}" ]] && [[ "${NUM_ROBOTS_FROM_CLI}" == true ]] && (( NUM_ROBOTS > 1 )); then
   echo "Error: --robot-id cannot be used with --num-robots > 1." >&2
   echo "Use --robot-id on each robot and start the base-station multi-robot experiment separately." >&2
   exit 1
+fi
+
+# NUM_ROBOTS from experiment.conf describes the base-station path (no
+# --robot-id); it's meaningless once --robot-id selects the per-robot path,
+# which sizes its peer set from ROBOT_HOSTS instead. Without this reset, the
+# same experiment.conf shared with every robot (NUM_ROBOTS=2 for the
+# base-station run) would otherwise leak into the per-robot invocation below
+# and its unused-but-validated value would look like a real conflict.
+if [[ -n "${ROBOT_ID}" ]]; then
+  NUM_ROBOTS=1
 fi
 
 if [[ -z "${TB3_MODEL}" ]]; then
