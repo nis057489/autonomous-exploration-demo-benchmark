@@ -68,68 +68,113 @@ inline std::vector<std::uint8_t> zigzag_varint_encode(const std::vector<std::int
   return out;
 }
 
-// Apply L levels of forward Haar to values, then split the coefficient array into L+1
-// per-band EncodedChannels ordered from coarsest (band 0) to finest (band L).
+// 2D forward Haar level: row pass then column pass (in that order -- this is
+// what makes it 2D, vs. running haar_forward_level once over a flattened
+// array), in place, on a tightly-packed stride-`stride` grid buffer's
+// top-left w_i x h_i block. Mirrors haar_inverse_2d_level in codec.cpp,
+// which must undo these two passes in reverse order.
+inline void haar_forward_2d_level(
+  std::vector<std::int64_t> & grid, std::size_t stride,
+  std::size_t w_i, std::size_t h_i)
+{
+  std::vector<std::int64_t> row(w_i);
+  for (std::size_t r = 0; r < h_i; ++r) {
+    std::copy_n(grid.begin() + static_cast<std::ptrdiff_t>(r * stride), w_i, row.begin());
+    haar_forward_level(row, w_i);
+    std::copy(row.begin(), row.end(), grid.begin() + static_cast<std::ptrdiff_t>(r * stride));
+  }
+  std::vector<std::int64_t> col(h_i);
+  for (std::size_t c = 0; c < w_i; ++c) {
+    for (std::size_t r = 0; r < h_i; ++r) {col[r] = grid[r * stride + c];}
+    haar_forward_level(col, h_i);
+    for (std::size_t r = 0; r < h_i; ++r) {grid[r * stride + c] = col[r];}
+  }
+}
+
+// Gather the (HL, LH, HH) detail quadrants of level (w_i,h_i)->(new_w,new_h)
+// as one flat vector, in that fixed order, row-major within each quadrant.
+// Mirrors scatter_detail_quadrants in codec.cpp.
+inline std::vector<std::int64_t> gather_detail_quadrants(
+  const std::vector<std::int64_t> & grid, std::size_t stride,
+  std::size_t w_i, std::size_t h_i, std::size_t new_w, std::size_t new_h)
+{
+  std::vector<std::int64_t> out;
+  out.reserve(new_h * (w_i - new_w) + (h_i - new_h) * new_w + (h_i - new_h) * (w_i - new_w));
+  for (std::size_t r = 0; r < new_h; ++r) {
+    for (std::size_t c = new_w; c < w_i; ++c) {out.push_back(grid[r * stride + c]);}
+  }
+  for (std::size_t r = new_h; r < h_i; ++r) {
+    for (std::size_t c = 0; c < new_w; ++c) {out.push_back(grid[r * stride + c]);}
+  }
+  for (std::size_t r = new_h; r < h_i; ++r) {
+    for (std::size_t c = new_w; c < w_i; ++c) {out.push_back(grid[r * stride + c]);}
+  }
+  return out;
+}
+
+inline std::vector<std::int64_t> gather_ll(
+  const std::vector<std::int64_t> & grid, std::size_t stride,
+  std::size_t w, std::size_t h)
+{
+  std::vector<std::int64_t> out;
+  out.reserve(w * h);
+  for (std::size_t r = 0; r < h; ++r) {
+    for (std::size_t c = 0; c < w; ++c) {out.push_back(grid[r * stride + c]);}
+  }
+  return out;
+}
+
+// Apply L levels of a separable 2D forward Haar pyramid to a width x height grid,
+// then split into L+1 per-band EncodedChannels ordered coarsest (band 0, the
+// final LL quadrant) to finest (band L, the detail from the first pass on the
+// full-resolution grid). Each detail band k (1..L) is the concatenated
+// (HL,LH,HH) quadrants from pass (levels-k) -- see compute_haar_band_layout.
 //
-// Band k spans coefficient positions [band_boundaries[k], band_boundaries[k+1]) where:
-//   band_boundaries[0] = 0
-//   band_boundaries[k+1] = smooth_lens[levels - k]   (matching decode_haar_progressive)
-//
-// Each EncodedChannel descriptor carries metadata so the decoder can reassemble:
-//   haar_levels, haar_original_length, haar_band_index, haar_total_bands,
-//   haar_cumulative_elements (= band_boundaries[k+1], i.e. how many coefficients are
-//   needed from band 0 through k to call decode_haar_progressive with max_bands=k+1).
+// Each EncodedChannel descriptor carries metadata so the decoder can
+// reassemble: haar_levels, haar_original_length, haar_grid_width,
+// haar_grid_height, haar_band_index, haar_total_bands. The grid-width/height
+// keys are what let the decoder distinguish this 2D grid encoding from the
+// legacy flat/1D haar-wavelet encoding still used by non-grid channels.
 inline std::vector<EncodedChannel> make_haar_bands(
   const std::vector<std::uint32_t> & values,
+  std::size_t width,
+  std::size_t height,
   int levels,
   const std::string & compression)
 {
   if (levels < 1) {
     throw std::runtime_error("haar levels must be >= 1");
   }
-
-  const std::size_t N = values.size();
-  if (N == 0) {
-    throw std::runtime_error("make_haar_bands: empty values");
+  if (width == 0 || height == 0) {
+    throw std::runtime_error("make_haar_bands: empty grid dimensions");
+  }
+  const std::size_t N = width * height;
+  if (values.size() != N) {
+    throw std::runtime_error("make_haar_bands: values size does not match width*height");
   }
 
-  // Convert to int64 working array
-  std::vector<std::int64_t> coeffs(values.begin(), values.end());
+  std::vector<std::int64_t> grid(values.begin(), values.end());
+  const auto dims = compute_haar_level_dims(width, height, levels);
 
-  // Smooth lengths per level: smooth_lens[0]=N, smooth_lens[k]=(smooth_lens[k-1]+1)/2
-  std::vector<std::size_t> smooth_lens(static_cast<std::size_t>(levels + 1));
-  smooth_lens[0] = N;
-  for (int i = 1; i <= levels; ++i) {
-    smooth_lens[static_cast<std::size_t>(i)] =
-      (smooth_lens[static_cast<std::size_t>(i - 1)] + 1) / 2;
-  }
-
-  // Apply forward transform level by level
+  std::vector<std::vector<std::int64_t> > band_coeffs(static_cast<std::size_t>(levels) + 1);
   for (int i = 0; i < levels; ++i) {
-    haar_forward_level(coeffs, smooth_lens[static_cast<std::size_t>(i)]);
+    const auto & lvl = dims[static_cast<std::size_t>(i)];
+    const auto & nxt = dims[static_cast<std::size_t>(i + 1)];
+    haar_forward_2d_level(grid, width, lvl.width, lvl.height);
+    const int k = levels - i;
+    band_coeffs[static_cast<std::size_t>(k)] =
+      gather_detail_quadrants(grid, width, lvl.width, lvl.height, nxt.width, nxt.height);
   }
-
-  // Band boundaries matching decode_haar_progressive:
-  // band_boundaries[k+1] = smooth_lens[levels - k]
-  std::vector<std::size_t> bb(static_cast<std::size_t>(levels + 2), 0);
-  for (int i = 0; i <= levels; ++i) {
-    bb[static_cast<std::size_t>(i + 1)] = smooth_lens[static_cast<std::size_t>(levels - i)];
-  }
+  const auto & ll = dims[static_cast<std::size_t>(levels)];
+  band_coeffs[0] = gather_ll(grid, width, ll.width, ll.height);
 
   const int total_bands = levels + 1;
   std::vector<EncodedChannel> bands;
   bands.reserve(static_cast<std::size_t>(total_bands));
 
   for (int k = 0; k < total_bands; ++k) {
-    const std::size_t band_start = bb[static_cast<std::size_t>(k)];
-    const std::size_t band_end = bb[static_cast<std::size_t>(k + 1)];
-    const std::size_t band_size = band_end - band_start;
-
-    std::vector<std::int64_t> band_coeffs(
-      coeffs.begin() + static_cast<std::ptrdiff_t>(band_start),
-      coeffs.begin() + static_cast<std::ptrdiff_t>(band_end));
-
-    std::vector<std::uint8_t> raw_payload = zigzag_varint_encode(band_coeffs);
+    const auto & coeffs = band_coeffs[static_cast<std::size_t>(k)];
+    std::vector<std::uint8_t> raw_payload = zigzag_varint_encode(coeffs);
     std::vector<std::uint8_t> payload = compress_payload(compression, raw_payload);
 
     ChannelDescriptor desc;
@@ -138,14 +183,15 @@ inline std::vector<EncodedChannel> make_haar_bands(
     desc.data_type = kDataTypeUint32;
     desc.encoding = kEncodingHaarWavelet;
     desc.compression = compression;
-    desc.element_count = static_cast<std::uint32_t>(band_size);
+    desc.element_count = static_cast<std::uint32_t>(coeffs.size());
     desc.uncompressed_size = static_cast<std::uint64_t>(raw_payload.size());
     desc.compressed_size = static_cast<std::uint64_t>(payload.size());
     desc.metadata[kHaarLevelsKey] = std::to_string(levels);
     desc.metadata[kHaarOriginalLengthKey] = std::to_string(N);
+    desc.metadata[kHaarGridWidthKey] = std::to_string(width);
+    desc.metadata[kHaarGridHeightKey] = std::to_string(height);
     desc.metadata["haar_band_index"] = std::to_string(k);
     desc.metadata["haar_total_bands"] = std::to_string(total_bands);
-    desc.metadata["haar_cumulative_elements"] = std::to_string(band_end);
 
     EncodedChannel ec;
     ec.descriptor = std::move(desc);

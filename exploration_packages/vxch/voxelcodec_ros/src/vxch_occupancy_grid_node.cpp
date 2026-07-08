@@ -223,56 +223,39 @@ private:
       return;
     }
 
-    // Compute band boundaries to know how many coefficients we need
+    // Reconstruct the (possibly coarser) 2D grid directly from the per-band
+    // coefficient vectors -- no flat-buffer assembly needed, band_coeffs is
+    // already in the right shape.
     const int L = pending_.levels;
-    std::vector<std::size_t> smooth_lens(static_cast<std::size_t>(L + 1));
-    smooth_lens[0] = pending_.original_len;
-    for (int i = 1; i <= L; ++i) {
-      smooth_lens[static_cast<std::size_t>(i)] =
-        (smooth_lens[static_cast<std::size_t>(i - 1)] + 1) / 2;
-    }
-    std::vector<std::size_t> bb(static_cast<std::size_t>(L + 2), 0);
-    for (int i = 0; i <= L; ++i) {
-      bb[static_cast<std::size_t>(i + 1)] = smooth_lens[static_cast<std::size_t>(L - i)];
-    }
-
-    // Assemble coefficient prefix from received bands
-    const std::size_t total_coeffs = bb[static_cast<std::size_t>(bands_received)];
-    std::vector<std::int64_t> assembled_coeffs(total_coeffs, 0);
-    for (int k = 0; k < bands_received; ++k) {
-      const std::size_t band_start = bb[static_cast<std::size_t>(k)];
-      const std::size_t band_end = bb[static_cast<std::size_t>(k + 1)];
-      const auto & src = pending_.band_coeffs[static_cast<std::size_t>(k)];
-      const std::size_t copy_len = std::min(src.size(), band_end - band_start);
-      for (std::size_t i = 0; i < copy_len; ++i) {
-        assembled_coeffs[band_start + i] = src[i];
-      }
-    }
-
-    // Reconstruct values (may be shorter than original_len for partial bands)
-    std::vector<std::uint32_t> decoded;
+    HaarReconstruction recon;
     try {
-      decoded = reconstruct_haar_from_coeffs(
-        assembled_coeffs, pending_.original_len, L, bands_received);
+      recon = reconstruct_haar_from_bands(
+        pending_.band_coeffs, grid_width_, grid_height_, L, bands_received);
     } catch (const std::exception & e) {
-      RCLCPP_WARN(get_logger(), "reconstruct_haar_from_coeffs failed: %s", e.what());
+      RCLCPP_WARN(get_logger(), "reconstruct_haar_from_bands failed: %s", e.what());
       return;
     }
 
-    const std::size_t N = pending_.original_len;
+    const std::size_t W = grid_width_;
+    const std::size_t H = grid_height_;
+    const std::size_t w_prime = recon.width;
+    const std::size_t h_prime = recon.height;
 
-    // Upsample to full grid if we only have a coarse reconstruction
-    std::vector<std::int8_t> grid_data(N, -1);
-    if (decoded.size() >= N) {
-      for (std::size_t i = 0; i < N; ++i) {
-        grid_data[i] = unshift_from_uint32(decoded[i]);
+    // 2D nearest-neighbour upsample if we only have a coarse reconstruction --
+    // a real (blurry but spatially faithful) downsampled map, not a 1D-flat
+    // streak, since reconstruct_haar_from_bands did a proper 2D pyramid inverse.
+    std::vector<std::int8_t> grid_data(W * H, -1);
+    if (w_prime == W && h_prime == H) {
+      for (std::size_t i = 0; i < recon.values.size(); ++i) {
+        grid_data[i] = unshift_from_uint32(recon.values[i]);
       }
     } else {
-      // Nearest-neighbour upsample: each coarse value covers N/decoded.size() fine cells
-      const std::size_t M = decoded.size();
-      for (std::size_t i = 0; i < N; ++i) {
-        const std::size_t coarse_idx = i * M / N;
-        grid_data[i] = unshift_from_uint32(decoded[coarse_idx]);
+      for (std::size_t r = 0; r < H; ++r) {
+        const std::size_t r_src = r * h_prime / H;
+        for (std::size_t c = 0; c < W; ++c) {
+          const std::size_t c_src = c * w_prime / W;
+          grid_data[r * W + c] = unshift_from_uint32(recon.values[r_src * w_prime + c_src]);
+        }
       }
     }
 

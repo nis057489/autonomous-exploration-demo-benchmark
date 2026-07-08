@@ -100,7 +100,7 @@ private:
     // Forward Haar + split into per-band EncodedChannels
     std::vector<EncodedChannel> bands;
     try {
-      bands = make_haar_bands(values, haar_levels_, compression_);
+      bands = make_haar_bands(values, msg->info.width, msg->info.height, haar_levels_, compression_);
     } catch (const std::exception & e) {
       RCLCPP_ERROR(get_logger(), "make_haar_bands failed: %s", e.what());
       return;

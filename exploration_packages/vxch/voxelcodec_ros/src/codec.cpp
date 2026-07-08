@@ -501,7 +501,7 @@ namespace voxelcodec_ros
       }
     }
 
-    ScalarBuffer decode_haar_wavelet_channel(
+    ScalarBuffer decode_haar_wavelet_channel_1d(
         const ChannelDescriptor &descriptor,
         const std::vector<std::uint8_t> &raw)
     {
@@ -561,6 +561,290 @@ namespace voxelcodec_ros
         values[i] = static_cast<std::uint32_t>(coeffs[i] & 0xFFFFFFFF);
       }
       return values;
+    }
+
+    // ── 2D separable Haar pyramid inverse (occupancy-grid channels only) ──────
+    //
+    // A grid buffer is a tightly-packed row-major vector<int64_t> of size
+    // stride*rows (stride == its own width unless noted). At level i the LL
+    // (recursed) quadrant occupies the top-left w_i x h_i block. The forward
+    // transform (row pass then column pass) lives in haar_forward.hpp, next to
+    // haar_forward_level -- this is its inverse: column-inverse first, then
+    // row-inverse (reversed order undoes the forward pass correctly).
+
+    void haar_inverse_2d_level(
+      std::vector<std::int64_t> & grid, std::size_t stride,
+      std::size_t w_i, std::size_t h_i, std::size_t new_w, std::size_t new_h)
+    {
+      std::vector<std::int64_t> col(h_i);
+      for (std::size_t c = 0; c < w_i; ++c) {
+        for (std::size_t r = 0; r < h_i; ++r) {col[r] = grid[r * stride + c];}
+        haar_inverse_level(col, h_i, new_h);
+        for (std::size_t r = 0; r < h_i; ++r) {grid[r * stride + c] = col[r];}
+      }
+      std::vector<std::int64_t> row(w_i);
+      for (std::size_t r = 0; r < h_i; ++r) {
+        std::copy_n(grid.begin() + static_cast<std::ptrdiff_t>(r * stride), w_i, row.begin());
+        haar_inverse_level(row, w_i, new_w);
+        std::copy(row.begin(), row.end(), grid.begin() + static_cast<std::ptrdiff_t>(r * stride));
+      }
+    }
+
+    // Scatter a flat [HL|LH|HH] detail band (as gathered by haar_forward.hpp's
+    // encoder in that fixed order, row-major within each quadrant) back into
+    // grid at level (w_i,h_i)->(new_w,new_h).
+    void scatter_detail_quadrants(
+      std::vector<std::int64_t> & grid, std::size_t stride,
+      std::size_t w_i, std::size_t h_i, std::size_t new_w, std::size_t new_h,
+      const std::vector<std::int64_t> & flat)
+    {
+      std::size_t idx = 0;
+      for (std::size_t r = 0; r < new_h; ++r) {
+        for (std::size_t c = new_w; c < w_i; ++c) {grid[r * stride + c] = flat[idx++];}
+      }
+      for (std::size_t r = new_h; r < h_i; ++r) {
+        for (std::size_t c = 0; c < new_w; ++c) {grid[r * stride + c] = flat[idx++];}
+      }
+      for (std::size_t r = new_h; r < h_i; ++r) {
+        for (std::size_t c = new_w; c < w_i; ++c) {grid[r * stride + c] = flat[idx++];}
+      }
+    }
+
+    // Core 2D partial/full reconstruction shared by reconstruct_haar_from_bands
+    // and the monolithic-payload decode paths below.
+    HaarReconstruction reconstruct_haar_2d_impl(
+      const std::vector<std::vector<std::int64_t> > & band_coeffs,
+      std::size_t width, std::size_t height, int levels, int bands_received)
+    {
+      const auto dims = compute_haar_level_dims(width, height, levels);
+      const auto layout = compute_haar_band_layout(width, height, levels);
+
+      const int bands = std::max(1, std::min(bands_received, levels + 1));
+      const int out_level = levels - bands + 1;
+
+      if (band_coeffs.empty() ||
+        band_coeffs[0].size() != layout[0].element_count)
+      {
+        throw std::runtime_error("reconstruct_haar_2d_impl: band 0 (LL) missing or wrong size");
+      }
+
+      std::size_t cur_level = static_cast<std::size_t>(levels);
+      std::vector<std::int64_t> buf = band_coeffs[0];  // tightly packed dims[levels]
+
+      while (static_cast<int>(cur_level) > out_level) {
+        const std::size_t k = static_cast<std::size_t>(levels) - cur_level + 1;
+        if (k >= band_coeffs.size() || band_coeffs[k].size() != layout[k].element_count) {
+          throw std::runtime_error("reconstruct_haar_2d_impl: missing/wrong-size detail band");
+        }
+        const auto & lvl = dims[cur_level - 1];
+        const auto & nxt = dims[cur_level];
+
+        std::vector<std::int64_t> next_buf(lvl.width * lvl.height, 0);
+        for (std::size_t r = 0; r < nxt.height; ++r) {
+          std::copy_n(
+            buf.begin() + static_cast<std::ptrdiff_t>(r * nxt.width), nxt.width,
+            next_buf.begin() + static_cast<std::ptrdiff_t>(r * lvl.width));
+        }
+        scatter_detail_quadrants(
+          next_buf, lvl.width, lvl.width, lvl.height, nxt.width, nxt.height, band_coeffs[k]);
+        haar_inverse_2d_level(next_buf, lvl.width, lvl.width, lvl.height, nxt.width, nxt.height);
+
+        buf = std::move(next_buf);
+        --cur_level;
+      }
+
+      const auto & out_dims = dims[cur_level];
+      std::vector<std::uint32_t> values(out_dims.width * out_dims.height);
+      for (std::size_t i = 0; i < values.size(); ++i) {
+        values[i] = static_cast<std::uint32_t>(buf[i] & 0xFFFFFFFFU);
+      }
+      return HaarReconstruction{std::move(values), out_dims.width, out_dims.height};
+    }
+
+    // Split a monolithic (archive-style) concatenated-bands coefficient array
+    // into per-band slices, mirroring how make_haar_bands lays them out.
+    std::vector<std::vector<std::int64_t> > split_into_bands(
+      const std::vector<std::int64_t> & coeffs,
+      const std::vector<HaarBandLayout> & layout, int band_count)
+    {
+      std::vector<std::vector<std::int64_t> > bands(static_cast<std::size_t>(band_count));
+      std::size_t offset = 0;
+      for (int k = 0; k < band_count; ++k) {
+        const std::size_t n = layout[static_cast<std::size_t>(k)].element_count;
+        bands[static_cast<std::size_t>(k)] =
+          std::vector<std::int64_t>(coeffs.begin() + static_cast<std::ptrdiff_t>(offset),
+            coeffs.begin() + static_cast<std::ptrdiff_t>(offset + n));
+        offset += n;
+      }
+      return bands;
+    }
+
+    bool is_2d_haar_descriptor(const ChannelDescriptor & descriptor)
+    {
+      return descriptor.metadata.count(kHaarGridWidthKey) != 0 &&
+        descriptor.metadata.count(kHaarGridHeightKey) != 0;
+    }
+
+    ScalarBuffer decode_haar_wavelet_channel(
+        const ChannelDescriptor &descriptor,
+        const std::vector<std::uint8_t> &raw)
+    {
+      if (!is_2d_haar_descriptor(descriptor)) {
+        return decode_haar_wavelet_channel_1d(descriptor, raw);
+      }
+      if (descriptor.data_type != kDataTypeUint32) {
+        throw std::runtime_error("haar-wavelet supports uint32 logical values only");
+      }
+
+      const std::size_t width = std::stoul(descriptor.metadata.at(kHaarGridWidthKey));
+      const std::size_t height = std::stoul(descriptor.metadata.at(kHaarGridHeightKey));
+      const auto levels_it = descriptor.metadata.find(kHaarLevelsKey);
+      const int levels = (levels_it != descriptor.metadata.end())
+        ? std::stoi(levels_it->second) : 0;
+      if (levels < 1) {
+        throw std::runtime_error("2D haar-wavelet channel missing valid haar_levels");
+      }
+
+      const auto orig_it = descriptor.metadata.find(kHaarOriginalLengthKey);
+      const std::size_t original_len = (orig_it != descriptor.metadata.end())
+        ? std::stoul(orig_it->second) : width * height;
+
+      std::vector<std::int64_t> coeffs(original_len, 0);
+      std::size_t offset = 0;
+      for (std::size_t i = 0; i < original_len; ++i) {
+        const auto encoded = read_uvarint(raw, offset);
+        coeffs[i] = static_cast<std::int64_t>(zig_zag_decode(encoded));
+      }
+
+      const auto layout = compute_haar_band_layout(width, height, levels);
+      const auto bands = split_into_bands(coeffs, layout, levels + 1);
+      const auto recon = reconstruct_haar_2d_impl(bands, width, height, levels, levels + 1);
+      return recon.values;
+    }
+
+    DecodedChannel decode_haar_progressive_1d(
+      const ChannelDescriptor & descriptor,
+      const std::vector<std::uint8_t> & raw,
+      int max_bands)
+    {
+      auto levels_it = descriptor.metadata.find(kHaarLevelsKey);
+      const int levels = (levels_it != descriptor.metadata.end())
+                             ? std::stoi(levels_it->second)
+                             : 0;
+
+      auto orig_it = descriptor.metadata.find(kHaarOriginalLengthKey);
+      const std::size_t original_len = (orig_it != descriptor.metadata.end())
+                                           ? std::stoul(orig_it->second)
+                                           : descriptor.element_count;
+
+      // Read all zigzag-varint coefficients
+      std::vector<std::int64_t> coeffs(original_len, 0);
+      std::size_t offset = 0;
+      for (std::size_t i = 0; i < original_len; ++i)
+      {
+        const auto encoded = read_uvarint(raw, offset);
+        coeffs[i] = static_cast<std::int64_t>(zig_zag_decode(encoded));
+      }
+
+      if (levels == 0 || max_bands <= 0 || max_bands > levels + 1)
+      {
+        // Full decode
+        for (std::size_t level = static_cast<std::size_t>(levels); level-- > 0;)
+        {
+          std::vector<std::size_t> sl(levels + 1);
+          sl[0] = original_len;
+          for (int i = 1; i <= levels; ++i)
+            sl[i] = (sl[i - 1] + 1) / 2;
+          haar_inverse_level(coeffs, sl[level], sl[level + 1]);
+        }
+        std::vector<std::uint32_t> values(original_len);
+        for (std::size_t i = 0; i < original_len; ++i)
+        {
+          values[i] = static_cast<std::uint32_t>(coeffs[i] & 0xFFFFFFFF);
+        }
+        DecodedChannel decoded;
+        decoded.descriptor = descriptor;
+        decoded.values = std::move(values);
+        return decoded;
+      }
+
+      // Compute smooth lengths
+      std::vector<std::size_t> smooth_lens(levels + 1);
+      smooth_lens[0] = original_len;
+      for (int i = 1; i <= levels; ++i)
+      {
+        smooth_lens[i] = (smooth_lens[i - 1] + 1) / 2;
+      }
+
+      // Band boundaries: band_boundaries[k] = smooth_lens[levels - k + 1] for k>=1
+      // band_boundaries[0] = 0, band_boundaries[1] = smooth_lens[levels], ...
+      // band_boundaries[levels+1] = original_len
+      std::vector<std::size_t> band_boundaries(levels + 2, 0);
+      for (int i = 0; i <= levels; ++i)
+      {
+        band_boundaries[i + 1] = smooth_lens[levels - i];
+      }
+
+      int bands = std::max(1, std::min(max_bands, levels + 1));
+      std::size_t output_len = band_boundaries[bands];
+
+      // Work on coefficients up to output_len
+      std::vector<std::int64_t> work(coeffs.begin(), coeffs.begin() + static_cast<std::ptrdiff_t>(output_len));
+
+      for (int i = 0; i < bands - 1; ++i)
+      {
+        int level = levels - 1 - i;
+        haar_inverse_level(work, smooth_lens[level], smooth_lens[level + 1]);
+      }
+
+      std::vector<std::uint32_t> values(output_len);
+      for (std::size_t i = 0; i < output_len; ++i)
+      {
+        values[i] = static_cast<std::uint32_t>(work[i] & 0xFFFFFFFF);
+      }
+
+      DecodedChannel decoded;
+      decoded.descriptor = descriptor;
+      decoded.descriptor.element_count = static_cast<std::uint32_t>(output_len);
+      decoded.values = std::move(values);
+      return decoded;
+    }
+
+    DecodedChannel decode_haar_progressive_2d(
+      const ChannelDescriptor & descriptor,
+      const std::vector<std::uint8_t> & raw,
+      int max_bands)
+    {
+      const std::size_t width = std::stoul(descriptor.metadata.at(kHaarGridWidthKey));
+      const std::size_t height = std::stoul(descriptor.metadata.at(kHaarGridHeightKey));
+      const auto levels_it = descriptor.metadata.find(kHaarLevelsKey);
+      const int levels = (levels_it != descriptor.metadata.end())
+        ? std::stoi(levels_it->second) : 0;
+      if (levels < 1) {
+        throw std::runtime_error("2D haar-wavelet channel missing valid haar_levels");
+      }
+
+      const auto orig_it = descriptor.metadata.find(kHaarOriginalLengthKey);
+      const std::size_t original_len = (orig_it != descriptor.metadata.end())
+        ? std::stoul(orig_it->second) : width * height;
+
+      std::vector<std::int64_t> coeffs(original_len, 0);
+      std::size_t offset = 0;
+      for (std::size_t i = 0; i < original_len; ++i) {
+        const auto encoded = read_uvarint(raw, offset);
+        coeffs[i] = static_cast<std::int64_t>(zig_zag_decode(encoded));
+      }
+
+      const int bands = (max_bands <= 0 || max_bands > levels + 1) ? levels + 1 : max_bands;
+      const auto layout = compute_haar_band_layout(width, height, levels);
+      const auto band_coeffs = split_into_bands(coeffs, layout, bands);
+      const auto recon = reconstruct_haar_2d_impl(band_coeffs, width, height, levels, bands);
+
+      DecodedChannel decoded;
+      decoded.descriptor = descriptor;
+      decoded.descriptor.element_count = static_cast<std::uint32_t>(recon.values.size());
+      decoded.values = recon.values;
+      return decoded;
     }
 
   } // namespace
@@ -840,135 +1124,62 @@ namespace voxelcodec_ros
 
     const auto raw = decompress_payload(descriptor, compressed_payload);
 
-    auto levels_it = descriptor.metadata.find(kHaarLevelsKey);
-    const int levels = (levels_it != descriptor.metadata.end())
-                           ? std::stoi(levels_it->second)
-                           : 0;
-
-    auto orig_it = descriptor.metadata.find(kHaarOriginalLengthKey);
-    const std::size_t original_len = (orig_it != descriptor.metadata.end())
-                                         ? std::stoul(orig_it->second)
-                                         : descriptor.element_count;
-
-    // Read all zigzag-varint coefficients
-    std::vector<std::int64_t> coeffs(original_len, 0);
-    std::size_t offset = 0;
-    for (std::size_t i = 0; i < original_len; ++i)
+    if (is_2d_haar_descriptor(descriptor))
     {
-      const auto encoded = read_uvarint(raw, offset);
-      coeffs[i] = static_cast<std::int64_t>(zig_zag_decode(encoded));
+      return decode_haar_progressive_2d(descriptor, raw, max_bands);
     }
-
-    if (levels == 0 || max_bands <= 0 || max_bands > levels + 1)
-    {
-      // Full decode
-      for (std::size_t level = static_cast<std::size_t>(levels); level-- > 0;)
-      {
-        std::vector<std::size_t> sl(levels + 1);
-        sl[0] = original_len;
-        for (int i = 1; i <= levels; ++i)
-          sl[i] = (sl[i - 1] + 1) / 2;
-        haar_inverse_level(coeffs, sl[level], sl[level + 1]);
-      }
-      std::vector<std::uint32_t> values(original_len);
-      for (std::size_t i = 0; i < original_len; ++i)
-      {
-        values[i] = static_cast<std::uint32_t>(coeffs[i] & 0xFFFFFFFF);
-      }
-      DecodedChannel decoded;
-      decoded.descriptor = descriptor;
-      decoded.values = std::move(values);
-      return decoded;
-    }
-
-    // Compute smooth lengths
-    std::vector<std::size_t> smooth_lens(levels + 1);
-    smooth_lens[0] = original_len;
-    for (int i = 1; i <= levels; ++i)
-    {
-      smooth_lens[i] = (smooth_lens[i - 1] + 1) / 2;
-    }
-
-    // Band boundaries: band_boundaries[k] = smooth_lens[levels - k + 1] for k>=1
-    // band_boundaries[0] = 0, band_boundaries[1] = smooth_lens[levels], ...
-    // band_boundaries[levels+1] = original_len
-    std::vector<std::size_t> band_boundaries(levels + 2, 0);
-    for (int i = 0; i <= levels; ++i)
-    {
-      band_boundaries[i + 1] = smooth_lens[levels - i];
-    }
-
-    int bands = std::max(1, std::min(max_bands, levels + 1));
-    std::size_t output_len = band_boundaries[bands];
-
-    // Work on coefficients up to output_len
-    std::vector<std::int64_t> work(coeffs.begin(), coeffs.begin() + static_cast<std::ptrdiff_t>(output_len));
-
-    for (int i = 0; i < bands - 1; ++i)
-    {
-      int level = levels - 1 - i;
-      haar_inverse_level(work, smooth_lens[level], smooth_lens[level + 1]);
-    }
-
-    std::vector<std::uint32_t> values(output_len);
-    for (std::size_t i = 0; i < output_len; ++i)
-    {
-      values[i] = static_cast<std::uint32_t>(work[i] & 0xFFFFFFFF);
-    }
-
-    DecodedChannel decoded;
-    decoded.descriptor = descriptor;
-    decoded.descriptor.element_count = static_cast<std::uint32_t>(output_len);
-    decoded.values = std::move(values);
-    return decoded;
+    return decode_haar_progressive_1d(descriptor, raw, max_bands);
   }
 
-  std::vector<std::uint32_t> reconstruct_haar_from_coeffs(
-    const std::vector<std::int64_t> & coeffs,
-    std::size_t original_len,
-    int levels,
-    int max_bands)
+  std::vector<HaarLevelDims> compute_haar_level_dims(
+    std::size_t width, std::size_t height, int levels)
   {
-    if (levels < 1 || original_len == 0) {
-      throw std::runtime_error("reconstruct_haar_from_coeffs: invalid levels or original_len");
+    if (levels < 1) {
+      throw std::runtime_error("compute_haar_level_dims: levels must be >= 1");
     }
-
-    std::vector<std::size_t> smooth_lens(static_cast<std::size_t>(levels + 1));
-    smooth_lens[0] = original_len;
+    std::vector<HaarLevelDims> dims(static_cast<std::size_t>(levels) + 1);
+    dims[0] = HaarLevelDims{width, height};
     for (int i = 1; i <= levels; ++i) {
-      smooth_lens[static_cast<std::size_t>(i)] =
-        (smooth_lens[static_cast<std::size_t>(i - 1)] + 1) / 2;
+      const auto & prev = dims[static_cast<std::size_t>(i - 1)];
+      dims[static_cast<std::size_t>(i)] =
+        HaarLevelDims{(prev.width + 1) / 2, (prev.height + 1) / 2};
     }
+    return dims;
+  }
 
-    std::vector<std::size_t> band_boundaries(static_cast<std::size_t>(levels + 2), 0);
-    for (int i = 0; i <= levels; ++i) {
-      band_boundaries[static_cast<std::size_t>(i + 1)] =
-        smooth_lens[static_cast<std::size_t>(levels - i)];
+  std::vector<HaarBandLayout> compute_haar_band_layout(
+    std::size_t width, std::size_t height, int levels)
+  {
+    const auto dims = compute_haar_level_dims(width, height, levels);
+    std::vector<HaarBandLayout> layout(static_cast<std::size_t>(levels) + 1);
+
+    const auto & ll = dims[static_cast<std::size_t>(levels)];
+    layout[0] = HaarBandLayout{ll.width * ll.height, ll.width, ll.height, ll.width, ll.height};
+
+    for (int k = 1; k <= levels; ++k) {
+      const int i = levels - k;
+      const auto & lvl = dims[static_cast<std::size_t>(i)];
+      const auto & nxt = dims[static_cast<std::size_t>(i + 1)];
+      const std::size_t hl = nxt.height * (lvl.width - nxt.width);
+      const std::size_t lh = (lvl.height - nxt.height) * nxt.width;
+      const std::size_t hh = (lvl.height - nxt.height) * (lvl.width - nxt.width);
+      layout[static_cast<std::size_t>(k)] =
+        HaarBandLayout{hl + lh + hh, lvl.width, lvl.height, nxt.width, nxt.height};
     }
+    return layout;
+  }
 
-    const int bands = std::max(1, std::min(max_bands, levels + 1));
-    const std::size_t output_len = band_boundaries[static_cast<std::size_t>(bands)];
-
-    if (coeffs.size() < output_len) {
-      throw std::runtime_error("reconstruct_haar_from_coeffs: coeffs too short for requested bands");
+  HaarReconstruction reconstruct_haar_from_bands(
+    const std::vector<std::vector<std::int64_t> > & band_coeffs,
+    std::size_t width,
+    std::size_t height,
+    int levels,
+    int bands_received)
+  {
+    if (levels < 1 || width == 0 || height == 0) {
+      throw std::runtime_error("reconstruct_haar_from_bands: invalid levels or dimensions");
     }
-
-    std::vector<std::int64_t> work(coeffs.begin(),
-      coeffs.begin() + static_cast<std::ptrdiff_t>(output_len));
-
-    for (int i = 0; i < bands - 1; ++i) {
-      const int level = levels - 1 - i;
-      haar_inverse_level(
-        work,
-        smooth_lens[static_cast<std::size_t>(level)],
-        smooth_lens[static_cast<std::size_t>(level + 1)]);
-    }
-
-    std::vector<std::uint32_t> values(output_len);
-    for (std::size_t i = 0; i < output_len; ++i) {
-      values[i] = static_cast<std::uint32_t>(work[i] & 0xFFFFFFFFU);
-    }
-    return values;
+    return reconstruct_haar_2d_impl(band_coeffs, width, height, levels, bands_received);
   }
 
 } // namespace voxelcodec_ros

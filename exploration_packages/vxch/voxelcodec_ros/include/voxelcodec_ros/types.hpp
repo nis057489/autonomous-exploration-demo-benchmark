@@ -36,6 +36,11 @@ namespace voxelcodec_ros
   inline constexpr char kPaletteIndexTypeKey[] = "palette_index_type";
   inline constexpr char kHaarLevelsKey[] = "haar_levels";
   inline constexpr char kHaarOriginalLengthKey[] = "haar_original_length";
+  // Presence of both keys signals a 2D-grid Haar channel (vs. the legacy
+  // flat/1D encoding still used by non-grid channels, e.g. voxel_display's
+  // wvmp point columns) -- see decode_haar_wavelet_channel/decode_haar_progressive.
+  inline constexpr char kHaarGridWidthKey[] = "haar_grid_width";
+  inline constexpr char kHaarGridHeightKey[] = "haar_grid_height";
 
   using Metadata = std::unordered_map<std::string, std::string>;
   using ScalarBuffer = std::variant<
