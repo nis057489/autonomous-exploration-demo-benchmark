@@ -17,8 +17,8 @@ TMUX_SESSION="exploration"
 # robot-id ip offset-x offset-y offset-yaw
 ROBOTS=(
   "robot1 192.168.100.108 0.0 0.0 0.0"
-  "robot2 192.168.100.135 5.7 1.5 0.0"
-  "robot3 192.168.100.114 0.0 -3.6 0.0"
+  "robot2 192.168.100.135 5.7912 1.3208 0.0"
+  "robot3 192.168.100.114 0.0 -3.6576 0.0"
 )
 
 for entry in "${ROBOTS[@]}"; do
