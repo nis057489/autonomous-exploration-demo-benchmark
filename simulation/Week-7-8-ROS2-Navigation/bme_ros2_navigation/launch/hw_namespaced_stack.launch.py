@@ -33,6 +33,8 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.actions import PushRosNamespace
 from launch_ros.actions import SetRemap
+from launch_ros.descriptions import ParameterFile
+from nav2_common.launch import RewrittenYaml
 
 
 # ── YAML helpers ──────────────────────────────────────────────────────────────
@@ -169,10 +171,6 @@ def _patch_nav_params(base_path, namespace, output_dir):
     )
     cm.setdefault("scan", {})["topic"] = f"/{namespace}/scan"
 
-    ds = _node_params(data, "docking_server")
-    ds["base_frame"] = base_link
-    ds["fixed_frame"] = odom
-
     return _write_yaml(output_dir, f"{namespace}_navigation.yaml", data)
 
 
@@ -192,7 +190,7 @@ def _robot_index(namespace):
     return (int(digits) - 1) if digits else 0
 
 
-def _patch_explore_params(base_path, namespace, output_dir):
+def _patch_explore_params(base_path, namespace, output_dir, peers=()):
     data = copy.deepcopy(_load_yaml(base_path))
     p = data.setdefault("frontier_explorer", {}).setdefault(
         "ros__parameters", {})
@@ -209,6 +207,15 @@ def _patch_explore_params(base_path, namespace, output_dir):
     p["frontier_marker_color_r"] = color_255[0] / 255.0
     p["frontier_marker_color_g"] = color_255[1] / 255.0
     p["frontier_marker_color_b"] = color_255[2] / 255.0
+    # team_map_topic and own_pose_topic are left as their config defaults
+    # ("team_map_ddil" / "explore/pose") -- both relative, so the frontier_explorer
+    # Node's own namespace push below resolves them to /{namespace}/... automatically,
+    # matching team_map_fusion's own_pose_topic output_topic and this robot's own publish
+    # topic respectively. peer_pose_topics has no such default to fall back on: it names
+    # *other* robots' namespaces, which this robot's own namespace push cannot derive, so
+    # without this it silently stays empty and peer_avoidance_radius_m never filters
+    # anything (team_awareness_enabled's "no peers configured" no-op path, permanently).
+    p["peer_pose_topics"] = [f"/{peer['name']}/explore/pose" for peer in peers]
     # The frontier_explorer Node() below passes this file straight through as
     # a --params-file with no namespace-aware rewriting (same issue fixed for
     # slam_toolbox above). A bare "frontier_explorer:" key does not bind to
@@ -384,6 +391,71 @@ def _team_map_share_actions(
     return actions
 
 
+# nav2_bringup's navigation_launch.py unconditionally spawns 11 separate
+# processes (controller_server, smoother_server, planner_server, route_server,
+# behavior_server, bt_navigator, waypoint_follower, velocity_smoother,
+# collision_monitor, docking_server, lifecycle_manager). This experiment uses
+# bt_navigator's default BT XML (no default_nav_to_pose_bt_xml override),
+# which never calls SmoothPath, route_server, waypoint-follow, or docking
+# actions -- on a CPU-constrained robot Pi those 4 idle processes are pure
+# overhead competing for the same cores as the servers actually driving
+# motion, and were observed correlating with "Transform data too old"
+# failures in controller_server under load. Everything below mirrors
+# navigation_launch.py's non-composed load_nodes path, minus those 4 nodes.
+def _nav2_actions(namespace, nav_cfg, log_level="info"):
+    configured_params = ParameterFile(
+        RewrittenYaml(
+            source_file=nav_cfg,
+            root_key=namespace,
+            param_rewrites={"autostart": "True"},
+            convert_types=True,
+        ),
+        allow_substs=True,
+    )
+    remappings = [("/tf", "tf"), ("/tf_static", "tf_static")]
+    lifecycle_nodes = [
+        "controller_server",
+        "planner_server",
+        "behavior_server",
+        "velocity_smoother",
+        "collision_monitor",
+        "bt_navigator",
+    ]
+
+    def _server(package, executable, name, extra_remappings=()):
+        return Node(
+            package=package,
+            executable=executable,
+            name=name,
+            output="screen",
+            respawn=False,
+            respawn_delay=2.0,
+            parameters=[configured_params],
+            arguments=["--ros-args", "--log-level", log_level],
+            remappings=remappings + list(extra_remappings),
+        )
+
+    return [
+        _server("nav2_controller", "controller_server", "controller_server",
+                [("cmd_vel", "cmd_vel_nav")]),
+        _server("nav2_planner", "planner_server", "planner_server"),
+        _server("nav2_behaviors", "behavior_server", "behavior_server",
+                [("cmd_vel", "cmd_vel_nav")]),
+        _server("nav2_bt_navigator", "bt_navigator", "bt_navigator"),
+        _server("nav2_velocity_smoother", "velocity_smoother", "velocity_smoother",
+                [("cmd_vel", "cmd_vel_nav")]),
+        _server("nav2_collision_monitor", "collision_monitor", "collision_monitor"),
+        Node(
+            package="nav2_lifecycle_manager",
+            executable="lifecycle_manager",
+            name="lifecycle_manager_navigation",
+            output="screen",
+            arguments=["--ros-args", "--log-level", log_level],
+            parameters=[{"autostart": True}, {"node_names": lifecycle_nodes}],
+        ),
+    ]
+
+
 # ── Main action builder ──────────────────────────────────────────────────────────────
 
 def _create_actions(context):
@@ -410,17 +482,12 @@ def _create_actions(context):
 
     slam_cfg = _patch_slam_params(slam_params_file, namespace, output_dir)
     nav_cfg = _patch_nav_params(nav_params_file, namespace, output_dir)
-    explore_cfg = _patch_explore_params(explore_config, namespace, output_dir)
+    explore_cfg = _patch_explore_params(explore_config, namespace, output_dir, peers)
 
     slam_launch = os.path.join(
         get_package_share_directory("slam_toolbox"),
         "launch",
         "online_async_launch.py"
-    )
-    nav2_launch = os.path.join(
-        get_package_share_directory("nav2_bringup"),
-        "launch",
-        "navigation_launch.py"
     )
     tb3_launch = os.path.join(
         get_package_share_directory("turtlebot3_bringup"),
@@ -555,15 +622,7 @@ def _create_actions(context):
             actions=[
                 GroupAction([
                     PushRosNamespace(abs_namespace),
-                    IncludeLaunchDescription(
-                        PythonLaunchDescriptionSource(nav2_launch),
-                        launch_arguments={
-                            "namespace": namespace,
-                            "use_sim_time": "false",
-                            "params_file": nav_cfg,
-                            "autostart": "True",
-                        }.items(),
-                    ),
+                    *_nav2_actions(namespace, nav_cfg),
                 ])
             ],
         )

@@ -17,10 +17,10 @@ Subscribes BEST_EFFORT to /tf (dynamic transforms may be published best-effort)
 and RELIABLE/TRANSIENT_LOCAL to /tf_static (matching StaticTransformBroadcaster).
 """
 
-import copy
 import sys
 
 import rclpy
+from geometry_msgs.msg import TransformStamped
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from tf2_msgs.msg import TFMessage
@@ -101,39 +101,46 @@ class TFFrameRenamer(Node):
             return f"{self._ns}/{frame_id}"
         return frame_id
 
-    def _rename_msg(self, msg: TFMessage) -> TFMessage:
+    def _rename_msg(self, msg: TFMessage) -> tuple[TFMessage, bool]:
+        """Rename bare frames, reusing original transforms untouched (no copy)
+        wherever renaming isn't needed -- e.g. slam_toolbox already publishes
+        namespaced frames, so most of its /tf traffic passes through here
+        as a no-op and shouldn't pay for a copy on every message.
+        """
         out = TFMessage()
+        changed = False
         for t in msg.transforms:
-            new_t = copy.deepcopy(t)
-            new_t.header.frame_id = self._rename_frame(t.header.frame_id)
-            new_t.child_frame_id = self._rename_frame(t.child_frame_id)
+            new_frame = self._rename_frame(t.header.frame_id)
+            new_child = self._rename_frame(t.child_frame_id)
+            if new_frame == t.header.frame_id and new_child == t.child_frame_id:
+                out.transforms.append(t)
+                continue
+            changed = True
+            new_t = TransformStamped()
+            new_t.header.stamp = t.header.stamp
+            new_t.header.frame_id = new_frame
+            new_t.child_frame_id = new_child
+            new_t.transform = t.transform  # unmodified, safe to share by reference
             out.transforms.append(new_t)
-        return out
-
-    def _any_renamed(self, msg: TFMessage, renamed: TFMessage) -> bool:
-        return any(
-            orig.header.frame_id != ren.header.frame_id
-            or orig.child_frame_id != ren.child_frame_id
-            for orig, ren in zip(msg.transforms, renamed.transforms)
-        )
+        return out, changed
 
     def _cb(self, msg: TFMessage) -> None:
         self._recv_count += 1
 
-        renamed = self._rename_msg(msg)
+        renamed, changed = self._rename_msg(msg)
 
         # Avoid re-publishing our own output back to /tf (loop guard):
         # only publish to /tf when at least one frame was actually renamed.
         self._pub_ns.publish(renamed)
         self._fwd_count += 1
-        if self._any_renamed(msg, renamed):
+        if changed:
             self._pub_global.publish(renamed)
 
     def _cb_static(self, msg: TFMessage) -> None:
-        renamed = self._rename_msg(msg)
+        renamed, changed = self._rename_msg(msg)
 
         self._pub_ns_static.publish(renamed)
-        if self._any_renamed(msg, renamed):
+        if changed:
             self._pub_global_static.publish(renamed)
 
 
