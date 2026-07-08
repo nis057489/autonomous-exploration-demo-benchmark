@@ -7,6 +7,19 @@ set -euo pipefail
 # connection and can be stopped cleanly with stop_multi_robot.sh.
 #
 # See MULTI_ROBOT.md for the underlying per-robot commands.
+#
+# Usage: ./launch_multi_robot.sh [--rebuild]
+#   --rebuild  Force a colcon rebuild of the vxch/nav/explore packages on each
+#              robot before launching. launch_real_hardware.sh's automatic
+#              build check only looks at whether install/ artifacts exist, not
+#              whether the source changed -- so a git-pulled source change to
+#              an already-built package (e.g. voxelcodec_ros) silently keeps
+#              running the stale binary unless this is passed.
+
+REBUILD_FLAG=""
+if [[ "${1:-}" == "--rebuild" ]]; then
+  REBUILD_FLAG="--rebuild"
+fi
 
 SSH_USER="ubuntu"
 SSH_KEY="${HOME}/.ssh/lenovo_laptop"
@@ -40,7 +53,7 @@ for entry in "${ROBOTS[@]}"; do
   echo "==> Launching ${robot_id} on ${ip}"
 
   # Command exactly as you'd type it at an interactive SSH prompt.
-  launch_line="cd ${REPO_DIR} && ./launch_real_hardware.sh --robot-id ${robot_id} --robot-offset-x ${offset_x} --robot-offset-y ${offset_y} --robot-offset-yaw ${offset_yaw} --local-bringup"
+  launch_line="cd ${REPO_DIR} && ./launch_real_hardware.sh --robot-id ${robot_id} --robot-offset-x ${offset_x} --robot-offset-y ${offset_y} --robot-offset-yaw ${offset_yaw} --local-bringup ${REBUILD_FLAG}"
 
   # tmux runs its panes as login shells by default, same as a fresh
   # interactive SSH session, and send-keys types the line in as if you'd
