@@ -259,3 +259,4 @@ frontier_explorer:
     # Maximum number of active suppressed regions kept in memory.
     frontier_suppression_max_regions: 64
 
+    team_known_check_radius_m: 1.0
