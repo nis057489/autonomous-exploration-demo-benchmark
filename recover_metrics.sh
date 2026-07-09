@@ -39,18 +39,30 @@ for _host in "${_robot_hosts[@]}"; do
   IFS='@' read -r robot_id ip _x _y _yaw <<< "${_host}"
 
   echo "==> Pulling experiment_runs from ${robot_id} (${ip})"
-  if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "[ -d ${REPO_DIR}/experiment_runs ]" 2>/dev/null; then
+
+  # rsync's user@host:path form does NOT expand $HOME the way a plain
+  # `ssh host "command referencing \$REPO_DIR"` does elsewhere in this repo
+  # (that trick relies on the remote login shell interpreting the command
+  # string) -- rsync takes the path after the colon literally, so resolve it
+  # to a real absolute path over ssh first.
+  remote_repo_dir="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "echo ${REPO_DIR}" 2>/dev/null)"
+  if [[ -z "${remote_repo_dir}" ]]; then
+    echo "  (could not reach ${robot_id} -- skipping)"
+    continue
+  fi
+
+  if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "[ -d ${remote_repo_dir}/experiment_runs ]" 2>/dev/null; then
     echo "  (no experiment_runs on ${robot_id} -- skipping)"
     continue
   fi
 
   mkdir -p "${LOCAL_OUT_DIR}/${robot_id}"
   rsync -az -e "ssh ${SSH_OPTS[*]}" \
-    "${SSH_USER}@${ip}:${REPO_DIR}/experiment_runs/" "${LOCAL_OUT_DIR}/${robot_id}/"
+    "${SSH_USER}@${ip}:${remote_repo_dir}/experiment_runs/" "${LOCAL_OUT_DIR}/${robot_id}/"
 
   if [[ "${CLEAN}" -eq 1 ]]; then
     echo "  Cleaning remote copy on ${robot_id}"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "rm -rf ${REPO_DIR}/experiment_runs"
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "rm -rf ${remote_repo_dir}/experiment_runs"
   fi
 done
 
