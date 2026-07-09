@@ -25,6 +25,7 @@ import rclpy
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 
 
 def _yaw_from_quaternion(q):
@@ -47,6 +48,7 @@ class PerRobotMapCompositor(Node):
         self.declare_parameter("offset_y", 0.0)
         self.declare_parameter("offset_yaw", 0.0)
         self.declare_parameter("publish_rate_hz", 2.0)
+        self.declare_parameter("team_map_stale_threshold_s", 8.0)
 
         robot_name = self.get_parameter("robot_name").value
         if not robot_name:
@@ -56,6 +58,8 @@ class PerRobotMapCompositor(Node):
         self._offset_y = float(self.get_parameter("offset_y").value)
         self._offset_yaw = float(self.get_parameter("offset_yaw").value)
         publish_rate = max(0.1, float(self.get_parameter("publish_rate_hz").value))
+        self._team_map_stale_threshold_s = max(
+            0.0, float(self.get_parameter("team_map_stale_threshold_s").value))
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -80,6 +84,15 @@ class PerRobotMapCompositor(Node):
             qos,
         )
         self._pub = self.create_publisher(OccupancyGrid, f"/{robot_name}/nav_map", qos)
+        # Visualization only -- never subscribed to by Nav2 or frontier_explorer.
+        # Same merge as nav_map, except team-sourced cells are suppressed (left
+        # unknown) once the team map hasn't been refreshed in
+        # team_map_stale_threshold_s, so a demo operator can see "this part of
+        # the map is stale team data" instead of it silently blending in as if
+        # fresh. Under a heavily bandwidth-throttled DDIL link this gap is
+        # expected, not a bug -- see nav_map for the real, unsuppressed map.
+        self._debug_pub = self.create_publisher(
+            OccupancyGrid, f"/{robot_name}/nav_map_debug", qos)
         self._timer = self.create_timer(1.0 / publish_rate, self._publish)
 
         self.get_logger().info(
@@ -100,7 +113,8 @@ class PerRobotMapCompositor(Node):
         if local is None:
             return  # no local map yet — nothing to publish
 
-        if team is not None and team.info.width > 0 and team.info.height > 0:
+        have_team = team is not None and team.info.width > 0 and team.info.height > 0
+        if have_team:
             out = self._merge_local_onto_team(local, team)
         else:
             out = self._local_to_global(local)
@@ -109,10 +123,32 @@ class PerRobotMapCompositor(Node):
             out.header.stamp = self.get_clock().now().to_msg()
             self._pub.publish(out)
 
+        # Debug-only view: same merge, but team cells are suppressed once stale.
+        # Skipped entirely (no second merge computed) unless something is
+        # actually subscribed -- e.g. RViz has the topic open for a demo --
+        # so this costs nothing on the already CPU-tight robots the rest of
+        # the time.
+        if self._debug_pub.get_subscription_count() == 0:
+            return
+        if have_team:
+            debug = self._merge_local_onto_team(
+                local, team, suppress_team=self._team_map_is_stale(team))
+        else:
+            debug = out
+        if debug is not None:
+            debug.header.stamp = self.get_clock().now().to_msg()
+            self._debug_pub.publish(debug)
+
+    def _team_map_is_stale(self, team: OccupancyGrid) -> bool:
+        if self._team_map_stale_threshold_s <= 0.0:
+            return False
+        age_s = (self.get_clock().now() - Time.from_msg(team.header.stamp)).nanoseconds / 1e9
+        return age_s > self._team_map_stale_threshold_s
+
     # ── helpers ────────────────────────────────────────────────────────────────
 
     def _merge_local_onto_team(
-        self, local: OccupancyGrid, team: OccupancyGrid
+        self, local: OccupancyGrid, team: OccupancyGrid, suppress_team: bool = False
     ) -> OccupancyGrid | None:
         """Canvas is the union of team's bounds and this robot's own (offset-
         transformed) local bounds -- not just team's bounds alone. team_map_ddil
@@ -159,7 +195,8 @@ class PerRobotMapCompositor(Node):
         out.info.origin.orientation.w = 1.0
         out.data = [-1] * (width * height)
 
-        self._copy_team_cells(team, out)
+        if not suppress_team:
+            self._copy_team_cells(team, out)
         self._stamp_local_cells(local, out)
         return out
 
