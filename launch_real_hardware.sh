@@ -20,7 +20,7 @@
 #                       (local bringup does not apply in multi-robot mode).
 #
 # Experiment parameters are read from experiment.conf (project root) or env vars:
-#   MAP_TRANSPORT, BANDWIDTH_KBPS, LOSS_PCT, DELAY_MS, HAAR_LEVELS
+#   MAP_TRANSPORT, BANDWIDTH_KBPS, LOSS_PCT, DELAY_MS, HAAR_LEVELS, RECORD_METRICS
 #
 # What this script does NOT do (run these yourself, on the robot or on another terminal):
 #   - RViz (open it manually, or pass rviz:=true to the launch file)
@@ -49,6 +49,7 @@ ROBOT_STARTUP_DELAY_S="${ROBOT_STARTUP_DELAY_S:-0.0}"
 # distributed map sharing (each robot's own launch excludes itself to get its
 # peer list). Empty = no map sharing.
 ROBOT_HOSTS="${ROBOT_HOSTS:-}"
+RECORD_METRICS="${RECORD_METRICS:-false}"
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 
@@ -302,6 +303,47 @@ if [[ -n "${ROBOT_ID}" ]]; then
   if [[ -n "${PEERS}" ]]; then
     echo "Distributed map sharing (map_transport=${MAP_TRANSPORT}) with peers: ${PEERS}"
   fi
+
+  # ── Metrics recording (bandwidth/path-length comparison runs) ──────────────
+  METRICS_PIDS=()
+  if [[ "${RECORD_METRICS}" == true ]]; then
+    RUN_DIR="${PROJECT_ROOT}/experiment_runs/$(date +%Y%m%d_%H%M%S)_${MAP_TRANSPORT}_${ROBOT_ID}"
+    mkdir -p "${RUN_DIR}"
+    # Redirect this run's ROS node logs here too -- ddil_proxy_node's periodic
+    # "stats | rcvd=... sent=..." lines (bytes actually sent per link) and
+    # occupancy_grid_vxch_node's "encode bands [...] total=... KB" lines
+    # (encoded size before DDIL throttling, vxch runs only) already have
+    # exactly what we need for the bandwidth comparison, at zero extra
+    # recording cost -- no reason to duplicate that into a topic/bag.
+    export ROS_LOG_DIR="${RUN_DIR}/ros_logs"
+    echo "Recording metrics to ${RUN_DIR} (RECORD_METRICS=true)"
+
+    # Path length: traversed_path already accumulates the full path as one
+    # growing nav_msgs/Path, deduplicated by movement distance -- small and
+    # low-rate, no need to also bag /tf or /odom for this.
+    ros2 bag record -o "${RUN_DIR}/bag" "/${ROBOT_ID}/explore/traversed_path" \
+      >"${RUN_DIR}/bag_record.log" 2>&1 &
+    METRICS_PIDS+=("$!")
+
+    # Cheap CPU-load timeseries to correlate against/compare vxch encode
+    # overhead vs baseline -- not a ROS topic, just /proc/loadavg samples.
+    (
+      while true; do
+        printf '%s ' "$(date +%s.%N)"
+        cat /proc/loadavg
+        sleep 5
+      done
+    ) >"${RUN_DIR}/cpu_load.log" 2>&1 &
+    METRICS_PIDS+=("$!")
+
+    stop_metrics_recording() {
+      trap - EXIT INT TERM
+      [[ ${#METRICS_PIDS[@]} -gt 0 ]] && kill "${METRICS_PIDS[@]}" 2>/dev/null || true
+      wait "${METRICS_PIDS[@]}" 2>/dev/null || true
+    }
+    trap stop_metrics_recording EXIT INT TERM
+  fi
+
   ros2 launch bme_ros2_navigation hw_namespaced_stack.launch.py \
     namespace:="${ROBOT_ID}" \
     nav_params_file:="${NAVIGATION_PARAMS}" \
