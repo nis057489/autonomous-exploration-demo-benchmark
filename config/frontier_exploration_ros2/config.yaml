@@ -242,13 +242,13 @@ frontier_explorer:
     frontier_suppression_expansion_size_m: 0.5
 
     # Suppression entry lifetime in seconds before old regions and attempts are removed.
-    frontier_suppression_timeout_s: 10.0
+    frontier_suppression_timeout_s: 90.0
 
     # Maximum allowed time in seconds without meaningful progress before a frontier goal is canceled.
-    frontier_suppression_no_progress_timeout_s: 5.0
+    frontier_suppression_no_progress_timeout_s: 20.0
 
     # Minimum distance_remaining improvement in meters required to count as progress.
-    frontier_suppression_progress_epsilon_m: 0.05
+    frontier_suppression_progress_epsilon_m: 0.25
 
     # Delay suppression activation during startup so late navigation bring-up does not poison frontier memory.
     frontier_suppression_startup_grace_period_s: 15.0
