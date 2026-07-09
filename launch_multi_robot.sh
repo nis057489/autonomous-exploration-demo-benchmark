@@ -91,5 +91,47 @@ echo "All robots launching in detached tmux session '${TMUX_SESSION}'."
 echo "Attach to watch a robot's output, e.g.:"
 echo "  ssh -i ${SSH_KEY} ${SSH_USER}@192.168.100.108 -t tmux attach -t ${TMUX_SESSION}"
 echo "(Ctrl-b d to detach without stopping it.)"
+
+# ── Metrics recording: path-length bag, on the laptop, not the robots ────────
+# ros2 bag record's disk I/O + serialization was measurably adding to the
+# already CPU-starved Pis' load, so it's recorded here instead, over the
+# network, covering all robots' traversed_path topics in one bag. Robots
+# still record their own (cheap) ROS node logs + CPU-load samples locally
+# (launch_real_hardware.sh); pull those with ./recover_metrics.sh.
+BAG_TMUX_SESSION="exploration_bag"
+if [[ "${RECORD_METRICS:-false}" == true ]]; then
+  echo
+  echo "==> Starting laptop-side path-length bag recording (RECORD_METRICS=true)"
+
+  # Same ROBOTS list already parsed from ROBOT_HOSTS above -- not a fresh
+  # hardcoded IP list. rviz.sh has one of those and it's silently drifted out
+  # of sync with ROBOT_HOSTS over time (robot2's IP there no longer matches);
+  # deriving this dynamically avoids adding a second copy of that bug.
+  BAG_TOPICS=()
+  PEER_IPS=""
+  for entry in "${ROBOTS[@]}"; do
+    read -r robot_id ip _offset_x _offset_y _offset_yaw <<< "$entry"
+    BAG_TOPICS+=("/${robot_id}/explore/traversed_path")
+    PEER_IPS+="${PEER_IPS:+;}${ip}"
+  done
+
+  BAG_RUN_DIR="${SCRIPT_DIR}/experiment_runs/laptop/$(date +%Y%m%d_%H%M%S)_${MAP_TRANSPORT:-baseline}"
+  mkdir -p "${BAG_RUN_DIR}"
+
+  # ROS_STATIC_PEERS matches the per-robot stack's own broadened-to-laptop
+  # discovery (hw_namespaced_stack.launch.py sets ROS_AUTOMATIC_DISCOVERY_
+  # RANGE=LOCALHOST + this laptop as a static peer for every node in that
+  # stack, including frontier_path_tracker -- the same path RViz already
+  # uses successfully, per rviz.sh) -- no custom workspace build needed here,
+  # nav_msgs/Path is a stock message type.
+  bag_cmd="source /opt/ros/jazzy/setup.bash && export ROS_DOMAIN_ID=\"\${ROS_DOMAIN_ID:-42}\" ROS_STATIC_PEERS='${PEER_IPS}' && ros2 bag record -o '${BAG_RUN_DIR}/bag' ${BAG_TOPICS[*]}"
+  tmux kill-session -t "${BAG_TMUX_SESSION}" >/dev/null 2>&1 || true
+  tmux new-session -d -s "${BAG_TMUX_SESSION}"
+  tmux send-keys -t "${BAG_TMUX_SESSION}" "${bag_cmd}" Enter
+
+  echo "Recording to ${BAG_RUN_DIR}/bag (tmux session '${BAG_TMUX_SESSION}' on this laptop)."
+  echo "Attach with: tmux attach -t ${BAG_TMUX_SESSION}"
+fi
+
 echo
 echo "Stop everything with: ./stop_multi_robot.sh"

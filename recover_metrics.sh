@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Pulls down experiment_runs/ (rosbag + ROS node logs + CPU load samples)
-# recorded by launch_real_hardware.sh on each robot when RECORD_METRICS=true
-# in experiment.conf. See experiment.conf's RECORD_METRICS comment for what
-# each run directory contains.
+# Pulls down experiment_runs/ (ROS node logs + CPU load samples) recorded by
+# launch_real_hardware.sh on each robot when RECORD_METRICS=true in
+# experiment.conf. The path-length rosbag is recorded separately, directly on
+# this laptop, by launch_multi_robot.sh -- see experiment_runs/laptop/, no
+# pulling needed for that part. See experiment.conf's RECORD_METRICS comment
+# for what each run directory contains.
 #
 # Usage: ./recover_metrics.sh [--clean]
 #   --clean  Delete each robot's experiment_runs/ after a successful pull.
@@ -69,8 +71,10 @@ done
 echo
 echo "All runs pulled into ${LOCAL_OUT_DIR}/<robot_id>/<timestamp>_<transport>_<robot_id>/"
 echo "Each run directory contains:"
-echo "  bag/            -- rosbag with /explore/traversed_path (path length)"
 echo "  ros_logs/       -- ROS node logs, incl. ddil_proxy_node stats (bytes actually"
 echo "                     sent per link) and occupancy_grid_vxch_node stats (encoded"
 echo "                     size before DDIL throttling, vxch runs only)"
 echo "  cpu_load.log    -- periodic /proc/loadavg samples"
+echo
+echo "Path-length bags are recorded directly on this laptop by"
+echo "launch_multi_robot.sh -- see ./experiment_runs/laptop/, no pull needed."

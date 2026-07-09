@@ -11,6 +11,7 @@ SSH_USER="ubuntu"
 SSH_KEY="${HOME}/.ssh/lenovo_laptop"
 SSH_OPTS=(-o ConnectTimeout=10 -i "${SSH_KEY}")
 TMUX_SESSION="exploration"
+BAG_TMUX_SESSION="exploration_bag"
 IPS=(192.168.100.108 192.168.100.135 192.168.100.114)
 
 FORCE=0
@@ -28,6 +29,17 @@ for ip in "${IPS[@]}"; do
       || echo "  (no session running on ${ip})"
   fi
 done
+
+# Laptop-side path-length bag recording (launch_multi_robot.sh, RECORD_METRICS=true) --
+# local, no SSH needed.
+if tmux has-session -t "${BAG_TMUX_SESSION}" 2>/dev/null; then
+  echo "==> Stopping local bag recording (${BAG_TMUX_SESSION})"
+  if [[ "${FORCE}" -eq 1 ]]; then
+    tmux kill-session -t "${BAG_TMUX_SESSION}"
+  else
+    tmux send-keys -t "${BAG_TMUX_SESSION}" C-c
+  fi
+fi
 
 if [[ "${FORCE}" -eq 0 ]]; then
   echo

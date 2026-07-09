@@ -305,6 +305,12 @@ if [[ -n "${ROBOT_ID}" ]]; then
   fi
 
   # ── Metrics recording (bandwidth/path-length comparison runs) ──────────────
+  # The rosbag itself (path length) is recorded on the laptop, not here --
+  # ros2 bag record's disk I/O + serialization was measurably adding to this
+  # already CPU-starved Pi's load (see launch_multi_robot.sh, which starts a
+  # laptop-side recording covering all robots' traversed_path topics over the
+  # network). Only genuinely-local, cheap metrics stay on the robot: ROS node
+  # text logs (already written regardless) and a /proc/loadavg sample loop.
   METRICS_PIDS=()
   if [[ "${RECORD_METRICS}" == true ]]; then
     RUN_DIR="${PROJECT_ROOT}/experiment_runs/$(date +%Y%m%d_%H%M%S)_${MAP_TRANSPORT}_${ROBOT_ID}"
@@ -316,14 +322,7 @@ if [[ -n "${ROBOT_ID}" ]]; then
     # exactly what we need for the bandwidth comparison, at zero extra
     # recording cost -- no reason to duplicate that into a topic/bag.
     export ROS_LOG_DIR="${RUN_DIR}/ros_logs"
-    echo "Recording metrics to ${RUN_DIR} (RECORD_METRICS=true)"
-
-    # Path length: traversed_path already accumulates the full path as one
-    # growing nav_msgs/Path, deduplicated by movement distance -- small and
-    # low-rate, no need to also bag /tf or /odom for this.
-    ros2 bag record -o "${RUN_DIR}/bag" "/${ROBOT_ID}/explore/traversed_path" \
-      >"${RUN_DIR}/bag_record.log" 2>&1 &
-    METRICS_PIDS+=("$!")
+    echo "Recording metrics to ${RUN_DIR} (RECORD_METRICS=true; path-length bag is recorded on the laptop, not here)"
 
     # Cheap CPU-load timeseries to correlate against/compare vxch encode
     # overhead vs baseline -- not a ROS topic, just /proc/loadavg samples.
