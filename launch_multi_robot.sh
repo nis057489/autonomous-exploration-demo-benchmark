@@ -27,12 +27,34 @@ SSH_OPTS=(-o ConnectTimeout=10 -i "${SSH_KEY}")
 REPO_DIR='$HOME/autonomous-exploration-demo-benchmark'
 TMUX_SESSION="exploration"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Robot id/ip/offsets come from experiment.conf's ROBOT_HOSTS -- the same
+# single source of truth hw_namespaced_stack.launch.py uses for peer offsets
+# in team_map_fusion. A hardcoded second copy here previously drifted out of
+# sync with experiment.conf (different x/y per robot), which made each
+# robot place its own map at one offset but its peers' shared map data at a
+# different, mismatched offset -- the direct cause of inconsistent map
+# alignment between robots in RViz.
+source "${SCRIPT_DIR}/experiment.conf"
+if [[ -z "${ROBOT_HOSTS:-}" ]]; then
+  echo "ROBOT_HOSTS is not set in experiment.conf -- cannot determine which robots to launch." >&2
+  exit 1
+fi
+
 # robot-id ip offset-x offset-y offset-yaw
-ROBOTS=(
-  "robot1 192.168.100.108 0.0 0.0 0.0"
-  "robot2 192.168.100.135 5.7912 1.3208 0.0"
-  "robot3 192.168.100.114 0.0 -3.6576 0.0"
-)
+ROBOTS=()
+IFS=',' read -ra _robot_hosts <<< "${ROBOT_HOSTS}"
+for _host in "${_robot_hosts[@]}"; do
+  _host="$(echo "${_host}" | xargs)"
+  [[ -z "${_host}" ]] && continue
+  IFS='@' read -r _name _ip _x _y _yaw <<< "${_host}"
+  if [[ -z "${_name}" || -z "${_ip}" || -z "${_x}" || -z "${_y}" || -z "${_yaw}" ]]; then
+    echo "Malformed ROBOT_HOSTS entry '${_host}' (expected name@ip@x@y@yaw)." >&2
+    exit 1
+  fi
+  ROBOTS+=("${_name} ${_ip} ${_x} ${_y} ${_yaw}")
+done
 
 for entry in "${ROBOTS[@]}"; do
   read -r robot_id ip offset_x offset_y offset_yaw <<< "$entry"
