@@ -90,7 +90,8 @@ add_executable(ddil_proxy_node
   src/ddil_proxy_node.cpp
 )
 target_compile_features(ddil_proxy_node PUBLIC cxx_std_17)
-ament_target_dependencies(ddil_proxy_node rclcpp)
+target_include_directories(ddil_proxy_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+ament_target_dependencies(ddil_proxy_node rclcpp voxelcodec_msgs)
 install(TARGETS ddil_proxy_node RUNTIME DESTINATION lib/${PROJECT_NAME})
 
 if(nav2_msgs_FOUND AND nav2_voxel_grid_FOUND)
@@ -204,6 +205,15 @@ if(BUILD_TESTING)
   )
   if(TARGET test_codec)
     target_link_libraries(test_codec ${PROJECT_NAME})
+  endif()
+
+  # Pure decision logic, no ROS types -- deliberately not linked against
+  # ${PROJECT_NAME}/rclcpp, matching how lightweight the logic under test is.
+  ament_add_gtest(test_ddil_stale_epoch
+    test/test_ddil_stale_epoch.cpp
+  )
+  if(TARGET test_ddil_stale_epoch)
+    target_include_directories(test_ddil_stale_epoch PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   endif()
 endif()
 

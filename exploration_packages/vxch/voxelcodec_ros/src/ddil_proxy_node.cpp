@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -18,8 +19,40 @@
 #include <rclcpp/serialization.hpp>
 #include <rclcpp/serialized_message.hpp>
 
+#include <voxelcodec_msgs/msg/voxel_channel.hpp>
+#include <voxelcodec_msgs/msg/voxel_manifest.hpp>
+
+#include "voxelcodec_ros/ddil_stale_epoch.hpp"
+
 namespace
 {
+
+// Whether a relayed channel's wire type is one we know how to deserialize
+// just enough to read header.stamp from, for stale-epoch detection. Gated on
+// the actual wire type string (authoritative -- it's what
+// create_generic_subscription/publisher were built with), never on topic
+// name: a misconfigured deployment could name an unrelated type ".../band_3",
+// and attempting to deserialize arbitrary bytes as a specific ROS type would
+// be a real crash/UB risk. Topic-name parsing (band_index_from_topic /
+// is_manifest_topic below) is a separate concern -- it only ever drives
+// queue priority/dedup, unchanged by this.
+enum class EpochRole
+{
+  kNone,      // not a VXCH manifest/band type -- relayed exactly as before
+  kManifest,
+  kBand,
+};
+
+EpochRole epoch_role_from_msg_type(const std::string & msg_type)
+{
+  if (msg_type == "voxelcodec_msgs/msg/VoxelManifest") {
+    return EpochRole::kManifest;
+  }
+  if (msg_type == "voxelcodec_msgs/msg/VoxelChannel") {
+    return EpochRole::kBand;
+  }
+  return EpochRole::kNone;
+}
 
 struct RelayConfig
 {
@@ -135,6 +168,8 @@ struct QueuedMessage
   // Dedup key: non-empty for band topics, identifies the (channel, band_index) slot.
   // Latest-wins: a new message with the same key replaces the queued one.
   std::string dedup_key;
+  // Wire-type classification for stale-epoch detection (see EpochRole above).
+  EpochRole epoch_role{EpochRole::kNone};
 };
 
 // Priority queue with latest-wins deduplication for band messages.
@@ -278,11 +313,12 @@ private:
 
     const bool is_bypass = cfg.bypass;
     const std::string input_topic = cfg.input_topic;
+    const EpochRole epoch_role = epoch_role_from_msg_type(cfg.msg_type);
     auto sub = create_generic_subscription(
       cfg.input_topic, cfg.msg_type, qos,
-      [this, pub, is_bypass, input_topic](
+      [this, pub, is_bypass, input_topic, epoch_role](
         std::shared_ptr<rclcpp::SerializedMessage> serialized) {
-        on_message(serialized, pub, is_bypass, input_topic);
+        on_message(serialized, pub, is_bypass, input_topic, epoch_role);
       });
     subscriptions_.push_back(sub);
 
@@ -296,7 +332,8 @@ private:
     std::shared_ptr<rclcpp::SerializedMessage> serialized,
     std::shared_ptr<rclcpp::GenericPublisher> pub,
     bool bypass,
-    const std::string & input_topic)
+    const std::string & input_topic,
+    EpochRole epoch_role)
   {
     if (bypass) {
       pub->publish(*serialized);
@@ -323,6 +360,7 @@ private:
     QueuedMessage item;
     item.serialized = serialized;
     item.publisher = pub;
+    item.epoch_role = epoch_role;
 
     const int band_idx = band_index_from_topic(input_topic);
     if (band_idx >= 0) {
@@ -362,6 +400,24 @@ private:
     }
   }
 
+  // Deserialize just enough to read header.stamp, for stale-epoch tracking.
+  // Only called for items already gated by EpochRole (kManifest/kBand), i.e.
+  // whose msg_type string is confirmed to be VoxelManifest/VoxelChannel --
+  // never attempted for arbitrary/generic relayed types.
+  static voxelcodec_ros::Stamp extract_stamp(const QueuedMessage & item)
+  {
+    if (item.epoch_role == EpochRole::kManifest) {
+      static rclcpp::Serialization<voxelcodec_msgs::msg::VoxelManifest> ser;
+      voxelcodec_msgs::msg::VoxelManifest msg;
+      ser.deserialize_message(item.serialized.get(), &msg);
+      return {msg.header.stamp.sec, static_cast<std::uint32_t>(msg.header.stamp.nanosec)};
+    }
+    static rclcpp::Serialization<voxelcodec_msgs::msg::VoxelChannel> ser;
+    voxelcodec_msgs::msg::VoxelChannel msg;
+    ser.deserialize_message(item.serialized.get(), &msg);
+    return {msg.header.stamp.sec, static_cast<std::uint32_t>(msg.header.stamp.nanosec)};
+  }
+
   void worker_loop()
   {
     while (true) {
@@ -371,6 +427,20 @@ private:
         queue_cv_.wait(lock, [this]() {return !queue_.empty() || shutdown_;});
         if (shutdown_ && queue_.empty()) {break;}
         item = queue_.pop();
+      }
+
+      if (item.epoch_role == EpochRole::kBand) {
+        const auto band_stamp = extract_stamp(item);
+        if (voxelcodec_ros::should_drop_as_stale(band_stamp, latest_manifest_stamp_)) {
+          const std::size_t stale_bytes = item.serialized->size();
+          msgs_stale_dropped_.fetch_add(1, std::memory_order_relaxed);
+          bytes_stale_dropped_.fetch_add(stale_bytes, std::memory_order_relaxed);
+          RCLCPP_DEBUG(
+            get_logger(), "STALE prio=%d  %zu B  epoch=%d.%09u  latest_manifest=%d.%09u",
+            item.band_priority, stale_bytes, band_stamp.sec, band_stamp.nanosec,
+            latest_manifest_stamp_->sec, latest_manifest_stamp_->nanosec);
+          continue;
+        }
       }
 
       const std::size_t nbytes = item.serialized->size();
@@ -385,6 +455,10 @@ private:
       }
 
       item.publisher->publish(*item.serialized);
+
+      if (item.epoch_role == EpochRole::kManifest) {
+        latest_manifest_stamp_ = extract_stamp(item);
+      }
 
       msgs_sent_.fetch_add(1, std::memory_order_relaxed);
       bytes_sent_.fetch_add(nbytes, std::memory_order_relaxed);
@@ -405,6 +479,8 @@ private:
     const uint64_t deduped  = msgs_deduped_.load(std::memory_order_relaxed);
     const uint64_t sent     = msgs_sent_.load(std::memory_order_relaxed);
     const uint64_t kb_sent  = bytes_sent_.load(std::memory_order_relaxed) / 1024;
+    const uint64_t stale    = msgs_stale_dropped_.load(std::memory_order_relaxed);
+    const uint64_t kb_stale = bytes_stale_dropped_.load(std::memory_order_relaxed) / 1024;
     std::size_t queue_depth;
     {
       std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -412,8 +488,8 @@ private:
     }
     RCLCPP_INFO(
       get_logger(),
-      "stats | rcvd=%lu  sent=%lu (%lu KB)  dropped=%lu  deduped=%lu  queued=%zu",
-      received, sent, kb_sent, dropped, deduped, queue_depth);
+      "stats | rcvd=%lu  sent=%lu (%lu KB)  dropped=%lu  deduped=%lu  stale=%lu (%lu KB)  queued=%zu",
+      received, sent, kb_sent, dropped, deduped, stale, kb_stale, queue_depth);
   }
 
   rcl_interfaces::msg::SetParametersResult on_param_change(
@@ -456,12 +532,19 @@ private:
   std::mt19937 rng_;
   std::mutex rng_mutex_;
 
+  // Newest manifest stamp actually sent so far. Written and read only on the
+  // worker thread (worker_loop) -- on_message() never touches it -- so it
+  // needs no mutex despite being a member shared with the rest of the class.
+  std::optional<voxelcodec_ros::Stamp> latest_manifest_stamp_;
+
   // Cumulative counters (relaxed atomics — only read in stats timer and worker).
   std::atomic<uint64_t> msgs_received_{0};
   std::atomic<uint64_t> msgs_dropped_{0};
   std::atomic<uint64_t> msgs_deduped_{0};
   std::atomic<uint64_t> msgs_sent_{0};
   std::atomic<uint64_t> bytes_sent_{0};
+  std::atomic<uint64_t> msgs_stale_dropped_{0};
+  std::atomic<uint64_t> bytes_stale_dropped_{0};
 };
 
 }  // namespace
