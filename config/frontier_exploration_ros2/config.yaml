@@ -105,7 +105,7 @@ frontier_explorer:
 
     # Minimum seconds between consecutive goal preemption attempts.
     # Waffle Pi at 0.22 m/s needs ~15 s to travel 3 m — preempting faster just causes churn.
-    goal_preemption_min_interval_s: 20.0
+    goal_preemption_min_interval_s: 30.0
 
     # Skip the active frontier goal if it becomes blocked.
     goal_skip_on_blocked_goal: true
@@ -234,7 +234,7 @@ frontier_explorer:
     goal_preemption_lidar_ray_step_deg: 1.0
 
     # Minimum visible reveal length in meters required to keep the current goal instead of preempting.
-    goal_preemption_lidar_min_reveal_length_m: 0.5
+    goal_preemption_lidar_min_reveal_length_m: 0.2
 
     # Additional yaw offset in degrees applied to the target-pose LiDAR heading model above.
     goal_preemption_lidar_yaw_offset_deg: 0.0
