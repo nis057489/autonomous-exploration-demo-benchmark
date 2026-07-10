@@ -36,6 +36,13 @@ frontier_explorer:
     # Marker size for frontier visualization.
     frontier_marker_scale: 0.15
 
+    # RGB color (0.0-1.0 each) for frontier markers in RViz.
+    # Multi-robot launch files typically override these per-robot so each robot's
+    # frontiers are visually distinguishable; these are just the standalone defaults.
+    frontier_marker_color_r: 0.15
+    frontier_marker_color_g: 0.9
+    frontier_marker_color_b: 0.2
+
     # --------------- QoS --------------- #
         
     # Map QoS profile selection.
@@ -58,14 +65,14 @@ frontier_explorer:
     # Refresh Rate of the package.
     # `1.0` is recommended. Use `2.0` if your robot is very fast. 
     # Use `0.50` if your mapping is slow and you want lowest CPU usage.  
-    map_processing_rate_hz: 1.0
+    map_processing_rate_hz: 0.5
 
     # Start exploration immediately at launch.
     autostart: true
 
     # Wait this many seconds after node start before sending the first goal,
     # giving Nav2 time to finish configuring its lifecycle nodes.
-    startup_delay_s: 15.0
+    startup_delay_s: 30.0
 
     # Keep the optional runtime control service available for manual stop/start flows.
     control_service_enabled: false
@@ -78,7 +85,7 @@ frontier_explorer:
     escape_enabled: true
 
     # Return to the recorded start pose once no frontiers remain.
-    return_to_start_on_complete: false
+    return_to_start_on_complete: true
 
     # "dp" optimizes traveling distance by comparing posibilities with limited depth. Increasing efficiency but adds extra CPU overhead.
     # "greedy" traverses the full MRTSP matrix one step at a time. Cost free.
@@ -114,9 +121,12 @@ frontier_explorer:
     # Use if you are having issues with SLAM or Nav2.
     frontier_suppression_enabled: true
 
-    # Behavior when frontiers exist but all of them are temporarily suppressed: stay or return_to_start. 
+    # Behavior when frontiers exist but all of them are temporarily suppressed: stay or return_to_start.
     # Requires `frontier_suppression_enabled: true`
-    all_frontiers_suppressed_behavior: return_to_start
+    # `stay` avoids repeatedly re-issuing a return-to-start goal while suppressed -- if that
+    # goal keeps aborting instantly (e.g. transient TF lookup failures under CPU load), there's
+    # no backoff on the resend, and it can busy-loop tens of times in a few seconds.
+    all_frontiers_suppressed_behavior: stay
 
 
     # --------------- Algorithm Configuration - Advanced Users --------------- #
@@ -233,7 +243,10 @@ frontier_explorer:
     # --------------- Suppression --------------- #
 
     # Number of failed attempts before a frontier area is temporarily suppressed.
-    frontier_suppression_attempt_threshold: 2
+    # 3 gives one extra strike of cushion over the code default of 2, so a single transient
+    # failure (goal rejection during Nav2 bring-up, a TF hiccup) doesn't suppress a region
+    # that's actually fine.
+    frontier_suppression_attempt_threshold: 3
 
     # Initial side length in meters for a newly suppressed square area.
     frontier_suppression_base_size_m: 1.0
@@ -251,7 +264,10 @@ frontier_explorer:
     frontier_suppression_progress_epsilon_m: 0.25
 
     # Delay suppression activation during startup so late navigation bring-up does not poison frontier memory.
-    frontier_suppression_startup_grace_period_s: 15.0
+    # Set to cover the real Nav2 lifecycle bring-up time (observed ~35s on this hardware,
+    # see startup_delay_s above) plus margin, so early goal rejections during bring-up never
+    # count as a suppression strike at all.
+    frontier_suppression_startup_grace_period_s: 35.0
 
     # Maximum number of tracked failed frontier attempt records kept in memory.
     frontier_suppression_max_attempt_records: 256
@@ -259,4 +275,50 @@ frontier_explorer:
     # Maximum number of active suppressed regions kept in memory.
     frontier_suppression_max_regions: 64
 
+    # Once a region hits frontier_suppression_attempt_threshold failures, keep it suppressed
+    # forever instead of letting it expire after frontier_suppression_timeout_s.
+    # Defaults to `false` here (the code default is `true`). With it `true`, a region can be
+    # blacklisted permanently by failures that have nothing to do with the frontier itself --
+    # e.g. goal rejections during Nav2's own lifecycle bring-up race at startup, before
+    # startup_delay_s / frontier_suppression_startup_grace_period_s have even elapsed -- which
+    # is exactly what starved a robot of its best frontier in a prior run. Set `true` only if
+    # you specifically want failed regions (e.g. behind glass, unreachable) to be given up on
+    # for the rest of the run rather than retried every frontier_suppression_timeout_s.
+    frontier_suppression_permanent_after_threshold: false
+
+
+    # --------------- Team Awareness / Multi-Robot --------------- #
+
+    # Filter out candidate frontiers that another team member has already resolved (via the
+    # shared team map) or is currently near (via peer poses). Disable for single-robot runs
+    # or if you want every robot to plan independently of its teammates.
+    team_awareness_enabled: true
+
+    # Relative topic (resolved under this robot's own namespace) for the shared/fused team
+    # occupancy map used by goal_point_known_to_team filtering above.
+    team_map_topic: team_map_ddil
+
+    # Radius in meters around a candidate frontier to check against the team map above.
+    # If any cell in this radius is already known (free or occupied) to the team, the
+    # frontier is skipped -- no need to send a robot to re-derive shared information.
+    # 0.0 disables the check.
     team_known_check_radius_m: 1.0
+
+    # Radius in meters used to reject a candidate frontier if any teammate is currently within
+    # it (via peer_pose_topics below). Prevents robots from converging on the same area.
+    # 0.0 disables peer-proximity filtering.
+    peer_avoidance_radius_m: 1.0
+
+    # Absolute topics this robot subscribes to for each teammate's pose, used by
+    # peer_avoidance_radius_m above. Multi-robot launch files normally inject this per robot
+    # (it names other robots' namespaces, which this robot can't derive from its own config).
+    # Leave empty for single-robot runs -- peer-avoidance filtering silently no-ops.
+    peer_pose_topics: []
+
+    # Relative topic (resolved under this robot's own namespace) this robot publishes its own
+    # pose to, so teammates can subscribe to it via their own peer_pose_topics.
+    own_pose_topic: explore/pose
+
+    # Rate in Hz at which this robot publishes its own pose above. Only runs when
+    # peer_pose_topics is non-empty. 0.0 disables publishing.
+    own_pose_publish_rate_hz: 2.0
