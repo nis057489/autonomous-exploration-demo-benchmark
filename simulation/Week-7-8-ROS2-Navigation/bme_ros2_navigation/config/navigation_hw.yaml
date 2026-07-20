@@ -49,17 +49,20 @@ controller_server:
     #   max angular 1.82 rad/s → use 1.8
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
-      # MPPI reruns a fresh batch_size x time_steps rollout (through all 8 critics below) every
-      # control cycle -- this is the actual dominant CPU cost on these boards (controller_server
-      # was consistently the #2-3 CPU consumer live, right behind tf_frame_renamer/bt_navigator).
-      # Was time_steps=30 (2.4s horizon @ model_dt=0.08), batch_size=700. 20 steps still gives a
-      # 1.6s horizon, comfortably more than this robot covers per control cycle at 0.22 m/s;
-      # 400 samples is still a healthy rollout count. Combined with controller_frequency above,
-      # this is roughly a 70% cut to MPPI's total rollout compute. Raise back toward 30/700 if
-      # path tracking gets visibly rougher than the CPU savings are worth.
-      time_steps: 20
-      model_dt: 0.08
-      batch_size: 400
+      # These boards are Raspberry Pi 4 (quad-core Cortex-A72) -- MPPI's sampling rollout is
+      # known to be a poor fit for this CPU class regardless of batch/step size; these are the
+      # community-guideline low-power settings (batch 150-250, steps 10-15), not just a smaller
+      # version of the original tuning. Original was time_steps=30, model_dt=0.08 (2.4s horizon),
+      # batch_size=700 -- combined with controller_frequency=10.0 above, this cuts total rollout
+      # compute (frequency x batch_size x time_steps) by ~89% (262,500 -> 30,000 sample-steps/sec).
+      # model_dt raised to 0.1 (does not add compute -- it's a time-step size, not a sample count)
+      # to keep a 1.5s prediction horizon instead of collapsing to under a second as steps drop.
+      # If path tracking gets visibly rougher than the CPU savings are worth, the next lever is
+      # swapping FollowPath to nav2_regulated_pure_pursuit_controller rather than raising these
+      # back up -- MPPI at any batch/step size still costs more than a non-sampling controller.
+      time_steps: 15
+      model_dt: 0.1
+      batch_size: 200
       ax_max: 1.5
       ax_min: -1.5
       ay_max: 0.0
