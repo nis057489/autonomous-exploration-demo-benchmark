@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <functional>
+#include <iomanip>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -39,6 +41,17 @@ public:
     haar_levels_ = declare_parameter<int>("haar_levels", 4);
     compression_ = declare_parameter<std::string>("compression", "zstd");
     stream_id_ = declare_parameter<std::string>("stream_id", "map_stream");
+    // Publishing every changed band in one burst monopolizes the shared DDIL link for the
+    // whole burst's duration -- each ddil_proxy_node instance (one per peer link, possibly on
+    // different robots) throttles independently with no cross-robot coordination, so nothing
+    // stops multiple robots' bursts from overlapping and contending for the same real airtime.
+    // Sending only this many of the highest-priority (coarsest) pending bands per map update
+    // and carrying the rest over to later updates spaces this robot's own traffic out, leaving
+    // gaps for peers to get a word in. 1 = strictly one band per update.
+    max_bands_per_update_ = declare_parameter<int>("max_bands_per_update", 1);
+    if (max_bands_per_update_ < 1) {
+      throw std::runtime_error("max_bands_per_update must be >= 1");
+    }
 
     if (haar_levels_ < 1 || haar_levels_ > 12) {
       throw std::runtime_error("haar_levels must be between 1 and 12");
@@ -138,47 +151,53 @@ private:
       }
     }
 
-    if (changed_indices.empty()) {
+    // Merge newly-changed bands into the pending backlog (latest payload wins per index --
+    // same dedup semantics as ddil_proxy's queue downstream). Bands not drained this cycle
+    // carry over and get picked up on a later on_map call instead of being sent now.
+    for (std::size_t k : changed_indices) {
+      pending_bands_[k] = bands[k];
+    }
+
+    if (pending_bands_.empty()) {
       RCLCPP_DEBUG(get_logger(), "all %zu bands unchanged — nothing sent", bands.size());
       return;
     }
 
-    // Build a human-readable summary: "[0:1.2KB* 1:3.4KB* 2:0.8KB 3:- 4:- 5:-]"
-    // '*' = changed/sent, '-' = suppressed (unchanged), bare size = sent
-    {
-      std::ostringstream ss;
-      ss << "[";
-      std::size_t total_bytes = 0;
-      for (std::size_t k = 0; k < bands.size(); ++k) {
-        if (k > 0) {ss << " ";}
-        const bool changed = std::find(
-          changed_indices.begin(), changed_indices.end(), k) != changed_indices.end();
-        if (changed) {
-          const double kb = static_cast<double>(bands[k].payload.size()) / 1024.0;
-          ss << k << ":" << std::fixed;
-          ss.precision(1);
-          ss << kb << "KB";
-          total_bytes += bands[k].payload.size();
-        } else {
-          ss << k << ":-";
-        }
-      }
-      ss << "]";
-      RCLCPP_INFO(
-        get_logger(), "encode bands %s  total=%.1f KB  (%zu/%zu bands sent)",
-        ss.str().c_str(),
-        static_cast<double>(total_bytes) / 1024.0,
-        changed_indices.size(), bands.size());
-    }
-
-    // Publish manifest before bands (TRANSIENT_LOCAL — reaches late-joining decoders).
+    // Publish manifest before bands (TRANSIENT_LOCAL — reaches late-joining decoders). Sent
+    // every cycle regardless of how much of the backlog drains, since it's small and decoders
+    // need current geometry; the bands sent below are stamped with this same `header`, so they
+    // can never be judged stale against it downstream (see ddil_stale_epoch.hpp).
     manifest_pub_->publish(manifest_to_msg(header, stream_id_, manifest));
 
-    // Publish only changed bands, coarsest-first.
-    for (std::size_t k : changed_indices) {
-      band_pubs_[k]->publish(
-        channel_to_msg(header, stream_id_, bands[k].descriptor, bands[k].payload));
+    // Drain up to max_bands_per_update_ pending bands, coarsest (lowest index) first --
+    // std::map keeps keys sorted, so begin() is always the next-highest-priority entry.
+    // Stamped with *this* cycle's header (not whenever the change was first detected), so a
+    // band held back from a previous cycle is never older than the manifest sent alongside it.
+    std::size_t sent_count = 0;
+    std::size_t sent_bytes = 0;
+    std::ostringstream ss;
+    ss << "[";
+    for (int i = 0; i < max_bands_per_update_ && !pending_bands_.empty(); ++i) {
+      auto it = pending_bands_.begin();
+      const std::size_t k = it->first;
+      const EncodedChannel channel = std::move(it->second);
+      pending_bands_.erase(it);
+
+      if (sent_count > 0) {ss << " ";}
+      const double kb = static_cast<double>(channel.payload.size()) / 1024.0;
+      ss << k << ":" << std::fixed << std::setprecision(1) << kb << "KB";
+      sent_bytes += channel.payload.size();
+      ++sent_count;
+
+      band_pubs_[k]->publish(channel_to_msg(header, stream_id_, channel.descriptor, channel.payload));
     }
+    ss << "]";
+
+    RCLCPP_INFO(
+      get_logger(), "encode bands %s  total=%.1f KB  (%zu sent this cycle, %zu changed, %zu still pending)",
+      ss.str().c_str(),
+      static_cast<double>(sent_bytes) / 1024.0,
+      sent_count, changed_indices.size(), pending_bands_.size());
   }
 
   std::string input_topic_;
@@ -186,11 +205,15 @@ private:
   int haar_levels_;
   std::string compression_;
   std::string stream_id_;
+  int max_bands_per_update_;
 
   rclcpp::Publisher<voxelcodec_msgs::msg::VoxelManifest>::SharedPtr manifest_pub_;
   std::vector<rclcpp::Publisher<voxelcodec_msgs::msg::VoxelChannel>::SharedPtr> band_pubs_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
   std::vector<std::size_t> last_band_fingerprint_;
+  // Bands whose fingerprint changed but haven't been sent yet, keyed by band index so the
+  // lowest (coarsest/highest-priority) pending entry is always pending_bands_.begin().
+  std::map<std::size_t, EncodedChannel> pending_bands_;
 };
 
 }  // namespace
