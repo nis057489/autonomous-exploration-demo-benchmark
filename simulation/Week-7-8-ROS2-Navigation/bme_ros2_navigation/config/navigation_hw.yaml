@@ -19,7 +19,11 @@ bt_navigator:
 controller_server:
   ros__parameters:
     enable_stamped_cmd_vel: true
-    controller_frequency: 12.5
+    # Was 12.5 -- MPPI reruns its full batch_size x time_steps rollout every cycle, so this
+    # directly multiplies that cost. 10.0 is still comfortably above what a 0.22 m/s robot
+    # needs to react in time; cut further only if CPU is still the bottleneck after the
+    # batch_size/time_steps trims below.
+    controller_frequency: 10.0
     costmap_update_timeout: 0.30
     min_x_velocity_threshold: 0.03
     min_y_velocity_threshold: 0.5
@@ -45,9 +49,17 @@ controller_server:
     #   max angular 1.82 rad/s → use 1.8
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
-      time_steps: 30
+      # MPPI reruns a fresh batch_size x time_steps rollout (through all 8 critics below) every
+      # control cycle -- this is the actual dominant CPU cost on these boards (controller_server
+      # was consistently the #2-3 CPU consumer live, right behind tf_frame_renamer/bt_navigator).
+      # Was time_steps=30 (2.4s horizon @ model_dt=0.08), batch_size=700. 20 steps still gives a
+      # 1.6s horizon, comfortably more than this robot covers per control cycle at 0.22 m/s;
+      # 400 samples is still a healthy rollout count. Combined with controller_frequency above,
+      # this is roughly a 70% cut to MPPI's total rollout compute. Raise back toward 30/700 if
+      # path tracking gets visibly rougher than the CPU savings are worth.
+      time_steps: 20
       model_dt: 0.08
-      batch_size: 700
+      batch_size: 400
       ax_max: 1.5
       ax_min: -1.5
       ay_max: 0.0
