@@ -102,27 +102,39 @@ class TFFrameRenamer(Node):
         return frame_id
 
     def _rename_msg(self, msg: TFMessage) -> tuple[TFMessage, bool]:
-        """Rename bare frames, reusing original transforms untouched (no copy)
-        wherever renaming isn't needed -- e.g. slam_toolbox already publishes
-        namespaced frames, so most of its /tf traffic passes through here
-        as a no-op and shouldn't pay for a copy on every message.
+        """Rename bare frames, reusing the original message untouched (no copy at
+        all) when nothing in it needs renaming -- e.g. slam_toolbox already
+        publishes namespaced frames, so most of its /tf traffic is a whole-message
+        no-op. Previously this still allocated a new TFMessage and rebuilt the
+        transforms list on every single callback even in that case; on a hot /tf
+        topic under CPU pressure that per-message object churn is real cost for
+        no reason, since nothing in the message ever changed.
         """
-        out = TFMessage()
-        changed = False
-        for t in msg.transforms:
+        out_transforms = None  # stays None until the first frame that actually needs renaming
+        for i, t in enumerate(msg.transforms):
             new_frame = self._rename_frame(t.header.frame_id)
             new_child = self._rename_frame(t.child_frame_id)
             if new_frame == t.header.frame_id and new_child == t.child_frame_id:
-                out.transforms.append(t)
+                if out_transforms is not None:
+                    out_transforms.append(t)
                 continue
-            changed = True
+            if out_transforms is None:
+                # First rename in this message -- start a real copy, backfilling
+                # everything already scanned unchanged.
+                out_transforms = list(msg.transforms[:i])
             new_t = TransformStamped()
             new_t.header.stamp = t.header.stamp
             new_t.header.frame_id = new_frame
             new_t.child_frame_id = new_child
             new_t.transform = t.transform  # unmodified, safe to share by reference
-            out.transforms.append(new_t)
-        return out, changed
+            out_transforms.append(new_t)
+
+        if out_transforms is None:
+            return msg, False
+
+        out = TFMessage()
+        out.transforms = out_transforms
+        return out, True
 
     def _cb(self, msg: TFMessage) -> None:
         self._recv_count += 1
