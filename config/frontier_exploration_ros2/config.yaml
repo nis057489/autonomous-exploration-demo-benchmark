@@ -68,14 +68,21 @@ frontier_explorer:
     map_processing_rate_hz: 0.5
 
     # Start exploration immediately at launch.
-    autostart: true
+    # `false` here on purpose: multi-robot runs use ./sync_start_exploration.sh to hold every
+    # robot until all of them have a confirmed-active Nav2 stack, then trigger ACTION_START on
+    # all of them together via the control service below -- instead of each robot racing its
+    # own fixed startup_delay_s timer against Nav2's own (variable-length) lifecycle bring-up.
+    autostart: false
 
-    # Wait this many seconds after node start before sending the first goal,
-    # giving Nav2 time to finish configuring its lifecycle nodes.
+    # Wait this many seconds after node start before sending the first goal, giving Nav2 time
+    # to finish configuring its lifecycle nodes. Unused while autostart is false above (nothing
+    # calls this timer); kept as the fallback delay for single-robot/autostart:true runs.
     startup_delay_s: 30.0
 
     # Keep the optional runtime control service available for manual stop/start flows.
-    control_service_enabled: false
+    # Note: the node force-enables this regardless of this value whenever autostart is false
+    # (frontier_explorer_node.cpp) -- explicit true here just documents that on purpose.
+    control_service_enabled: true
 
     # Publish a completion event so product-specific integrations can react outside the package.
     completion_event_enabled: true
