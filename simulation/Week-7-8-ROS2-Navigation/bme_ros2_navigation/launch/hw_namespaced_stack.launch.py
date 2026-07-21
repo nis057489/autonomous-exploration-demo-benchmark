@@ -252,7 +252,8 @@ def _parse_peers(peers_str):
 
 
 def _team_map_share_actions(
-    namespace, peers, map_transport, bandwidth_kbps, loss_pct, delay_ms, haar_levels, laptop_ip
+    namespace, peers, map_transport, bandwidth_kbps, loss_pct, delay_ms, haar_levels,
+    tile_size_m, laptop_ip
 ):
     """Per-peer DDIL relay (+ vxch encode/decode) feeding this robot's own
     team_map_fusion instance, entirely local except for the relay nodes
@@ -283,6 +284,7 @@ def _team_map_share_actions(
                     "input_topic": f"/{namespace}/map",
                     "output_base_topic": f"/{namespace}/vxch/map",
                     "haar_levels": haar_levels,
+                    "tile_size_m": tile_size_m,
                     "compression": "zstd",
                     "stream_id": namespace,
                     "use_sim_time": False,
@@ -476,6 +478,7 @@ def _create_actions(context):
     loss_pct = float(LaunchConfiguration("loss_pct").perform(context))
     delay_ms = float(LaunchConfiguration("delay_ms").perform(context))
     haar_levels = int(LaunchConfiguration("haar_levels").perform(context))
+    tile_size_m = float(LaunchConfiguration("tile_size_m").perform(context))
     laptop_ip = os.environ.get("VIZ_LAPTOP_IP", "192.168.100.20")
 
     output_dir = tempfile.mkdtemp(prefix=f"bme_hw_{namespace}_")
@@ -642,7 +645,7 @@ def _create_actions(context):
     actions.extend(
         _team_map_share_actions(
             namespace, peers, map_transport, bandwidth_kbps, loss_pct, delay_ms,
-            haar_levels, laptop_ip,
+            haar_levels, tile_size_m, laptop_ip,
         )
     )
 
@@ -687,5 +690,12 @@ def generate_launch_description():
         DeclareLaunchArgument("loss_pct", default_value="0.0"),
         DeclareLaunchArgument("delay_ms", default_value="0"),
         DeclareLaunchArgument("haar_levels", default_value="4"),
+        DeclareLaunchArgument(
+            "tile_size_m", default_value="2.0",
+            description="Encode the map as independent tile_size_m x tile_size_m Haar "
+                        "pyramids instead of one pyramid for the whole grid, so a "
+                        "still-changing area (wherever this robot currently is) can't "
+                        "starve another, already-settled area's detail bands from "
+                        "reaching a peer"),
         OpaqueFunction(function=_create_actions),
     ])

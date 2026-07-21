@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <geometry_msgs/msg/point.hpp>
@@ -29,12 +31,23 @@ inline std::int8_t unshift_from_uint32(std::uint32_t v)
   return static_cast<std::int8_t>(std::max(-1, std::min(100, shifted)));
 }
 
-// Per-update band state: stores decoded int64 coefficients per received band.
-struct BandState
+using TileKey = std::pair<int, int>;
+
+// A tiled encoder can publish several different tiles' messages back-to-back
+// on the SAME fixed band_k topic within one send tick (tile identity travels
+// in the payload, not the topic). With a depth-1 queue, only the single latest
+// sample published before this subscription's executor drains it would
+// survive -- everything else is silently dropped at the DDS layer. Must match
+// (or exceed) occupancy_grid_vxch_node's kBandQueueDepth.
+constexpr std::size_t kBandQueueDepth = 64;
+
+// Per-tile band state: stores decoded int64 coefficients per received band,
+// scoped to that tile's own (possibly smaller-than-nominal, at grid edges)
+// cell extent.
+struct TileBandState
 {
-  std::uint32_t stamp_sec{0};
-  std::uint32_t stamp_nanosec{0};
-  std::size_t original_len{0};
+  int width{0};
+  int height{0};
   int levels{0};
   int total_bands{0};
   std::vector<std::vector<std::int64_t>> band_coeffs;  // [band_index] → coefficients
@@ -88,7 +101,7 @@ public:
     const auto map_qos = rclcpp::QoS(1)
       .reliable()
       .durability(rclcpp::DurabilityPolicy::TransientLocal);
-    const auto band_qos = rclcpp::QoS(1).best_effort();
+    const auto band_qos = rclcpp::QoS(kBandQueueDepth).best_effort();
 
     map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(output_topic_, map_qos);
 
@@ -142,30 +155,29 @@ private:
       return;
     }
 
-    const std::size_t new_len = static_cast<std::size_t>(std::stoul(w_str)) *
-      static_cast<std::size_t>(std::stoul(h_str));
+    const std::uint32_t new_width = static_cast<std::uint32_t>(std::stoul(w_str));
+    const std::uint32_t new_height = static_cast<std::uint32_t>(std::stoul(h_str));
+    const std::string tile_size_str = get_meta("tile_size_cells");
+    const int new_tile_size_cells = tile_size_str.empty() ? 0 : std::stoi(tile_size_str);
 
     // Bands are sent progressively (possibly one per second, coarsest first, only when their
     // content actually changed -- see occupancy_grid_vxch_node's send_pending_bands()), so a
-    // fresher manifest stamp than the last one does NOT mean every band needs to arrive again
-    // under it. A band we already decoded is still valid until the grid geometry itself
-    // changes (a genuinely new map size) -- wiping band_coeffs on every manifest stamp change
-    // discarded a band that would never be resent (its content hadn't changed), permanently
-    // stalling reconstruction at whatever was received before the first stamp change.
-    if (pending_.original_len != new_len) {
-      pending_ = BandState{};
-      pending_.original_len = new_len;
-      pending_.levels = haar_levels_;
-      pending_.total_bands = haar_levels_ + 1;
-      pending_.band_coeffs.assign(static_cast<std::size_t>(pending_.total_bands), {});
-      pending_.received.assign(static_cast<std::size_t>(pending_.total_bands), false);
+    // fresher manifest stamp than the last one does NOT mean every tile/band needs to arrive
+    // again under it. A tile's band we already decoded is still valid until the grid geometry
+    // or tile partition itself changes -- wiping all tile state on every manifest stamp change
+    // would discard bands that would never be resent (their content hadn't changed), permanently
+    // stalling reconstruction of whatever tiles were already fully caught up.
+    if (new_width != grid_width_ || new_height != grid_height_ ||
+      (new_tile_size_cells != 0 && new_tile_size_cells != tile_size_cells_))
+    {
+      tiles_.clear();
+      grid_width_ = new_width;
+      grid_height_ = new_height;
     }
-    pending_.stamp_sec = msg->header.stamp.sec;
-    pending_.stamp_nanosec = msg->header.stamp.nanosec;
+    if (new_tile_size_cells != 0) {
+      tile_size_cells_ = new_tile_size_cells;
+    }
 
-    // Cache grid info for OccupancyGrid reconstruction
-    grid_width_ = static_cast<std::uint32_t>(std::stoul(w_str));
-    grid_height_ = static_cast<std::uint32_t>(std::stoul(h_str));
     const std::string res_str = get_meta("resolution");
     grid_resolution_ = res_str.empty() ? 0.05f : std::stof(res_str);
     origin_x_ = std::stod(get_meta("origin_x").empty() ? "0" : get_meta("origin_x"));
@@ -173,34 +185,58 @@ private:
     frame_id_ = get_meta("frame_id");
     if (frame_id_.empty()) {frame_id_ = "map";}
     manifest_stamp_ = msg->header.stamp;
+    have_manifest_ = true;
   }
 
   void on_band(int band_index, const voxelcodec_msgs::msg::VoxelChannel::ConstSharedPtr & msg)
   {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // No manifest/geometry established yet -- nothing to decode this band into.
-    if (pending_.original_len == 0) {
-      return;
-    }
-
-    const std::size_t idx = static_cast<std::size_t>(band_index);
-    if (idx >= pending_.band_coeffs.size()) {
+    // No manifest/geometry established yet -- nothing to place this tile's decode into.
+    if (!have_manifest_) {
       return;
     }
 
     const ChannelDescriptor desc = descriptor_from_msg(msg->descriptor);
 
+    const auto get_desc_meta = [&](const std::string & key, int fallback) -> int {
+        auto it = desc.metadata.find(key);
+        return (it != desc.metadata.end()) ? std::stoi(it->second) : fallback;
+      };
+    // Untagged (non-tiled) publishers are treated as a single tile (0,0) covering
+    // the whole grid, for backward compatibility with an untiled encoder.
+    const TileKey key{get_desc_meta("tile_row", 0), get_desc_meta("tile_col", 0)};
+    const int tile_w = get_desc_meta("tile_width", static_cast<int>(grid_width_));
+    const int tile_h = get_desc_meta("tile_height", static_cast<int>(grid_height_));
+
+    auto & tile = tiles_[key];
+    if (tile.width != tile_w || tile.height != tile_h || tile.levels != haar_levels_) {
+      tile = TileBandState{};
+      tile.width = tile_w;
+      tile.height = tile_h;
+      tile.levels = haar_levels_;
+      tile.total_bands = haar_levels_ + 1;
+      tile.band_coeffs.assign(static_cast<std::size_t>(tile.total_bands), {});
+      tile.received.assign(static_cast<std::size_t>(tile.total_bands), false);
+    }
+
+    const std::size_t idx = static_cast<std::size_t>(band_index);
+    if (idx >= tile.band_coeffs.size()) {
+      return;
+    }
+
     // Decompress and zigzag-varint decode. Always overwrites -- bands are latest-wins (the
     // encoder only resends a band when its content actually changed), and a band, once
-    // received, must stay refreshable for as long as the geometry is valid; it doesn't have
-    // a one-shot "already received, never touch again" lifetime tied to a manifest stamp.
+    // received, must stay refreshable for as long as this tile's geometry is valid; it doesn't
+    // have a one-shot "already received, never touch again" lifetime tied to a manifest stamp.
     try {
       const auto raw = decompress_payload(desc, msg->payload);
-      pending_.band_coeffs[idx] = zigzag_varint_decode(raw, desc.element_count);
-      pending_.received[idx] = true;
+      tile.band_coeffs[idx] = zigzag_varint_decode(raw, desc.element_count);
+      tile.received[idx] = true;
     } catch (const std::exception & e) {
-      RCLCPP_WARN(get_logger(), "Failed to decode band %d: %s", band_index, e.what());
+      RCLCPP_WARN(
+        get_logger(), "Failed to decode tile (%d,%d) band %d: %s",
+        key.first, key.second, band_index, e.what());
     }
   }
 
@@ -208,58 +244,70 @@ private:
   {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    if (pending_.original_len == 0) {
+    if (!have_manifest_ || grid_width_ == 0 || grid_height_ == 0 || tile_size_cells_ <= 0) {
       return;
     }
 
-    // Count consecutive received bands from 0
-    int bands_received = 0;
-    for (int k = 0; k < pending_.total_bands; ++k) {
-      if (pending_.received[static_cast<std::size_t>(k)]) {
-        bands_received = k + 1;
-      } else {
-        break;
-      }
-    }
-    if (bands_received == 0) {
-      return;
-    }
+    std::vector<std::int8_t> grid_data(
+      static_cast<std::size_t>(grid_width_) * static_cast<std::size_t>(grid_height_), -1);
+    bool any_tile_rendered = false;
 
-    // Reconstruct the (possibly coarser) 2D grid directly from the per-band
-    // coefficient vectors -- no flat-buffer assembly needed, band_coeffs is
-    // already in the right shape.
-    const int L = pending_.levels;
-    HaarReconstruction recon;
-    try {
-      recon = reconstruct_haar_from_bands(
-        pending_.band_coeffs, grid_width_, grid_height_, L, bands_received);
-    } catch (const std::exception & e) {
-      RCLCPP_WARN(get_logger(), "reconstruct_haar_from_bands failed: %s", e.what());
-      return;
-    }
+    for (auto & [key, tile] : tiles_) {
+      if (tile.width <= 0 || tile.height <= 0) {continue;}
 
-    const std::size_t W = grid_width_;
-    const std::size_t H = grid_height_;
-    const std::size_t w_prime = recon.width;
-    const std::size_t h_prime = recon.height;
-
-    // 2D nearest-neighbour upsample if we only have a coarse reconstruction --
-    // a real (blurry but spatially faithful) downsampled map, not a 1D-flat
-    // streak, since reconstruct_haar_from_bands did a proper 2D pyramid inverse.
-    std::vector<std::int8_t> grid_data(W * H, -1);
-    if (w_prime == W && h_prime == H) {
-      for (std::size_t i = 0; i < recon.values.size(); ++i) {
-        grid_data[i] = unshift_from_uint32(recon.values[i]);
-      }
-    } else {
-      for (std::size_t r = 0; r < H; ++r) {
-        const std::size_t r_src = r * h_prime / H;
-        for (std::size_t c = 0; c < W; ++c) {
-          const std::size_t c_src = c * w_prime / W;
-          grid_data[r * W + c] = unshift_from_uint32(recon.values[r_src * w_prime + c_src]);
+      // Count consecutive received bands from 0 -- same rule as the pre-tiling
+      // version, just scoped to this tile's own pyramid.
+      int bands_received = 0;
+      for (int k = 0; k < tile.total_bands; ++k) {
+        if (tile.received[static_cast<std::size_t>(k)]) {
+          bands_received = k + 1;
+        } else {
+          break;
         }
       }
+      if (bands_received == 0) {continue;}
+
+      HaarReconstruction recon;
+      try {
+        recon = reconstruct_haar_from_bands(
+          tile.band_coeffs, static_cast<std::size_t>(tile.width),
+          static_cast<std::size_t>(tile.height), tile.levels, bands_received);
+      } catch (const std::exception & e) {
+        RCLCPP_WARN(
+          get_logger(), "reconstruct_haar_from_bands failed for tile (%d,%d): %s",
+          key.first, key.second, e.what());
+        continue;
+      }
+
+      const std::size_t tw = static_cast<std::size_t>(tile.width);
+      const std::size_t th = static_cast<std::size_t>(tile.height);
+      const std::size_t w_prime = recon.width;
+      const std::size_t h_prime = recon.height;
+
+      const std::size_t row0 = static_cast<std::size_t>(key.first) *
+        static_cast<std::size_t>(tile_size_cells_);
+      const std::size_t col0 = static_cast<std::size_t>(key.second) *
+        static_cast<std::size_t>(tile_size_cells_);
+
+      // 2D nearest-neighbour upsample if we only have a coarse reconstruction of
+      // this tile -- a real (blurry but spatially faithful) downsampled patch,
+      // pasted at this tile's place in the full-resolution output grid.
+      for (std::size_t r = 0; r < th; ++r) {
+        const std::size_t r_src = (w_prime == tw && h_prime == th) ? r : (r * h_prime / th);
+        const std::size_t dst_row = row0 + r;
+        if (dst_row >= grid_height_) {break;}
+        for (std::size_t c = 0; c < tw; ++c) {
+          const std::size_t c_src = (w_prime == tw && h_prime == th) ? c : (c * w_prime / tw);
+          const std::size_t dst_col = col0 + c;
+          if (dst_col >= grid_width_) {continue;}
+          grid_data[dst_row * grid_width_ + dst_col] =
+            unshift_from_uint32(recon.values[r_src * w_prime + c_src]);
+        }
+      }
+      any_tile_rendered = true;
     }
+
+    if (!any_tile_rendered) {return;}
 
     nav_msgs::msg::OccupancyGrid out;
     out.header.stamp = manifest_stamp_;
@@ -287,11 +335,13 @@ private:
   rclcpp::TimerBase::SharedPtr timer_;
 
   std::mutex mutex_;
-  BandState pending_;
+  std::map<TileKey, TileBandState> tiles_;
 
   // Grid geometry from latest manifest
+  bool have_manifest_{false};
   std::uint32_t grid_width_{0};
   std::uint32_t grid_height_{0};
+  int tile_size_cells_{0};
   float grid_resolution_{0.05f};
   double origin_x_{0.0};
   double origin_y_{0.0};

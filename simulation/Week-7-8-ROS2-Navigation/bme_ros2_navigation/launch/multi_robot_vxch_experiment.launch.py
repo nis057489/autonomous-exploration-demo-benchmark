@@ -56,6 +56,7 @@ def _create_all_actions(context):
 
     map_transport = LaunchConfiguration("map_transport").perform(context)
     haar_levels = int(LaunchConfiguration("haar_levels").perform(context))
+    tile_size_m = float(LaunchConfiguration("tile_size_m").perform(context))
     bandwidth_kbps = float(LaunchConfiguration("bandwidth_kbps").perform(context))
     loss_pct = float(LaunchConfiguration("loss_pct").perform(context))
     delay_ms = float(LaunchConfiguration("delay_ms").perform(context))
@@ -177,6 +178,7 @@ def _create_all_actions(context):
                     "input_topic": "/map",
                     "output_base_topic": vxch_base,
                     "haar_levels": haar_levels,
+                    "tile_size_m": tile_size_m,
                     "compression": "zstd",
                     "use_sim_time": use_sim_time,
                 }],
@@ -239,6 +241,12 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "haar_levels", default_value="4",
                 description="Haar wavelet levels (total bands = levels+1)"),
+            DeclareLaunchArgument(
+                "tile_size_m", default_value="2.0",
+                description="Encode the map as independent tile_size_m x tile_size_m Haar "
+                            "pyramids instead of one pyramid for the whole grid, so a still-"
+                            "changing area (wherever a robot currently is) can't starve "
+                            "another, already-settled area's detail bands"),
             DeclareLaunchArgument(
                 "bandwidth_kbps", default_value="0",
                 description="Token-bucket bandwidth limit for map transport (0 = unlimited)"),

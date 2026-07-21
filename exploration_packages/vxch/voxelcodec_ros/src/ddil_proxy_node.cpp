@@ -109,6 +109,34 @@ bool is_manifest_topic(const std::string & topic)
          topic.compare(topic.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
+// A tiled occupancy_grid_vxch_node encoder multiplexes every tile's band_k
+// onto the SAME fixed /band_k topic (tile identity travels in the message's
+// descriptor metadata, not the topic name -- see occupancy_grid_vxch_node's
+// tile_row/tile_col tagging). band_index_from_topic alone can no longer
+// identify a dedup slot: two different tiles' band_2 updates queued in the
+// same tick would collide on one dedup_key and one would silently clobber
+// the other. Peeking at tile_row/tile_col here (a full deserialize, same
+// cost extract_stamp already pays at pop-time) keeps each tile's backlog
+// independent. Untagged (untiled) publishers fall back to (0,0), which is
+// exactly the single-tile-covering-the-whole-grid case, so this is a no-op
+// for anyone not running a tiled encoder.
+std::pair<int, int> tile_id_from_channel_msg(const rclcpp::SerializedMessage & serialized)
+{
+  static rclcpp::Serialization<voxelcodec_msgs::msg::VoxelChannel> ser;
+  voxelcodec_msgs::msg::VoxelChannel msg;
+  ser.deserialize_message(&serialized, &msg);
+  int tile_row = 0;
+  int tile_col = 0;
+  for (const auto & entry : msg.descriptor.metadata) {
+    if (entry.key == "tile_row") {
+      tile_row = std::stoi(entry.value);
+    } else if (entry.key == "tile_col") {
+      tile_col = std::stoi(entry.value);
+    }
+  }
+  return {tile_row, tile_col};
+}
+
 // Token bucket — thread-safe, shared across all relay channels (simulates one shared link).
 class TokenBucket
 {
@@ -301,7 +329,17 @@ private:
   {
     // bypass or reliable → RELIABLE + TRANSIENT_LOCAL (for manifest topics and Nav2 consumers)
     // plain relay         → BEST_EFFORT volatile (for VXCH bands between encoder and decoder)
-    rclcpp::QoS qos(1);
+    //
+    // A tiled occupancy_grid_vxch_node can publish several different tiles'
+    // messages back-to-back on the same fixed band_k topic within one send
+    // tick (tile identity travels in the payload, not the topic). This
+    // subscription's own DDS history depth needs to be able to hold all of
+    // them, or the ones after the first are silently dropped before
+    // on_message() ever runs -- BandQueue's own dedup/priority downstream
+    // never gets a chance to see them. kBandQueueDepth must be at least as
+    // large as occupancy_grid_vxch_node's own constant of the same name.
+    constexpr int kBandQueueDepth = 64;
+    rclcpp::QoS qos(cfg.bypass || cfg.reliable ? 1 : kBandQueueDepth);
     if (cfg.bypass || cfg.reliable) {
       qos.reliable().durability(rclcpp::DurabilityPolicy::TransientLocal);
     } else {
@@ -365,9 +403,11 @@ private:
     const int band_idx = band_index_from_topic(input_topic);
     if (band_idx >= 0) {
       item.band_priority = band_idx;
+      const auto [tile_row, tile_col] = tile_id_from_channel_msg(*serialized);
       item.dedup_key =
         std::to_string(reinterpret_cast<std::uintptr_t>(pub.get())) +
-        ":band_" + std::to_string(band_idx);
+        ":band_" + std::to_string(band_idx) +
+        ":tile_" + std::to_string(tile_row) + "_" + std::to_string(tile_col);
     } else if (is_manifest_topic(input_topic)) {
       // Manifest must arrive before any band (decoder needs it to parse coefficients).
       // Priority -1 puts it ahead of band_0 (priority 0). Deduplicated so only the
