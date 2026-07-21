@@ -142,24 +142,26 @@ private:
       return;
     }
 
-    // Only reset state if this is a new map version (different stamp)
-    const std::uint32_t sec = msg->header.stamp.sec;
-    const std::uint32_t nsec = msg->header.stamp.nanosec;
-    if (sec == pending_.stamp_sec && nsec == pending_.stamp_nanosec &&
-      pending_.original_len > 0)
-    {
-      return;  // same update, already have it
-    }
-
-    pending_ = BandState{};
-    pending_.stamp_sec = sec;
-    pending_.stamp_nanosec = nsec;
-    pending_.original_len = static_cast<std::size_t>(std::stoul(w_str)) *
+    const std::size_t new_len = static_cast<std::size_t>(std::stoul(w_str)) *
       static_cast<std::size_t>(std::stoul(h_str));
-    pending_.levels = haar_levels_;
-    pending_.total_bands = haar_levels_ + 1;
-    pending_.band_coeffs.assign(static_cast<std::size_t>(pending_.total_bands), {});
-    pending_.received.assign(static_cast<std::size_t>(pending_.total_bands), false);
+
+    // Bands are sent progressively (possibly one per second, coarsest first, only when their
+    // content actually changed -- see occupancy_grid_vxch_node's send_pending_bands()), so a
+    // fresher manifest stamp than the last one does NOT mean every band needs to arrive again
+    // under it. A band we already decoded is still valid until the grid geometry itself
+    // changes (a genuinely new map size) -- wiping band_coeffs on every manifest stamp change
+    // discarded a band that would never be resent (its content hadn't changed), permanently
+    // stalling reconstruction at whatever was received before the first stamp change.
+    if (pending_.original_len != new_len) {
+      pending_ = BandState{};
+      pending_.original_len = new_len;
+      pending_.levels = haar_levels_;
+      pending_.total_bands = haar_levels_ + 1;
+      pending_.band_coeffs.assign(static_cast<std::size_t>(pending_.total_bands), {});
+      pending_.received.assign(static_cast<std::size_t>(pending_.total_bands), false);
+    }
+    pending_.stamp_sec = msg->header.stamp.sec;
+    pending_.stamp_nanosec = msg->header.stamp.nanosec;
 
     // Cache grid info for OccupancyGrid reconstruction
     grid_width_ = static_cast<std::uint32_t>(std::stoul(w_str));
@@ -177,22 +179,22 @@ private:
   {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // Ignore bands that don't match the current manifest stamp
-    if (static_cast<std::uint32_t>(msg->header.stamp.sec) != pending_.stamp_sec ||
-      msg->header.stamp.nanosec != pending_.stamp_nanosec ||
-      pending_.original_len == 0)
-    {
+    // No manifest/geometry established yet -- nothing to decode this band into.
+    if (pending_.original_len == 0) {
       return;
     }
 
     const std::size_t idx = static_cast<std::size_t>(band_index);
-    if (idx >= pending_.band_coeffs.size() || pending_.received[idx]) {
+    if (idx >= pending_.band_coeffs.size()) {
       return;
     }
 
     const ChannelDescriptor desc = descriptor_from_msg(msg->descriptor);
 
-    // Decompress and zigzag-varint decode
+    // Decompress and zigzag-varint decode. Always overwrites -- bands are latest-wins (the
+    // encoder only resends a band when its content actually changed), and a band, once
+    // received, must stay refreshable for as long as the geometry is valid; it doesn't have
+    // a one-shot "already received, never touch again" lifetime tied to a manifest stamp.
     try {
       const auto raw = decompress_payload(desc, msg->payload);
       pending_.band_coeffs[idx] = zigzag_varint_decode(raw, desc.element_count);
