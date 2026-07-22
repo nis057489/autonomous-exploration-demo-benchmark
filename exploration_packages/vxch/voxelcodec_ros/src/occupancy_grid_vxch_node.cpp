@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -197,6 +199,7 @@ private:
       pending_by_tile_.clear();
       tile_queue_.clear();
       tiles_in_queue_.clear();
+      last_sent_seq_.clear();
     }
 
     // Convert int8 → uint32 once for the whole grid; tiles below index into this.
@@ -332,11 +335,43 @@ private:
       }
       auto & bands_for_tile = tile_it->second;
 
+      auto & last_sent = last_sent_seq_[key];
+
       for (int i = 0; i < max_bands_per_update_ && !bands_for_tile.empty(); ++i) {
+        // Prefer the least-recently-sent pending band over strict coarsest-
+        // first -- a never-sent band (no entry in last_sent) always wins,
+        // otherwise the one with the oldest send_seq_ wins. The decoder never
+        // expires a previously-received band -- a slightly-stale band_0
+        // paired with a fresh band_3 reconstructs just fine -- so there's no
+        // correctness reason for a band that was *just* delivered to cut back
+        // in line ahead of one that's been waiting longer, even if the just-
+        // delivered one changed again immediately after. A one-shot "ever
+        // delivered" flag isn't enough here: once every band in a tile has
+        // been sent at least once, everything ties on that flag and it decays
+        // back to strict coarsest-first, so a tile the robot is still
+        // standing in and continuously re-sensing would starve its own
+        // fine bands again as soon as the first sweep finished. Tracking
+        // recency instead makes it genuine round-robin fairness among a
+        // tile's own bands, not just a one-time bypass -- the same
+        // starvation tiling fixed *across* tiles, now also fixed *within*
+        // whichever tile is currently active, for as long as it stays active.
         auto it = bands_for_tile.begin();
+        std::uint64_t best_seq = std::numeric_limits<std::uint64_t>::max();
+        for (auto candidate = bands_for_tile.begin(); candidate != bands_for_tile.end();
+          ++candidate)
+        {
+          auto sent_it = last_sent.find(candidate->first);
+          const std::uint64_t seq = (sent_it == last_sent.end()) ? 0 : sent_it->second;
+          if (seq < best_seq) {
+            best_seq = seq;
+            it = candidate;
+            if (seq == 0) {break;}  // never sent -- can't do better than this
+          }
+        }
         const int band_idx = it->first;
         const EncodedChannel channel = std::move(it->second);
         bands_for_tile.erase(it);
+        last_sent[band_idx] = ++send_seq_counter_;
 
         if (sent_count > 0) {ss << " ";}
         const double kb = static_cast<double>(channel.payload.size()) / 1024.0;
@@ -393,6 +428,14 @@ private:
   // every other (possibly already-settled) tile's turn to send.
   std::deque<TileKey> tile_queue_;
   std::set<TileKey> tiles_in_queue_;
+  // Per tile, per band index, the send_seq_counter_ value at which it was
+  // last sent (absent = never sent). Lets send_pending_bands() prefer the
+  // least-recently-sent pending band over strict coarsest-first, so an
+  // actively re-sensing tile can't have one band index (typically the
+  // coarse one, since it changes on nearly every local update) perpetually
+  // cut ahead of bands that have gone longer without a turn.
+  std::map<TileKey, std::map<int, std::uint64_t>> last_sent_seq_;
+  std::uint64_t send_seq_counter_{0};
 
   // Latest known map geometry/timestamp, refreshed on every on_map() call, used by
   // send_pending_bands() regardless of which on_map() call queued the band it's sending.
