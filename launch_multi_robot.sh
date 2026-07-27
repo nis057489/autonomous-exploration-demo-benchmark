@@ -77,8 +77,13 @@ for entry in "${ROBOTS[@]}"; do
     set +e
     {
       echo "==> Syncing repo on ${robot_id} on ${ip}"
+      # Discard any local edits to experiment.conf on the robot before
+      # pulling -- it's about to be overwritten unconditionally by this
+      # laptop's copy below anyway, so a stale local edit there shouldn't be
+      # allowed to abort the merge (and, with it, the submodule sync/update
+      # chained after via &&).
       ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
-        "cd ${REPO_DIR} && git pull && git submodule sync --recursive && git submodule update --init --recursive"
+        "cd ${REPO_DIR} && git checkout -- experiment.conf && git pull && git submodule sync --recursive && git submodule update --init --recursive"
 
       # Push the local experiment.conf as-is, bypassing git entirely, *after*
       # the git pull above so it isn't blocked by "local changes would be
