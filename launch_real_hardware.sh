@@ -206,6 +206,11 @@ if [[ "${REBUILD}" == true ]] || [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
     BUILD_PACKAGES=("${MISSING_PKGS[@]}")
   fi
 
+  if [[ -x "${PROJECT_ROOT}/install_missing.sh" ]]; then
+    echo "Installing/updating system dependencies needed to build..."
+    "${PROJECT_ROOT}/install_missing.sh"
+  fi
+
   echo "Building workspace: ${BUILD_PACKAGES[*]}"
   (
     cd "${PROJECT_ROOT}"
