@@ -327,7 +327,20 @@ if [[ -n "${ROBOT_ID}" ]]; then
     # Path length: traversed_path already accumulates the full path as one
     # growing nav_msgs/Path, deduplicated by movement distance -- small and
     # low-rate, no need to also bag /tf or /odom for this.
-    ros2 bag record -o "${RUN_DIR}/bag" "/${ROBOT_ID}/explore/traversed_path" \
+    #
+    # Map coverage: unlike bytes-sent (already free from ddil_proxy_node's
+    # own stats log lines), "how much of the map is actually known, over
+    # time" has no existing log line to derive it from -- it has to come from
+    # the grids themselves. Bag this robot's own local SLAM map (ground
+    # truth of what it has physically explored, transport-independent) next
+    # to the fused team_map_ddil (what DDIL -- baseline or vxch -- actually
+    # got through), so a later comparison can track known-cell coverage over
+    # time instead of only path length. Both are published at ~1 Hz
+    # (KEEP_LAST depth 1), so this stays small even over a multi-minute run.
+    ros2 bag record -o "${RUN_DIR}/bag" \
+      "/${ROBOT_ID}/explore/traversed_path" \
+      "/${ROBOT_ID}/map" \
+      "/${ROBOT_ID}/team_map_ddil" \
       >"${RUN_DIR}/bag_record.log" 2>&1 &
     METRICS_PIDS+=("$!")
 

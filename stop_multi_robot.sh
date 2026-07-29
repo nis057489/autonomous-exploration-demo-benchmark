@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+./set_wifi_bandwidth.sh clear
+
 # Stops the tmux sessions started by launch_multi_robot.sh on all 3 robots.
 #
 # Default: sends Ctrl-C into each session so launch_real_hardware.sh (and
@@ -34,3 +36,5 @@ if [[ "${FORCE}" -eq 0 ]]; then
   echo "Sent Ctrl-C to each robot's launch (graceful shutdown)."
   echo "Run './stop_multi_robot.sh --force' to kill the tmux sessions outright."
 fi
+
+./recover_metrics.sh --clean
