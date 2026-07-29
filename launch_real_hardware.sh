@@ -324,23 +324,41 @@ if [[ -n "${ROBOT_ID}" ]]; then
     export ROS_LOG_DIR="${RUN_DIR}/ros_logs"
     echo "Recording metrics to ${RUN_DIR} (RECORD_METRICS=true)"
 
-    # Path length: traversed_path already accumulates the full path as one
-    # growing nav_msgs/Path, deduplicated by movement distance -- small and
-    # low-rate, no need to also bag /tf or /odom for this.
+    # Bag every topic real.rviz displays for this robot, so a run can be
+    # replayed later and look exactly like it did live (map coverage over
+    # time, frontiers, laser, TF, etc.), not just the traversed path. This
+    # is a real jump in bag size/rate vs. the old path-only recording
+    # (TF and the costmap/map grids are the bulk of it) -- worth it since
+    # replay is the point now, but don't add topics rviz doesn't show.
     #
-    # Map coverage: unlike bytes-sent (already free from ddil_proxy_node's
-    # own stats log lines), "how much of the map is actually known, over
-    # time" has no existing log line to derive it from -- it has to come from
-    # the grids themselves. Bag this robot's own local SLAM map (ground
-    # truth of what it has physically explored, transport-independent) next
-    # to the fused team_map_ddil (what DDIL -- baseline or vxch -- actually
-    # got through), so a later comparison can track known-cell coverage over
-    # time instead of only path length. Both are published at ~1 Hz
-    # (KEEP_LAST depth 1), so this stays small even over a multi-minute run.
+    # --include-unpublished-topics matters here: the old positional-topics
+    # form (`ros2 bag record topic1 topic2 ...`) logged "All requested
+    # topics are subscribed" after matching just the first one and silently
+    # never recorded the rest (see bag_record.log from past runs -- /map and
+    # /team_map_ddil never got a single message even though nodes were
+    # clearly publishing them). Pre-subscribing to every named topic up
+    # front, instead of waiting for discovery to notice each publisher,
+    # sidesteps that race regardless of node startup order.
     ros2 bag record -o "${RUN_DIR}/bag" \
+      --include-unpublished-topics \
+      --topics \
       "/${ROBOT_ID}/explore/traversed_path" \
+      "/${ROBOT_ID}/explore/frontiers" \
       "/${ROBOT_ID}/map" \
+      "/${ROBOT_ID}/map_updates" \
+      "/${ROBOT_ID}/nav_map" \
+      "/${ROBOT_ID}/nav_map_updates" \
       "/${ROBOT_ID}/team_map_ddil" \
+      "/${ROBOT_ID}/team_map_ddil_updates" \
+      "/${ROBOT_ID}/local_costmap/obstacle_layer" \
+      "/${ROBOT_ID}/local_costmap/obstacle_layer_updates" \
+      "/${ROBOT_ID}/scan" \
+      "/${ROBOT_ID}/robot_description" \
+      "/${ROBOT_ID}/goal_pose" \
+      "/${ROBOT_ID}/tf" \
+      "/${ROBOT_ID}/tf_static" \
+      "/map" \
+      "/map_updates" \
       >"${RUN_DIR}/bag_record.log" 2>&1 &
     METRICS_PIDS+=("$!")
 
