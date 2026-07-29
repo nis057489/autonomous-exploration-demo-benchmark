@@ -1,6 +1,5 @@
 frontier_explorer:
   ros__parameters:
-
     # --------------- TOPICS --------------- #
 
     # Occupancy grid topic used to compute frontiers.
@@ -17,7 +16,7 @@ frontier_explorer:
 
     # Global frame used for frontier goals and TF lookups.
     global_frame: map
- 
+
     # Robot base frame used for TF lookups.
     robot_base_frame: base_footprint
 
@@ -30,7 +29,7 @@ frontier_explorer:
     # OccupancyGrid topic used to publish the optimized decision map for debugging.
     optimized_map_topic: /explore/optimized_map
 
-    # Requires `completion_event_enabled: true` 
+    # Requires `completion_event_enabled: true`
     completion_event_topic: exploration_complete
 
     # Marker size for frontier visualization.
@@ -44,7 +43,7 @@ frontier_explorer:
     frontier_marker_color_b: 0.2
 
     # --------------- QoS --------------- #
-        
+
     # Map QoS profile selection.
     map_qos_durability: transient_local
     map_qos_reliability: reliable
@@ -63,9 +62,9 @@ frontier_explorer:
     # --------------- GENERAL --------------- #
 
     # Refresh Rate of the package.
-    # `1.0` is recommended. Use `2.0` if your robot is very fast. 
-    # Use `0.50` if your mapping is slow and you want lowest CPU usage.  
-    map_processing_rate_hz: 0.5
+    # `1.0` is recommended. Use `2.0` if your robot is very fast.
+    # Use `0.50` if your mapping is slow and you want lowest CPU usage.
+    map_processing_rate_hz: 0.25
 
     # Start exploration immediately at launch.
     autostart: true
@@ -89,15 +88,15 @@ frontier_explorer:
 
     # "dp" optimizes traveling distance by comparing posibilities with limited depth. Increasing efficiency but adds extra CPU overhead.
     # "greedy" traverses the full MRTSP matrix one step at a time. Cost free.
-    mrtsp_solver: dp
+    mrtsp_solver: greedy
     # Maximum number of scored frontier candidates passed into the bounded-horizon dp solver.
     dp_solver_candidate_limit: 12
     # Number of distinct frontier visits evaluated in the candidate pool.
-    dp_planning_horizon: 8
+    dp_planning_horizon: 4
 
-    # Enable decision-map preprocessing for frontier extraction. 
+    # Enable decision-map preprocessing for frontier extraction.
     # Disable only if you are having performance issues. Not a problem for most CPUs.
-    frontier_map_optimization_enabled: true
+    frontier_map_optimization_enabled: false
 
     # Replan while navigating if target-pose visible reveal gain for active goal is exhausted.
     # Disable if you are having performance issues.
@@ -111,7 +110,7 @@ frontier_explorer:
     goal_skip_on_blocked_goal: true
 
     # Enable the post-goal settle delay after a successful frontier goal.
-    # Useful if you want stability over speed. Use if you have slow SLAM & LiDAR configuration. 
+    # Useful if you want stability over speed. Use if you have slow SLAM & LiDAR configuration.
     post_goal_settle_enabled: false
 
     # Minimum seconds to wait before selecting the next frontier after a successful goal.
@@ -127,7 +126,6 @@ frontier_explorer:
     # goal keeps aborting instantly (e.g. transient TF lookup failures under CPU load), there's
     # no backoff on the resend, and it can busy-loop tens of times in a few seconds.
     all_frontiers_suppressed_behavior: stay
-
 
     # --------------- Algorithm Configuration - Advanced Users --------------- #
 
@@ -164,7 +162,6 @@ frontier_explorer:
     # Doesn't have to be a real sensor value. Used for distance scoring.
     sensor_effective_range_m: 1.5
 
-
     # --------------- Navigation Safety --------------- #
 
     # Minimum distance before a frontier is considered a valid target.
@@ -175,7 +172,6 @@ frontier_explorer:
     # Distance used to treat a frontier region as recently visited.
     # Use if you are having navigation loops.
     frontier_visit_tolerance: 0.40
-
 
     # --------------- Map Optimization --------------- #
 
@@ -217,7 +213,6 @@ frontier_explorer:
     # Example: 0 keeps the map literal, 2 can merge thin fragmented frontiers.
     dilation_kernel_radius_cells: 1
 
-
     # --------------- Preemption --------------- #
 
     # Treat the current frontier as complete once the robot is this close to it; 0.0 disables this shortcut.
@@ -238,7 +233,6 @@ frontier_explorer:
 
     # Additional yaw offset in degrees applied to the target-pose LiDAR heading model above.
     goal_preemption_lidar_yaw_offset_deg: 0.0
-
 
     # --------------- Suppression --------------- #
 
@@ -285,7 +279,6 @@ frontier_explorer:
     # you specifically want failed regions (e.g. behind glass, unreachable) to be given up on
     # for the rest of the run rather than retried every frontier_suppression_timeout_s.
     frontier_suppression_permanent_after_threshold: false
-
 
     # --------------- Team Awareness / Multi-Robot --------------- #
 
