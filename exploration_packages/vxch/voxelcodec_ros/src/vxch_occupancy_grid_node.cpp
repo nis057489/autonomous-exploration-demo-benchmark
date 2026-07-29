@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -160,28 +161,44 @@ private:
     const std::string tile_size_str = get_meta("tile_size_cells");
     const int new_tile_size_cells = tile_size_str.empty() ? 0 : std::stoi(tile_size_str);
 
+    const std::string res_str = get_meta("resolution");
+    const float new_resolution = res_str.empty() ? 0.05f : std::stof(res_str);
+    const double new_origin_x = std::stod(get_meta("origin_x").empty() ? "0" : get_meta("origin_x"));
+    const double new_origin_y = std::stod(get_meta("origin_y").empty() ? "0" : get_meta("origin_y"));
+
     // Bands are sent progressively (possibly one per second, coarsest first, only when their
     // content actually changed -- see occupancy_grid_vxch_node's send_pending_bands()), so a
     // fresher manifest stamp than the last one does NOT mean every tile/band needs to arrive
-    // again under it. A tile's band we already decoded is still valid until the grid geometry
-    // or tile partition itself changes -- wiping all tile state on every manifest stamp change
-    // would discard bands that would never be resent (their content hadn't changed), permanently
-    // stalling reconstruction of whatever tiles were already fully caught up.
-    if (new_width != grid_width_ || new_height != grid_height_ ||
+    // again under it. A tile's band we already decoded is still valid until the mapping from
+    // tile index to world position actually moves -- growing width/height alone (e.g.
+    // slam_toolbox extending the array as new area is discovered, origin unchanged) does NOT
+    // move any existing tile's world position, so it must not be treated as invalidating.
+    // Wiping all tile state on every such growth (this used to trigger on width/height changing
+    // at all) discards bands that would never be resent (their content hadn't changed),
+    // permanently stalling reconstruction of whatever tiles were already fully caught up -- the
+    // reconstructed map would never accumulate past whatever last happened to be decoded right
+    // before the next resize. Only an origin shift (grid reallocated to extend in the negative
+    // direction) or a resolution/tile-partition change actually moves that mapping. Origin is
+    // compared with a half-cell tolerance so ordinary loop-closure/pose-graph jitter in the
+    // published origin doesn't trip this either.
+    const double origin_epsilon = static_cast<double>(std::max(new_resolution, grid_resolution_)) * 0.5;
+    const bool origin_shifted = have_manifest_ &&
+      (std::abs(new_origin_x - origin_x_) > origin_epsilon ||
+        std::abs(new_origin_y - origin_y_) > origin_epsilon);
+    if (origin_shifted ||
+      new_resolution != grid_resolution_ ||
       (new_tile_size_cells != 0 && new_tile_size_cells != tile_size_cells_))
     {
       tiles_.clear();
-      grid_width_ = new_width;
-      grid_height_ = new_height;
     }
+    grid_width_ = new_width;
+    grid_height_ = new_height;
     if (new_tile_size_cells != 0) {
       tile_size_cells_ = new_tile_size_cells;
     }
-
-    const std::string res_str = get_meta("resolution");
-    grid_resolution_ = res_str.empty() ? 0.05f : std::stof(res_str);
-    origin_x_ = std::stod(get_meta("origin_x").empty() ? "0" : get_meta("origin_x"));
-    origin_y_ = std::stod(get_meta("origin_y").empty() ? "0" : get_meta("origin_y"));
+    grid_resolution_ = new_resolution;
+    origin_x_ = new_origin_x;
+    origin_y_ = new_origin_y;
     frame_id_ = get_meta("frame_id");
     if (frame_id_.empty()) {frame_id_ = "map";}
     manifest_stamp_ = msg->header.stamp;
