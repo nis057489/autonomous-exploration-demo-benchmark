@@ -138,7 +138,15 @@ def per_minute(value, duration_s):
     return value / duration_s * 60.0
 
 
-def grouped_bar_chart(robots, series, title, ylabel, fmt, out_path, footer):
+BETTER_LABEL = {"higher": "▲ higher is better", "lower": "▼ lower is better"}
+
+
+def annotate_better(ax, better, fontsize=10):
+    ax.text(0.99, 1.02, BETTER_LABEL[better], transform=ax.transAxes,
+             ha='right', va='bottom', fontsize=fontsize, style='italic', color='#888888')
+
+
+def grouped_bar_chart(robots, series, title, ylabel, fmt, out_path, footer, better):
     """series: {condition: [value_or_None, ...] aligned with robots}"""
     fig, ax = plt.subplots(figsize=(10, 6))
     x = range(len(robots))
@@ -165,6 +173,7 @@ def grouped_bar_chart(robots, series, title, ylabel, fmt, out_path, footer):
     for spine in ('left', 'bottom'):
         ax.spines[spine].set_color('#cccccc')
     ax.legend(frameon=False, fontsize=11)
+    annotate_better(ax, better)
     fig.text(0.01, 0.01, footer, fontsize=8, color='#999999', ha='left')
     plt.tight_layout(rect=(0, 0.03, 1, 1))
     plt.savefig(out_path, dpi=150, bbox_inches='tight', facecolor='white')
@@ -222,24 +231,24 @@ def main():
 
     charts = [
         ("Chart_Distance.png", "Distance Traveled — latest baseline vs vxch", "m / min", "{:.1f}",
-         series_for("distance_m", rate=True)),
+         series_for("distance_m", rate=True), "higher"),
         ("Chart_OwnMapCoverage.png", "Own SLAM Map Coverage — latest baseline vs vxch", "m² / min", "{:.1f}",
-         series_for("own_map_m2", rate=True)),
+         series_for("own_map_m2", rate=True), "higher"),
         ("Chart_TeamMapCoverage.png", "Team-Fused Map Coverage — latest baseline vs vxch", "m² / min", "{:.1f}",
-         series_for("team_map_m2", rate=True)),
+         series_for("team_map_m2", rate=True), "higher"),
         ("Chart_Bandwidth.png", "DDIL Link Throughput — latest baseline vs vxch", "KB / min delivered", "{:.0f}",
-         series_for("bandwidth_kb", rate=True)),
+         series_for("bandwidth_kb", rate=True), "higher"),
         ("Chart_CPULoad.png", "CPU Load (1-min avg) — latest baseline vs vxch", "loadavg", "{:.1f}",
-         series_for("cpu_avg", rate=False)),
+         series_for("cpu_avg", rate=False), "lower"),
     ]
 
-    for filename, title, ylabel, fmt, series in charts:
-        grouped_bar_chart(robots, series, title, ylabel, fmt, args.out_dir / filename, footer)
+    for filename, title, ylabel, fmt, series, better in charts:
+        grouped_bar_chart(robots, series, title, ylabel, fmt, args.out_dir / filename, footer, better)
         print(f"wrote {args.out_dir / filename}")
 
     fig, axes = plt.subplots(2, 3, figsize=(20, 11))
     axes = axes.flatten()
-    for ax, (filename, title, ylabel, fmt, series) in zip(axes, charts):
+    for ax, (filename, title, ylabel, fmt, series, better) in zip(axes, charts):
         x = range(len(robots))
         width = 0.32
         for i, cond in enumerate(CONDITIONS):
@@ -247,7 +256,8 @@ def main():
             vals = [v if v is not None else 0.0 for v in series[cond]]
             ax.bar([xi + offset for xi in x], vals, width=width, color=COLORS[cond],
                    label=cond, edgecolor='white', linewidth=1, zorder=3)
-        ax.set_title(title, fontsize=12, fontweight='bold', loc='left')
+        short_title = title.split(" — ")[0]
+        ax.set_title(short_title, fontsize=12, fontweight='bold', loc='left')
         ax.set_ylabel(ylabel, fontsize=10)
         ax.set_xticks(list(x))
         ax.set_xticklabels(robots, fontsize=9)
@@ -255,9 +265,11 @@ def main():
         for spine in ('top', 'right'):
             ax.spines[spine].set_visible(False)
         ax.legend(frameon=False, fontsize=9)
+        annotate_better(ax, better, fontsize=8)
     axes[-1].axis('off')
+    fig.suptitle("Latest Baseline vs VXCH — Key Run Metrics", fontsize=16, fontweight='bold', x=0.01, ha='left')
     fig.text(0.01, 0.01, footer, fontsize=8, color='#999999', ha='left')
-    plt.tight_layout(rect=(0, 0.02, 1, 1))
+    plt.tight_layout(rect=(0, 0.02, 1, 0.96))
     plt.savefig(args.out_dir / "Chart_AllMetrics.png", dpi=150, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     print(f"wrote {args.out_dir / 'Chart_AllMetrics.png'}")
