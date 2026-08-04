@@ -221,7 +221,17 @@ trap cleanup EXIT INT TERM
 cleanup_existing_nav2
 
 if (( NUM_ROBOTS > 1 )); then
-  ros2 launch bme_ros2_navigation multi_robot_vxch_experiment.launch.py \
+  # LAUNCH_DEBUG=true prints a full traceback for launch-time exceptions
+  # (e.g. "Caught exception in launch (see debug for traceback)") instead of
+  # just the one-line summary -- set it when you need to find where a
+  # launch-time error actually originates.
+  LAUNCH_DEBUG_FLAG=()
+  if [[ "${LAUNCH_DEBUG:-false}" == true ]]; then
+    LAUNCH_DEBUG_FLAG=(--debug)
+    [[ -d "${PROJECT_ROOT}/debug" ]] && export PYTHONPATH="${PROJECT_ROOT}/debug:${PYTHONPATH:-}"
+  fi
+
+  ros2 launch "${LAUNCH_DEBUG_FLAG[@]}" bme_ros2_navigation multi_robot_vxch_experiment.launch.py \
     world:="${WORLD}" \
     num_robots:="${NUM_ROBOTS}" \
     model:="${ROBOT}.urdf" \

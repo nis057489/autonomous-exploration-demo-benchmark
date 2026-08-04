@@ -73,6 +73,15 @@ def _frontier_params(base_path, namespace, use_sim_time, autostart, control_serv
     params["frontier_marker_color_r"] = color_255[0] / 255.0
     params["frontier_marker_color_g"] = color_255[1] / 255.0
     params["frontier_marker_color_b"] = color_255[2] / 255.0
+
+    # launch_ros can't launch-time-type-check an empty list (no elements to
+    # infer the array type from) and raises "got '()' of type 'tuple'" --
+    # single-robot mode never hits this because it hands the node the YAML
+    # file path directly instead of this in-memory dict, and rclpy parses
+    # empty lists at runtime just fine. Drop empty-list values here so the
+    # node falls back to its own runtime default for them instead (e.g.
+    # peer_pose_topics: [] in config.yaml, a no-op for single-robot runs).
+    params = {k: v for k, v in params.items() if v != []}
     return params
 
 

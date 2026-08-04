@@ -96,7 +96,7 @@ run_docker() {
 
   # Forward experiment parameters into the container.
   # Use -e VAR=value (not bare -e VAR) so sourced-but-unexported variables are forwarded.
-  for _var in MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS RANDOM_SEED ROBOT_STARTUP_DELAY_S SPAWN_PRESET; do
+  for _var in MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS RANDOM_SEED ROBOT_STARTUP_DELAY_S SPAWN_PRESET LAUNCH_DEBUG; do
     if [[ -n "${!_var:-}" ]]; then
       docker_args+=(-e "${_var}=${!_var}")
     fi
@@ -151,6 +151,15 @@ run_docker() {
 
   if [[ -d "${PROJECT_ROOT}/results" ]]; then
     docker_args+=(-v "${PROJECT_ROOT}/results:/opt/benchmark_ws/results")
+  fi
+
+  if [[ "${LAUNCH_DEBUG:-false}" == true && -d "${PROJECT_ROOT}/debug" ]]; then
+    # debug/sitecustomize.py -- prints which Node a launch-time parameter
+    # evaluation failure came from (see LAUNCH_DEBUG in launch.sh). Not put
+    # on PYTHONPATH here: setting it this early, before entrypoint.sh sources
+    # the ROS/ament environment, breaks local_setup.sh. launch.sh adds it to
+    # PYTHONPATH itself, after sourcing ROS, right before the ros2 launch call.
+    docker_args+=(-v "${PROJECT_ROOT}/debug:/opt/benchmark_ws/debug:ro")
   fi
 
   echo "Starting benchmark in Docker (image=${DOCKER_IMAGE}, world=${WORLD}, robot=${ROBOT:-mogi_bot}, num_robots=${NUM_ROBOTS:-1}, map_transport=${MAP_TRANSPORT:-baseline}, bandwidth_kbps=${BANDWIDTH_KBPS:-0}, loss_pct=${LOSS_PCT:-0.0}, delay_ms=${DELAY_MS:-0})..."
