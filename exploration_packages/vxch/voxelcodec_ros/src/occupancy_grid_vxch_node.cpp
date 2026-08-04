@@ -7,6 +7,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -20,6 +21,7 @@
 #include "voxelcodec_ros/codec.hpp"
 #include "voxelcodec_ros/haar_forward.hpp"
 #include "voxelcodec_ros/ros_messages.hpp"
+#include "voxelcodec_ros/tile_send_scheduler.hpp"
 #include "voxelcodec_ros/types.hpp"
 #include "voxelcodec_msgs/msg/voxel_channel.hpp"
 #include "voxelcodec_msgs/msg/voxel_manifest.hpp"
@@ -91,6 +93,20 @@ public:
     // smaller tile_size_m_ than the default without re-checking the tradeoff).
     max_tiles_per_update_ = declare_parameter<int>("max_tiles_per_update", -1);
 
+    // A tile near an actively-exploring robot re-dirties on nearly every SLAM
+    // map update -- ordinary occupancy-probability noise, not just genuine
+    // new information -- so without a floor on resend cadence it gets
+    // serviced (and its whole band pyramid re-sent) essentially every send
+    // tick. pending_by_tile_ already coalesces a redirty into its still-
+    // queued payload if the tile hasn't been sent yet, but that only kicks in
+    // if the tile is actually made to wait; this is what makes it wait.
+    // 0 = debouncing disabled (matches the old always-drain-immediately
+    // behavior).
+    min_resend_interval_s_ = declare_parameter<double>("min_resend_interval_s", 8.0);
+    if (min_resend_interval_s_ < 0.0) {
+      throw std::runtime_error("min_resend_interval_s must be >= 0");
+    }
+
     // Sending used to happen directly inside on_map(), so a robot's send *opportunities* were
     // tied to its own /map republish rate -- which is itself tied to how much SLAM CPU it has.
     // Live measurement: one robot's on_map fired 46 times against peers' 7-8 times in the same
@@ -144,9 +160,11 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "Encoding %s → %s/manifest + band_0..band_%d (haar_levels=%d, compression=%s, "
-      "tile_size_m=%.2f, send_rate_hz=%.2f, max_bands_per_update=%d)",
+      "tile_size_m=%.2f, send_rate_hz=%.2f, max_bands_per_update=%d, "
+      "max_tiles_per_update=%d, min_resend_interval_s=%.2f)",
       input_topic_.c_str(), output_base_topic_.c_str(), haar_levels_,
-      haar_levels_, compression_.c_str(), tile_size_m_, send_rate_hz_, max_bands_per_update_);
+      haar_levels_, compression_.c_str(), tile_size_m_, send_rate_hz_, max_bands_per_update_,
+      max_tiles_per_update_, min_resend_interval_s_);
   }
 
 private:
@@ -200,6 +218,7 @@ private:
       tile_queue_.clear();
       tiles_in_queue_.clear();
       last_sent_seq_.clear();
+      last_tile_send_time_.clear();
     }
 
     // Convert int8 → uint32 once for the whole grid; tiles below index into this.
@@ -303,38 +322,54 @@ private:
       return;
     }
 
-    // Publish manifest before bands (TRANSIENT_LOCAL — reaches late-joining decoders). Sent
-    // every tick a band goes out, using the latest known geometry; the bands sent below are
-    // stamped with this same header, so they can never be judged stale against it downstream
-    // (see ddil_stale_epoch.hpp) even if their payload was computed several on_map calls ago.
-    manifest_pub_->publish(manifest_to_msg(latest_header_, stream_id_, manifest_));
-
     // Round-robin across tiles that currently have pending bands: each tile gets
     // up to max_bands_per_update_ of its own lowest (coarsest-first) pending
     // bands this tick, then -- if it still has more pending -- goes to the back
     // of the queue. A tile that's quieted down (nothing new queued for it since
     // its last turn) drains fully within a few ticks and drops out, regardless
     // of how much churn is still happening in other tiles.
-    const int tiles_this_tick = max_tiles_per_update_ < 0 ?
-      static_cast<int>(tile_queue_.size()) :
-      std::min(max_tiles_per_update_, static_cast<int>(tile_queue_.size()));
+    //
+    // A tile that was serviced too recently (within min_resend_interval_s_) is
+    // skipped this tick without consuming a serviced slot -- it stays queued
+    // (any redirty before its next eligible tick just overwrites its still-
+    // pending payload in pending_by_tile_, no duplicate work) and is examined
+    // again on a later tick. Each tile currently in the queue is visited at
+    // most once per tick (tracked via `visited` against the queue's size at
+    // tick start) so a run of all-debounced tiles can't spin the loop forever.
+    const int max_serviced = max_tiles_per_update_ < 0 ?
+      std::numeric_limits<int>::max() : max_tiles_per_update_;
+    const std::size_t tiles_at_tick_start = tile_queue_.size();
+    const double now_s = now().seconds();
 
     std::size_t sent_count = 0;
     std::size_t sent_bytes = 0;
+    int serviced_tiles = 0;
+    std::size_t visited = 0;
     std::ostringstream ss;
     ss << "[";
 
-    for (int t = 0; t < tiles_this_tick; ++t) {
+    while (serviced_tiles < max_serviced && visited < tiles_at_tick_start && !tile_queue_.empty()) {
       const TileKey key = tile_queue_.front();
       tile_queue_.pop_front();
       tiles_in_queue_.erase(key);
+      ++visited;
 
       auto tile_it = pending_by_tile_.find(key);
       if (tile_it == pending_by_tile_.end() || tile_it->second.empty()) {
         continue;
       }
-      auto & bands_for_tile = tile_it->second;
 
+      const auto last_sent_time_it = last_tile_send_time_.find(key);
+      const std::optional<double> last_sent_time = last_sent_time_it == last_tile_send_time_.end() ?
+        std::nullopt : std::optional<double>(last_sent_time_it->second);
+      if (!tile_resend_eligible(last_sent_time, now_s, min_resend_interval_s_)) {
+        if (tiles_in_queue_.insert(key).second) {
+          tile_queue_.push_back(key);
+        }
+        continue;
+      }
+
+      auto & bands_for_tile = tile_it->second;
       auto & last_sent = last_sent_seq_[key];
 
       for (int i = 0; i < max_bands_per_update_ && !bands_for_tile.empty(); ++i) {
@@ -384,6 +419,9 @@ private:
           channel_to_msg(latest_header_, stream_id_, channel.descriptor, channel.payload));
       }
 
+      last_tile_send_time_[key] = now_s;
+      ++serviced_tiles;
+
       if (bands_for_tile.empty()) {
         pending_by_tile_.erase(tile_it);
       } else if (tiles_in_queue_.insert(key).second) {
@@ -391,6 +429,22 @@ private:
       }
     }
     ss << "]";
+
+    if (sent_count == 0) {
+      // Every currently-queued tile is still within its debounce window (or
+      // had nothing left to send) -- nothing actually went out this tick, so
+      // there's no new band content for a manifest to accompany.
+      return;
+    }
+
+    // Manifest published after bands rather than before: correctness doesn't
+    // depend on wire order here (see ddil_stale_epoch.hpp) since the proxy's
+    // relay queue sorts strictly by band_priority, and the manifest's -1
+    // always sorts ahead of every band's >= 0 regardless of arrival order.
+    // Publishing it here, gated on sent_count, means a fully-debounced tick
+    // doesn't burn a manifest message for no new content (TRANSIENT_LOCAL
+    // durability still reaches late-joining decoders once one does go out).
+    manifest_pub_->publish(manifest_to_msg(latest_header_, stream_id_, manifest_));
 
     RCLCPP_INFO(
       get_logger(), "send tick %s  total=%.1f KB  (%zu sent, %zu tile(s) still queued)",
@@ -409,6 +463,7 @@ private:
   int max_bands_per_update_;
   int max_tiles_per_update_;
   double send_rate_hz_;
+  double min_resend_interval_s_;
 
   rclcpp::Publisher<voxelcodec_msgs::msg::VoxelManifest>::SharedPtr manifest_pub_;
   std::vector<rclcpp::Publisher<voxelcodec_msgs::msg::VoxelChannel>::SharedPtr> band_pubs_;
@@ -436,6 +491,11 @@ private:
   // cut ahead of bands that have gone longer without a turn.
   std::map<TileKey, std::map<int, std::uint64_t>> last_sent_seq_;
   std::uint64_t send_seq_counter_{0};
+  // Per tile, wall-clock seconds at which it was last actually serviced
+  // (absent = never sent). Feeds tile_resend_eligible() so a chronically
+  // re-dirtying tile can't be resent more than once per min_resend_interval_s
+  // regardless of how often on_map() finds new content for it.
+  std::map<TileKey, double> last_tile_send_time_;
 
   // Latest known map geometry/timestamp, refreshed on every on_map() call, used by
   // send_pending_bands() regardless of which on_map() call queued the band it's sending.
