@@ -20,7 +20,8 @@
 #                       (local bringup does not apply in multi-robot mode).
 #
 # Experiment parameters are read from experiment.conf (project root) or env vars:
-#   MAP_TRANSPORT, BANDWIDTH_KBPS, LOSS_PCT, DELAY_MS, HAAR_LEVELS, TILE_SIZE_M, RECORD_METRICS
+#   MAP_TRANSPORT, BANDWIDTH_KBPS, LOSS_PCT, DELAY_MS, HAAR_LEVELS, TILE_SIZE_M,
+#   MAX_TILES_PER_UPDATE, MIN_RESEND_INTERVAL_S, RECORD_METRICS
 #
 # What this script does NOT do (run these yourself, on the robot or on another terminal):
 #   - RViz (open it manually, or pass rviz:=true to the launch file)
@@ -44,6 +45,8 @@ LOSS_PCT="${LOSS_PCT:-0.0}"
 DELAY_MS="${DELAY_MS:-0}"
 HAAR_LEVELS="${HAAR_LEVELS:-4}"
 TILE_SIZE_M="${TILE_SIZE_M:-2.0}"
+MAX_TILES_PER_UPDATE="${MAX_TILES_PER_UPDATE:-2}"
+MIN_RESEND_INTERVAL_S="${MIN_RESEND_INTERVAL_S:-2.0}"
 RANDOM_SEED="${RANDOM_SEED:--1}"
 ROBOT_STARTUP_DELAY_S="${ROBOT_STARTUP_DELAY_S:-0.0}"
 # ROBOT_HOSTS: every robot in the team, "name@ip@x@y@yaw" comma-separated, for
@@ -397,7 +400,9 @@ if [[ -n "${ROBOT_ID}" ]]; then
     loss_pct:="${LOSS_PCT}" \
     delay_ms:="${DELAY_MS}" \
     haar_levels:="${HAAR_LEVELS}" \
-    tile_size_m:="${TILE_SIZE_M}"
+    tile_size_m:="${TILE_SIZE_M}" \
+    max_tiles_per_update:="${MAX_TILES_PER_UPDATE}" \
+    min_resend_interval_s:="${MIN_RESEND_INTERVAL_S}"
   exit $?
 fi
 
@@ -478,6 +483,8 @@ if (( NUM_ROBOTS > 1 )); then
     delay_ms:="${DELAY_MS}" \
     haar_levels:="${HAAR_LEVELS}" \
     tile_size_m:="${TILE_SIZE_M}" \
+    max_tiles_per_update:="${MAX_TILES_PER_UPDATE}" \
+    min_resend_interval_s:="${MIN_RESEND_INTERVAL_S}" \
     rng_seed:="${RANDOM_SEED}" \
     robot_startup_delay_s:="${ROBOT_STARTUP_DELAY_S}"
 
