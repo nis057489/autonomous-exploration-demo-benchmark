@@ -253,7 +253,7 @@ def _parse_peers(peers_str):
 
 def _team_map_share_actions(
     namespace, peers, map_transport, bandwidth_kbps, loss_pct, delay_ms, haar_levels,
-    tile_size_m, max_tiles_per_update, min_resend_interval_s, laptop_ip
+    laptop_ip
 ):
     """Per-peer DDIL relay (+ vxch encode/decode) feeding this robot's own
     team_map_fusion instance, entirely local except for the relay nodes
@@ -284,9 +284,6 @@ def _team_map_share_actions(
                     "input_topic": f"/{namespace}/map",
                     "output_base_topic": f"/{namespace}/vxch/map",
                     "haar_levels": haar_levels,
-                    "tile_size_m": tile_size_m,
-                    "max_tiles_per_update": max_tiles_per_update,
-                    "min_resend_interval_s": min_resend_interval_s,
                     "compression": "zstd",
                     "stream_id": namespace,
                     "use_sim_time": False,
@@ -480,9 +477,6 @@ def _create_actions(context):
     loss_pct = float(LaunchConfiguration("loss_pct").perform(context))
     delay_ms = float(LaunchConfiguration("delay_ms").perform(context))
     haar_levels = int(LaunchConfiguration("haar_levels").perform(context))
-    tile_size_m = float(LaunchConfiguration("tile_size_m").perform(context))
-    max_tiles_per_update = int(LaunchConfiguration("max_tiles_per_update").perform(context))
-    min_resend_interval_s = float(LaunchConfiguration("min_resend_interval_s").perform(context))
     laptop_ip = os.environ.get("VIZ_LAPTOP_IP", "192.168.100.20")
 
     output_dir = tempfile.mkdtemp(prefix=f"bme_hw_{namespace}_")
@@ -649,7 +643,7 @@ def _create_actions(context):
     actions.extend(
         _team_map_share_actions(
             namespace, peers, map_transport, bandwidth_kbps, loss_pct, delay_ms,
-            haar_levels, tile_size_m, max_tiles_per_update, min_resend_interval_s, laptop_ip,
+            haar_levels, laptop_ip,
         )
     )
 
@@ -694,26 +688,5 @@ def generate_launch_description():
         DeclareLaunchArgument("loss_pct", default_value="0.0"),
         DeclareLaunchArgument("delay_ms", default_value="0"),
         DeclareLaunchArgument("haar_levels", default_value="4"),
-        DeclareLaunchArgument(
-            "tile_size_m", default_value="2.0",
-            description="Encode the map as independent tile_size_m x tile_size_m Haar "
-                        "pyramids instead of one pyramid for the whole grid, so a "
-                        "still-changing area (wherever this robot currently is) can't "
-                        "starve another, already-settled area's detail bands from "
-                        "reaching a peer"),
-        DeclareLaunchArgument(
-            "max_tiles_per_update", default_value="2",
-            description="Max distinct tiles the encoder services per send tick (-1 = "
-                        "uncapped). Capping this gives busy tiles more time to sit queued, "
-                        "so repeated redirties coalesce into one send instead of each "
-                        "triggering its own"),
-        DeclareLaunchArgument(
-            "min_resend_interval_s", default_value="2.0",
-            description="Minimum seconds between two actual sends of the same tile, "
-                        "regardless of how often it re-dirties (0 = no debounce). Kept "
-                        "well under occupancy_grid_vxch_node's own opt-in-only default of "
-                        "0 -- an 8s floor here previously made the DDIL map look stalled "
-                        "and slow to converge on real hardware; tune up only after "
-                        "confirming the link is actually saturated, not just laggy"),
         OpaqueFunction(function=_create_actions),
     ])
