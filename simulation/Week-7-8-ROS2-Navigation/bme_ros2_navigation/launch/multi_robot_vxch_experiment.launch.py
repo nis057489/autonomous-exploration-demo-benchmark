@@ -57,8 +57,6 @@ def _create_all_actions(context):
     map_transport = LaunchConfiguration("map_transport").perform(context)
     haar_levels = int(LaunchConfiguration("haar_levels").perform(context))
     tile_size_m = float(LaunchConfiguration("tile_size_m").perform(context))
-    max_tiles_per_update = int(LaunchConfiguration("max_tiles_per_update").perform(context))
-    min_resend_interval_s = float(LaunchConfiguration("min_resend_interval_s").perform(context))
     bandwidth_kbps = float(LaunchConfiguration("bandwidth_kbps").perform(context))
     loss_pct = float(LaunchConfiguration("loss_pct").perform(context))
     delay_ms = float(LaunchConfiguration("delay_ms").perform(context))
@@ -181,8 +179,6 @@ def _create_all_actions(context):
                     "output_base_topic": vxch_base,
                     "haar_levels": haar_levels,
                     "tile_size_m": tile_size_m,
-                    "max_tiles_per_update": max_tiles_per_update,
-                    "min_resend_interval_s": min_resend_interval_s,
                     "compression": "zstd",
                     "use_sim_time": use_sim_time,
                 }],
@@ -251,16 +247,6 @@ def generate_launch_description():
                             "pyramids instead of one pyramid for the whole grid, so a still-"
                             "changing area (wherever a robot currently is) can't starve "
                             "another, already-settled area's detail bands"),
-            DeclareLaunchArgument(
-                "max_tiles_per_update", default_value="2",
-                description="Max distinct tiles the encoder services per send tick (-1 = "
-                            "uncapped). Capping this gives busy tiles more time to sit queued, "
-                            "so repeated redirties coalesce into one send instead of each "
-                            "triggering its own"),
-            DeclareLaunchArgument(
-                "min_resend_interval_s", default_value="8.0",
-                description="Minimum seconds between two actual sends of the same tile, "
-                            "regardless of how often it re-dirties (0 = no debounce)"),
             DeclareLaunchArgument(
                 "bandwidth_kbps", default_value="0",
                 description="Token-bucket bandwidth limit for map transport (0 = unlimited)"),

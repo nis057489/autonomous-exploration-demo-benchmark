@@ -215,14 +215,6 @@ if(BUILD_TESTING)
   if(TARGET test_ddil_stale_epoch)
     target_include_directories(test_ddil_stale_epoch PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   endif()
-
-  # Pure decision logic, no ROS types -- same rationale as test_ddil_stale_epoch above.
-  ament_add_gtest(test_tile_send_scheduler
-    test/test_tile_send_scheduler.cpp
-  )
-  if(TARGET test_tile_send_scheduler)
-    target_include_directories(test_tile_send_scheduler PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-  endif()
 endif()
 
 ament_export_include_directories(include)
