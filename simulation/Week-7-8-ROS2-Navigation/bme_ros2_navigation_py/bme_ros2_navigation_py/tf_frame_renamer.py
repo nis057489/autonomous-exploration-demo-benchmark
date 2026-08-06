@@ -15,9 +15,19 @@ Publishes renamed frames to BOTH:
 
 Subscribes BEST_EFFORT to /tf (dynamic transforms may be published best-effort)
 and RELIABLE/TRANSIENT_LOCAL to /tf_static (matching StaticTransformBroadcaster).
+
+Publishing renamed frames back onto /tf(_static) means this node's own /tf(_static)
+subscription receives its own output as new input (tf2_msgs carries no publisher
+identity in the plain rclpy callback, so there's no cheaper way to recognize "this
+is mine" than content). Left unhandled, every already-renamed message gets treated
+as fresh, forwarded to /{ns}/tf again, and counted in received/forwarded -- doubling
+real traffic on /{ns}/tf and, transitively, CPU in every Nav2 node subscribed there
+(measured on hardware: /{ns}/tf running at ~2.6x the rate of bare /tf). _RecentSignatures
+recognizes and drops that bounced-back copy before it's reprocessed.
 """
 
 import sys
+from collections import deque
 
 import rclpy
 from geometry_msgs.msg import TransformStamped
@@ -26,6 +36,32 @@ from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from tf2_msgs.msg import TFMessage
 
 _BARE_FRAMES = {"odom", "base_footprint", "base_link", "base_scan"}
+
+
+def _signature(t: TransformStamped) -> tuple[str, str, int, int]:
+    return (t.header.frame_id, t.child_frame_id, t.header.stamp.sec, t.header.stamp.nanosec)
+
+
+class _RecentSignatures:
+    """Bounded, O(1)-amortized recently-seen-transform set.
+
+    A plain deque.__contains__ scan is fine at this size (default maxlen 256,
+    well under 82-219 Hz, and small in absolute node count too), but a
+    growing per-message set() would be needless allocation on a hot path.
+    """
+
+    def __init__(self, maxlen: int = 256) -> None:
+        self._order: deque[tuple[str, str, int, int]] = deque(maxlen=maxlen)
+        self._set: set[tuple[str, str, int, int]] = set()
+
+    def __contains__(self, sig: tuple[str, str, int, int]) -> bool:
+        return sig in self._set
+
+    def add(self, sig: tuple[str, str, int, int]) -> None:
+        if len(self._order) == self._order.maxlen:
+            self._set.discard(self._order[0])
+        self._order.append(sig)
+        self._set.add(sig)
 
 
 class TFFrameRenamer(Node):
@@ -75,6 +111,9 @@ class TFFrameRenamer(Node):
         self.create_subscription(
             TFMessage, "/tf_static", self._cb_static, reliable_transient_local
         )
+
+        self._recent_published = _RecentSignatures()
+        self._recent_published_static = _RecentSignatures()
 
         self._recv_count = 0
         self._fwd_count = 0
@@ -139,20 +178,44 @@ class TFFrameRenamer(Node):
     def _cb(self, msg: TFMessage) -> None:
         self._recv_count += 1
 
+        # Drop transforms that are our own renamed output bouncing back through
+        # this same /tf subscription (see module docstring) before doing any
+        # renaming/forwarding work on them -- otherwise every renamed transform
+        # gets forwarded to /{ns}/tf twice: once as itself, once as its own echo.
+        fresh = [t for t in msg.transforms if _signature(t) not in self._recent_published]
+        if not fresh:
+            return
+        if len(fresh) != len(msg.transforms):
+            filtered = TFMessage()
+            filtered.transforms = fresh
+            msg = filtered
+
         renamed, changed = self._rename_msg(msg)
 
-        # Avoid re-publishing our own output back to /tf (loop guard):
-        # only publish to /tf when at least one frame was actually renamed.
         self._pub_ns.publish(renamed)
         self._fwd_count += 1
+        # Avoid re-publishing our own output back to /tf (loop guard):
+        # only publish to /tf when at least one frame was actually renamed.
         if changed:
+            for t in renamed.transforms:
+                self._recent_published.add(_signature(t))
             self._pub_global.publish(renamed)
 
     def _cb_static(self, msg: TFMessage) -> None:
+        fresh = [t for t in msg.transforms if _signature(t) not in self._recent_published_static]
+        if not fresh:
+            return
+        if len(fresh) != len(msg.transforms):
+            filtered = TFMessage()
+            filtered.transforms = fresh
+            msg = filtered
+
         renamed, changed = self._rename_msg(msg)
 
         self._pub_ns_static.publish(renamed)
         if changed:
+            for t in renamed.transforms:
+                self._recent_published_static.add(_signature(t))
             self._pub_global_static.publish(renamed)
 
 
