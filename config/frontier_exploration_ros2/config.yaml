@@ -64,7 +64,7 @@ frontier_explorer:
     # Refresh Rate of the package.
     # `1.0` is recommended. Use `2.0` if your robot is very fast.
     # Use `0.50` if your mapping is slow and you want lowest CPU usage.
-    map_processing_rate_hz: 0.1
+    map_processing_rate_hz: 0.25
 
     # Start exploration immediately at launch.
     autostart: true
@@ -90,7 +90,7 @@ frontier_explorer:
     # "greedy" traverses the full MRTSP matrix one step at a time. Cost free.
     mrtsp_solver: greedy
     # Maximum number of scored frontier candidates passed into the bounded-horizon dp solver.
-    dp_solver_candidate_limit: 6
+    dp_solver_candidate_limit: 12
     # Number of distinct frontier visits evaluated in the candidate pool.
     dp_planning_horizon: 4
 
@@ -100,7 +100,7 @@ frontier_explorer:
 
     # Replan while navigating if target-pose visible reveal gain for active goal is exhausted.
     # Disable if you are having performance issues.
-    goal_preemption_enabled: false
+    goal_preemption_enabled: true
 
     # Minimum seconds between consecutive goal preemption attempts.
     # Waffle Pi at 0.22 m/s needs ~15 s to travel 3 m — preempting faster just causes churn.
@@ -111,10 +111,10 @@ frontier_explorer:
 
     # Enable the post-goal settle delay after a successful frontier goal.
     # Useful if you want stability over speed. Use if you have slow SLAM & LiDAR configuration.
-    post_goal_settle_enabled: true
+    post_goal_settle_enabled: false
 
     # Minimum seconds to wait before selecting the next frontier after a successful goal.
-    post_goal_min_settle: 2
+    post_goal_min_settle: 1.50
 
     # Enable temporary suppression for frontiers that repeatedly fail or stall.
     # Use if you are having issues with SLAM or Nav2.
@@ -193,7 +193,7 @@ frontier_explorer:
     # This removes tiny fragments caused by noise or partial unknown boundaries.
     # Lower values increase responsiveness but can create jittery micro-goals.
     # Higher values stabilize behavior but may ignore narrow real openings.
-    min_frontier_size_cells: 10
+    min_frontier_size_cells: 5
 
     # Spatial sigma of the bilateral filter in map cells.
     # Larger values smooth over wider neighborhoods before frontier extraction.
@@ -295,12 +295,12 @@ frontier_explorer:
     # If any cell in this radius is already known (free or occupied) to the team, the
     # frontier is skipped -- no need to send a robot to re-derive shared information.
     # 0.0 disables the check.
-    team_known_check_radius_m: 3.0
+    team_known_check_radius_m: 1.0
 
     # Radius in meters used to reject a candidate frontier if any teammate is currently within
     # it (via peer_pose_topics below). Prevents robots from converging on the same area.
     # 0.0 disables peer-proximity filtering.
-    peer_avoidance_radius_m: 3.0
+    peer_avoidance_radius_m: 1.0
 
     # Absolute topics this robot subscribes to for each teammate's pose, used by
     # peer_avoidance_radius_m above. Multi-robot launch files normally inject this per robot
@@ -314,4 +314,4 @@ frontier_explorer:
 
     # Rate in Hz at which this robot publishes its own pose above. Only runs when
     # peer_pose_topics is non-empty. 0.0 disables publishing.
-    own_pose_publish_rate_hz: 1.0
+    own_pose_publish_rate_hz: 2.0
