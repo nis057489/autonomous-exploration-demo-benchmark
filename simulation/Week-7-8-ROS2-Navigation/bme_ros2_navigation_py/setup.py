@@ -24,6 +24,7 @@ setup(
             'slam_toolbox_load_map = bme_ros2_navigation_py.slam_toolbox_load_map:main',
             'follow_waypoints = bme_ros2_navigation_py.follow_waypoints:main',
             'tf_frame_renamer = bme_ros2_navigation_py.tf_frame_renamer:main',
+            'wait_for_topic = bme_ros2_navigation_py.wait_for_topic:main',
         ],
     },
 )

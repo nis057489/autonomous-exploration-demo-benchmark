@@ -22,12 +22,14 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     GroupAction,
     IncludeLaunchDescription,
     OpaqueFunction,
+    RegisterEventHandler,
     SetEnvironmentVariable,
-    TimerAction,
 )
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -496,10 +498,6 @@ def _create_actions(context):
         "robot.launch.py"
     )
 
-    bringup_delay = 5.0 if local_bringup else 0.0
-    slam_delay = bringup_delay + 3.0
-    nav2_delay = slam_delay + 10.0
-
     actions = []
 
     if local_bringup:
@@ -591,41 +589,76 @@ def _create_actions(context):
         )
     )
 
-    actions.append(
-        TimerAction(
-            period=slam_delay,
-            actions=[
-                GroupAction([
-                    PushRosNamespace(abs_namespace),
-                    # slam_toolbox publishes "map"/"map_metadata" as absolute
-                    # topics ("/map", "/map_metadata") in its own source, so
-                    # node namespacing alone never prefixes them -- without
-                    # this, the real map data goes to the bare global /map
-                    # and per_robot_map_compositor (subscribed to
-                    # {namespace}/map) never sees it.
-                    SetRemap(src="/map", dst=f"{abs_namespace}/map"),
-                    SetRemap(src="/map_metadata", dst=f"{abs_namespace}/map_metadata"),
-                    IncludeLaunchDescription(
-                        PythonLaunchDescriptionSource(slam_launch),
-                        launch_arguments={
-                            "use_sim_time": "false",
-                            "slam_params_file": slam_cfg,
-                        }.items(),
-                    ),
-                ])
-            ],
-        )
+    slam_group = GroupAction([
+        PushRosNamespace(abs_namespace),
+        # slam_toolbox publishes "map"/"map_metadata" as absolute
+        # topics ("/map", "/map_metadata") in its own source, so
+        # node namespacing alone never prefixes them -- without
+        # this, the real map data goes to the bare global /map
+        # and per_robot_map_compositor (subscribed to
+        # {namespace}/map) never sees it.
+        SetRemap(src="/map", dst=f"{abs_namespace}/map"),
+        SetRemap(src="/map_metadata", dst=f"{abs_namespace}/map_metadata"),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(slam_launch),
+            launch_arguments={
+                "use_sim_time": "false",
+                "slam_params_file": slam_cfg,
+            }.items(),
+        ),
+    ])
+
+    nav2_group = GroupAction([
+        PushRosNamespace(abs_namespace),
+        *_nav2_actions(namespace, nav_cfg),
+    ])
+
+    # Gate SLAM on turtlebot3 bringup actually publishing scans, and Nav2 on
+    # slam_toolbox actually publishing a first map, instead of guessing a
+    # fixed number of seconds for each stage to become ready. All 3 robots
+    # launch concurrently and compete for the same 4 Pi cores, so a fixed
+    # delay that's fine when idle can fire before the previous stage is
+    # really up under load -- that race, not bad luck, is what produces a
+    # map that never appears on whichever robot loses the scheduling
+    # contest that particular boot.
+    wait_for_scan = ExecuteProcess(
+        cmd=[
+            "ros2", "run", "bme_ros2_navigation_py", "wait_for_topic",
+            "--topic", f"/{namespace}/scan",
+            "--type", "sensor_msgs/msg/LaserScan",
+            "--reliability", "best_effort",
+            "--durability", "volatile",
+            "--timeout", "90.0",
+        ],
+        output="screen",
+    )
+    wait_for_map = ExecuteProcess(
+        cmd=[
+            "ros2", "run", "bme_ros2_navigation_py", "wait_for_topic",
+            "--topic", f"/{namespace}/map",
+            "--type", "nav_msgs/msg/OccupancyGrid",
+            "--reliability", "reliable",
+            "--durability", "transient_local",
+            "--timeout", "60.0",
+        ],
+        output="screen",
     )
 
+    actions.append(wait_for_scan)
     actions.append(
-        TimerAction(
-            period=nav2_delay,
-            actions=[
-                GroupAction([
-                    PushRosNamespace(abs_namespace),
-                    *_nav2_actions(namespace, nav_cfg),
-                ])
-            ],
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=wait_for_scan,
+                on_exit=[slam_group, wait_for_map],
+            )
+        )
+    )
+    actions.append(
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=wait_for_map,
+                on_exit=[nav2_group],
+            )
         )
     )
 
