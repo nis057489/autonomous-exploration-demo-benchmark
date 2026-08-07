@@ -639,7 +639,7 @@ def _create_actions(context):
             "--type", "nav_msgs/msg/OccupancyGrid",
             "--reliability", "reliable",
             "--durability", "transient_local",
-            "--timeout", "60.0",
+            "--timeout", "90.0",
         ],
         output="screen",
     )
