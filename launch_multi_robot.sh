@@ -77,20 +77,35 @@ for entry in "${ROBOTS[@]}"; do
     set +e
     {
       echo "==> Syncing repo on ${robot_id} on ${ip}"
-      # Discard any local edits to experiment.conf on the robot before
-      # pulling -- it's about to be overwritten unconditionally by this
-      # laptop's copy below anyway, so a stale local edit there shouldn't be
-      # allowed to abort the merge (and, with it, the submodule sync/update
-      # chained after via &&).
+      # Robots are disposable mirrors of whatever this laptop's git remote
+      # currently has -- they're never expected to carry their own commits.
+      # A plain `git pull` can silently strand a robot on stale code: if the
+      # remote branch is ever force-pushed to something that isn't a
+      # fast-forward of the robot's current HEAD (e.g. after a `git reset
+      # --hard` + force-push on the laptop), `git pull` fails with "divergent
+      # branches" -- and since this whole block runs under `set +e` (see
+      # below), that failure used to be silently swallowed and the script
+      # fell through to pushing experiment.conf and launching whatever code
+      # was already on the robot, with no visible error except scrollback.
+      # fetch + hard-reset-to-origin sidesteps the ambiguity entirely: the
+      # robot's checkout unconditionally becomes a byte-for-byte match of
+      # origin's current tip for whatever branch is checked out, no
+      # merge/rebase decision involved, and also discards any local edits
+      # (e.g. a stale experiment.conf) the same way `git checkout --` did.
       ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
-        "cd ${REPO_DIR} && git checkout -- experiment.conf && git pull && git submodule sync --recursive && git submodule update --init --recursive"
+        "cd ${REPO_DIR} && git fetch origin && git reset --hard \"origin/\$(git rev-parse --abbrev-ref HEAD)\" && git submodule sync --recursive && git submodule update --init --recursive --force"
+      sync_status=$?
+
+      if [[ ${sync_status} -ne 0 ]]; then
+        echo "!! git sync failed (exit ${sync_status}) -- refusing to launch with a possibly-stale checkout" >&2
+        exit "${sync_status}"
+      fi
 
       # Push the local experiment.conf as-is, bypassing git entirely, *after*
-      # the git pull above so it isn't blocked by "local changes would be
-      # overwritten by merge". This way DDIL params (MAP_TRANSPORT,
-      # BANDWIDTH_KBPS, ...) always match what's on this laptop even if the
-      # change isn't committed/pushed yet, or the robot's checkout is on a
-      # different branch than git pull would fast-forward.
+      # the sync above so it isn't blocked by "local changes would be
+      # overwritten". This way DDIL params (MAP_TRANSPORT, BANDWIDTH_KBPS,
+      # ...) always match what's on this laptop even if the change isn't
+      # committed/pushed yet.
       echo "==> Pushing experiment.conf to ${robot_id} on ${ip}"
       ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "cat > ${REPO_DIR}/experiment.conf" < experiment.conf
 
