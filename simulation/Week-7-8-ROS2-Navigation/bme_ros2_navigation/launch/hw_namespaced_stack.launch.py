@@ -342,7 +342,7 @@ def _team_map_share_actions(
                         "input_base_topic": robot_ddil_base,
                         "output_topic": f"{robot_ddil_base}/map",
                         "haar_levels": haar_levels,
-                        "publish_rate_hz": 1.0,
+                        "publish_rate_hz": 0.5,
                         "use_sim_time": False,
                     }],
                 )
@@ -381,7 +381,7 @@ def _team_map_share_actions(
                 "offsets_y": [p["y"] for p in peers],
                 "offsets_yaw": [p["yaw"] for p in peers],
                 "global_frame": "map",
-                "publish_rate_hz": 1.0,
+                "publish_rate_hz": 0.5,
                 "map_topic_template": f"/{namespace}/incoming/{{name}}/map",
                 "output_topic": f"/{namespace}/team_map_ddil",
                 "output_metadata_topic": f"/{namespace}/team_map_ddil_metadata",
@@ -560,7 +560,7 @@ def _create_actions(context):
                 "offset_x": spawn_x,
                 "offset_y": spawn_y,
                 "offset_yaw": spawn_yaw,
-                "publish_rate_hz": 2.0,
+                "publish_rate_hz": 0.5,
                 "use_sim_time": False,
             }],
         )
