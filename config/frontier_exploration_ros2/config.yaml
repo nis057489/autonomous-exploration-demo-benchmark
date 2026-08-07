@@ -160,7 +160,10 @@ frontier_explorer:
     # This favors frontiers that can reveal more space from farther away.
     # Example: 0.5 makes costs distance-heavy, 2.0 rewards sensing reach more.
     # Doesn't have to be a real sensor value. Used for distance scoring.
-    sensor_effective_range_m: 1.5
+    # Raised from 1.5 -> 3.5: at 0.22 m/s travel dominates run time, so it's worth biasing the
+    # MRTSP cost matrix toward committing to a farther high-gain frontier over a nearby
+    # low-gain one, rather than re-approaching the same area repeatedly.
+    sensor_effective_range_m: 3.5
 
     # --------------- Navigation Safety --------------- #
 

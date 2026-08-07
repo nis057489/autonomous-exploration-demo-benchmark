@@ -103,8 +103,9 @@ local_costmap:
           clearing: True
           marking: True
           data_type: "LaserScan"
-          # Match LDS-01 range; increase to 7.5 for LDS-02.
-          raytrace_max_range: 7.5
+          # LDS-02 max range is 8.0 m; raytrace clearing uses the full range (cheap -- marks
+          # free space, not obstacles), while obstacle_max_range below stays conservative.
+          raytrace_max_range: 8.0
           raytrace_min_range: 0.16
           obstacle_max_range: 6.0
           obstacle_min_range: 0.16
@@ -132,7 +133,9 @@ global_costmap:
           clearing: True
           marking: True
           data_type: "LaserScan"
-          raytrace_max_range: 7.5
+          # LDS-02 max range is 8.0 m; see local_costmap above for why raytrace vs obstacle
+          # range differ.
+          raytrace_max_range: 8.0
           raytrace_min_range: 0.16
           obstacle_max_range: 6.0
           obstacle_min_range: 0.16
