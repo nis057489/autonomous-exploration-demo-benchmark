@@ -171,7 +171,7 @@ frontier_explorer:
 
     # Distance used to treat a frontier region as recently visited.
     # Use if you are having navigation loops.
-    frontier_visit_tolerance: 0.40
+    frontier_visit_tolerance: 0.75
 
     # --------------- Map Optimization --------------- #
 
