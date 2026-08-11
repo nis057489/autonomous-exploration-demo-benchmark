@@ -9,8 +9,22 @@ Assumes turtlebot3_bringup is already running on this Pi (started by
 launch_real_hardware.sh before this file is invoked, or --local-bringup
 is set and it is started here) with ROS_NAMESPACE already exported.
 
-TF frame IDs on the bringup are patched via a generated params file so
-that odom/base frames carry the robot's namespace prefix.
+TF frame IDs are prefixed natively by the vendor bringup: turtlebot3_ros
+takes a "namespace" parameter (odometry.cpp, sensors/imu.cpp,
+sensors/joint_state.cpp) and turtlebot3_state_publisher.launch.py bakes
+the namespace into the URDF via xacro, so odom/base/sensor frames already
+carry the robot's namespace prefix by the time they reach /tf and
+/tf_static. What still needs handling is that tf2_ros::TransformBroadcaster
+and StaticTransformBroadcaster always publish to the absolute, unnamespaced
+/tf and /tf_static topics regardless of node namespace -- so every node in
+this stack that needs its own robot's transforms (Nav2, slam_toolbox,
+frontier_path_tracker, frontier_explorer) gets /tf and /tf_static remapped
+to /{namespace}/tf(_static) via SetRemap/remappings=. A pair of one-way
+topic_tools relay nodes additionally republishes each robot's namespaced
+/tf(_static) outward onto the shared global /tf(_static), purely so a
+base-station RViz can view all robots merged in one window and so bagged
+runs capture a single merged TF stream -- nothing in this stack reads that
+merged topic back in.
 """
 
 import copy
@@ -260,9 +274,8 @@ def _team_map_share_actions(
     (this robot's ROS_STATIC_PEERS + that one peer) via additional_env --
     not a global SetEnvironmentVariable, since ros2 launch runs actions
     concurrently/async and a global env mutation could easily leak into
-    the main stack depending on scheduling, silently reopening the
-    tf_frame_renamer cross-talk bug this whole isolation scheme exists to
-    prevent.
+    the main stack depending on scheduling, needlessly widening every other
+    node's DDS visibility to that peer as well.
     """
     if not peers:
         return []
@@ -502,21 +515,46 @@ def _create_actions(context):
     actions = []
 
     if local_bringup:
+        # robot.launch.py already does its own internal PushRosNamespace(namespace)
+        # for topics (odom, scan, joint_states, ...), so no PushRosNamespace is added
+        # here -- only /tf and /tf_static need redirecting, since
+        # tf2_ros::TransformBroadcaster / StaticTransformBroadcaster (used by
+        # turtlebot3_ros and robot_state_publisher) always publish to the
+        # absolute, unnamespaced /tf(_static) regardless of node namespace.
         actions.append(
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(tb3_launch),
-                launch_arguments={"namespace": namespace}.items(),
-            )
+            GroupAction([
+                SetRemap(src="/tf", dst=f"{abs_namespace}/tf"),
+                SetRemap(src="/tf_static", dst=f"{abs_namespace}/tf_static"),
+                IncludeLaunchDescription(
+                    PythonLaunchDescriptionSource(tb3_launch),
+                    launch_arguments={"namespace": namespace}.items(),
+                ),
+            ])
         )
 
+    # One-way relay of this robot's own namespaced TF outward onto the shared
+    # global /tf(_static), purely for a base-station RViz to view all robots
+    # merged in one window and for bagged runs to capture a single merged TF
+    # stream. Nothing in this stack reads the global topic back in, so this
+    # can't reopen the old tf_frame_renamer cross-talk bug.
     actions.append(
         Node(
-            package="bme_ros2_navigation_py",
-            executable="tf_frame_renamer",
-            name=f"tf_frame_renamer_{namespace}",
-            namespace=abs_namespace,
+            package="topic_tools",
+            executable="relay",
+            name=f"{namespace}_tf_relay",
             output="screen",
-            parameters=[{"namespace": namespace, "use_sim_time": False}],
+            arguments=[f"/{namespace}/tf", "/tf"],
+            parameters=[{"use_sim_time": False}],
+        )
+    )
+    actions.append(
+        Node(
+            package="topic_tools",
+            executable="relay",
+            name=f"{namespace}_tf_static_relay",
+            output="screen",
+            arguments=[f"/{namespace}/tf_static", "/tf_static"],
+            parameters=[{"use_sim_time": False}],
         )
     )
 
@@ -546,6 +584,7 @@ def _create_actions(context):
                 ],
                 output="screen",
                 parameters=[{"use_sim_time": False}],
+                remappings=[("/tf_static", "tf_static")],
             )
         )
 
@@ -587,6 +626,7 @@ def _create_actions(context):
                 "reset_topic": "/explore/reset_traveled_path",
                 "use_sim_time": False,
             }],
+            remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
         )
     )
 
@@ -604,6 +644,12 @@ def _create_actions(context):
                     # {namespace}/map) never sees it.
                     SetRemap(src="/map", dst=f"{abs_namespace}/map"),
                     SetRemap(src="/map_metadata", dst=f"{abs_namespace}/map_metadata"),
+                    # slam_toolbox's tf2_ros::Buffer/TransformListener also default to
+                    # the absolute /tf(_static) regardless of node namespace -- redirect
+                    # to this robot's own namespaced topics (see turtlebot3_bringup
+                    # GroupAction above, which is what now publishes there).
+                    SetRemap(src="/tf", dst=f"{abs_namespace}/tf"),
+                    SetRemap(src="/tf_static", dst=f"{abs_namespace}/tf_static"),
                     IncludeLaunchDescription(
                         PythonLaunchDescriptionSource(slam_launch),
                         launch_arguments={
@@ -636,6 +682,7 @@ def _create_actions(context):
             namespace=abs_namespace,
             output="screen",
             parameters=[explore_cfg, {"use_sim_time": False}],
+            remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
         )
     )
 
@@ -653,13 +700,11 @@ def generate_launch_description():
     return LaunchDescription([
         # Set here (not just in the wrapper shell script) so it's guaranteed to
         # reach every process this launch tree spawns, regardless of whether the
-        # invoking shell's exported env actually survives to this point. Without
-        # this, two robots on the same ROS_DOMAIN_ID over the network cross-talk:
-        # tf_frame_renamer bridges the bare, unnamespaced /tf that
-        # TransformBroadcaster always publishes regardless of node namespace, so
-        # one robot's renamer can pick up another robot's raw driver frames and
-        # mislabel them with its own namespace ("two or more unconnected trees",
-        # "extrapolation into the past").
+        # invoking shell's exported env actually survives to this point. General
+        # DDS hygiene for a multi-robot fleet on a shared ROS_DOMAIN_ID: without
+        # this, every robot's nodes discover every other robot's nodes/topics by
+        # default, which is unnecessary traffic/overhead even though /tf(_static)
+        # itself is now isolated per robot via the SetRemap calls above.
         SetEnvironmentVariable("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST"),
         SetEnvironmentVariable("ROS_STATIC_PEERS", os.environ.get("VIZ_LAPTOP_IP", "192.168.100.20")),
         DeclareLaunchArgument("namespace",

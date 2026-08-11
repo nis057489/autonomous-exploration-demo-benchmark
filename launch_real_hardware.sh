@@ -145,22 +145,7 @@ if [[ -f "${PROJECT_ROOT}/install/setup.bash" ]]; then
 fi
 set -u
 
-_create_bme_ros2_navigation_py_libexec() {
-  local base="${PROJECT_ROOT}/install/bme_ros2_navigation_py"
-  local src="${base}/lib/bme_ros2_navigation_py"
-  local dst="${base}/libexec/bme_ros2_navigation_py"
-
-  if [[ -x "${src}/tf_frame_renamer" ]] && [[ ! -x "${dst}/tf_frame_renamer" ]]; then
-    echo "Creating libexec symlink for bme_ros2_navigation_py executables..."
-    mkdir -p "${base}/libexec"
-    rm -rf "${dst}" 2>/dev/null || true
-    ln -s "../lib/bme_ros2_navigation_py" "${dst}"
-  fi
-}
-
 # ── Build workspace (fast if nothing changed) ────────────────────────────────
-
-_create_bme_ros2_navigation_py_libexec
 
 MISSING_PKGS=()
 _pkg_missing() {
@@ -179,16 +164,7 @@ _check_install_file() {
   fi
 }
 
-_check_install_exec() {
-  local path="$1"
-  local pkg="$2"
-  if [[ ! -x "$path" ]]; then
-    _pkg_missing "$pkg"
-  fi
-}
-
 _check_install_file "${PROJECT_ROOT}/install/bme_ros2_navigation_py/share/bme_ros2_navigation_py/local_setup.bash" bme_ros2_navigation_py
-_check_install_exec "${PROJECT_ROOT}/install/bme_ros2_navigation_py/libexec/bme_ros2_navigation_py/tf_frame_renamer" bme_ros2_navigation_py
 _check_install_file "${PROJECT_ROOT}/install/bme_ros2_navigation/share/bme_ros2_navigation/local_setup.bash" bme_ros2_navigation
 _check_install_file "${PROJECT_ROOT}/install/frontier_exploration_ros2/share/frontier_exploration_ros2/local_setup.bash" frontier_exploration_ros2
 _check_install_file "${PROJECT_ROOT}/install/rviz_autonomous_exploration_benchmark/share/rviz_autonomous_exploration_benchmark/local_setup.bash" rviz_autonomous_exploration_benchmark
@@ -209,7 +185,6 @@ if [[ "${REBUILD}" == true ]] || [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
     cd "${PROJECT_ROOT}"
     colcon build --symlink-install --packages-select "${BUILD_PACKAGES[@]}"
   )
-  _create_bme_ros2_navigation_py_libexec
   # Re-source so newly (re)built packages' environment hooks (e.g. PYTHONPATH
   # entries for ament_python --symlink-install packages) take effect in this shell.
   # colcon's generated setup.bash references unset vars (e.g. COLCON_TRACE), so
@@ -403,12 +378,11 @@ if (( NUM_ROBOTS > 1 )); then
   exit $?
 fi
 
-# Each robot's per-robot invocation must not see other robots' DDS traffic --
-# tf_frame_renamer bridges the bare, unnamespaced /tf that TransformBroadcaster
-# always publishes regardless of node namespace, and with multiple robots on
-# the same ROS_DOMAIN_ID over the network, one robot's renamer can pick up
-# another robot's raw driver frames and mislabel them with its own namespace
-# (symptoms: "two or more unconnected trees", "extrapolation into the past").
+# Each robot's per-robot invocation doesn't need to see other robots' DDS
+# traffic -- /tf(_static) isolation between robots is handled at the topic
+# level in hw_namespaced_stack.launch.py (SetRemap into /{namespace}/tf),
+# but restricting discovery here still avoids unnecessary cross-robot
+# node/topic discovery overhead on a shared ROS_DOMAIN_ID.
 # ROS_LOCALHOST_ONLY would also block the visualization laptop, so instead
 # restrict automatic discovery to this machine and explicitly allowlist the
 # laptop as a static peer -- the two robots never discover each other, but
