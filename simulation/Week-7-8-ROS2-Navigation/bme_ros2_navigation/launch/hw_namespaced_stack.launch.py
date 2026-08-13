@@ -38,9 +38,11 @@ from launch.actions import (
     DeclareLaunchArgument,
     GroupAction,
     IncludeLaunchDescription,
+    LogInfo,
     OpaqueFunction,
     RegisterEventHandler,
     SetEnvironmentVariable,
+    Shutdown,
 )
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -484,6 +486,29 @@ def _nav2_actions(namespace, nav_cfg, log_level="info"):
     ]
 
 
+def _on_ready(namespace, label, next_action):
+    """Build an OnProcessExit on_exit callback for a wait_for_ready node.
+
+    Proceeds to next_action only if the readiness check succeeded (exit 0).
+    On failure (exit 1, i.e. timed out), aborts this robot's whole launch via
+    Shutdown rather than starting the next stage against inputs already known
+    to be missing -- SLAM/Nav2 would just fail anyway, more slowly and more
+    confusingly (see wait_for_ready.py).
+    """
+    def _handler(event, context):
+        if event.returncode == 0:
+            return [next_action]
+        return [
+            LogInfo(
+                msg=f"[{namespace}] {label} readiness check failed -- "
+                    "aborting this robot's launch instead of continuing "
+                    "against known-broken inputs."
+            ),
+            Shutdown(reason=f"{namespace} {label} not ready"),
+        ]
+    return _handler
+
+
 # ── Main action builder ──────────────────────────────────────────────────────────────
 
 def _create_actions(context):
@@ -688,7 +713,12 @@ def _create_actions(context):
     )
     actions.append(wait_bringup)
     actions.append(
-        RegisterEventHandler(OnProcessExit(target_action=wait_bringup, on_exit=[slam_group]))
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=wait_bringup,
+                on_exit=_on_ready(namespace, "bringup", slam_group),
+            )
+        )
     )
 
     nav2_group = GroupAction([
@@ -714,7 +744,12 @@ def _create_actions(context):
     )
     actions.append(wait_slam)
     actions.append(
-        RegisterEventHandler(OnProcessExit(target_action=wait_slam, on_exit=[nav2_group]))
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=wait_slam,
+                on_exit=_on_ready(namespace, "SLAM map", nav2_group),
+            )
+        )
     )
 
     actions.append(

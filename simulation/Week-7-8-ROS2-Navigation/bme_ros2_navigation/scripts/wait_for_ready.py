@@ -10,10 +10,14 @@ the previous behavior started the next stage anyway against missing inputs --
 which only surfaced many minutes later as a cryptic "TF has two or more
 unconnected trees" error, with no indication of what actually went wrong.
 
-This logs exactly what's still missing immediately and loudly instead, then
-proceeds regardless (same permissive behavior as before) so a genuinely
-slow-but-working bringup isn't blocked forever by a timeout set too tight.
+Exits 0 if everything became ready in time, exits 1 (after logging exactly
+what's still missing) if the timeout elapsed first. The launch file treats a
+nonzero exit as fatal for this robot's whole launch (see the on_exit handlers
+in hw_namespaced_stack.launch.py) rather than continuing on with known-broken
+inputs -- if this is unready, downstream stages (SLAM, Nav2) are going to fail
+anyway, just more confusingly and later.
 """
+import sys
 import time
 
 import rclpy
@@ -87,29 +91,30 @@ class WaitForReady(Node):
             missing = self._missing()
             if not missing:
                 self.get_logger().info(f"[{self.label}] ready.")
-                return
+                return True
             now = time.monotonic()
             if now >= deadline:
                 self.get_logger().error(
                     f"[{self.label}] NOT ready after {self.timeout_sec:.0f}s -- "
-                    "proceeding anyway, but this will likely fail downstream "
-                    "(check hardware bringup / driver connection): "
+                    "aborting (check hardware bringup / driver connection): "
                     + "; ".join(missing)
                 )
-                return
+                return False
             if now - last_log > 5.0:
                 self.get_logger().warn(f"[{self.label}] still waiting: " + "; ".join(missing))
                 last_log = now
+        return False
 
 
 def main():
     rclpy.init()
     node = WaitForReady()
     try:
-        node.wait()
+        ready = node.wait()
     finally:
         node.destroy_node()
         rclpy.shutdown()
+    sys.exit(0 if ready else 1)
 
 
 if __name__ == "__main__":
