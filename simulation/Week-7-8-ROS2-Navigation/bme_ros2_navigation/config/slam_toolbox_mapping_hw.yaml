@@ -23,7 +23,7 @@ slam_toolbox:
     # Rebuilding+publishing the full OccupancyGrid raster from the pose graph
     # is itself real CPU cost -- doing it 4x less often doesn't touch
     # localization/matching quality, only how often the visual map refreshes.
-    map_update_interval: 10.0
+    map_update_interval: 20.0
 
     # LDS-02 (ld08_driver) max range is 8.0 m.
     max_laser_range: 8.0
