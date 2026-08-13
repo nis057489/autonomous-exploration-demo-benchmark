@@ -352,7 +352,12 @@ def _team_map_share_actions(
                         "input_base_topic": robot_ddil_base,
                         "output_topic": f"{robot_ddil_base}/map",
                         "haar_levels": haar_levels,
-                        "publish_rate_hz": 1.0,
+                        # Robots move slowly enough that a fresh reconstruction
+                        # every second is wasted CPU (full Haar inverse +
+                        # upsample per tick regardless of whether new bands
+                        # arrived) -- 0.1 Hz still means every peer's map is at
+                        # most 10s stale, which the map merge/costmap can absorb.
+                        "publish_rate_hz": 0.1,
                         "use_sim_time": False,
                     }],
                 )
@@ -391,7 +396,10 @@ def _team_map_share_actions(
                 "offsets_y": [p["y"] for p in peers],
                 "offsets_yaw": [p["yaw"] for p in peers],
                 "global_frame": "map",
-                "publish_rate_hz": 1.0,
+                # Same reasoning as the vxch decoder above -- the numpy-vectorized
+                # merge is now cheap, but there's still no reason to redo it 10x
+                # more often than the slow-moving robots actually need.
+                "publish_rate_hz": 0.1,
                 "map_topic_template": f"/{namespace}/incoming/{{name}}/map",
                 "output_topic": f"/{namespace}/team_map_ddil",
                 "output_metadata_topic": f"/{namespace}/team_map_ddil_metadata",

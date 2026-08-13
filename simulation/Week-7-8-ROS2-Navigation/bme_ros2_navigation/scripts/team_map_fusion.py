@@ -2,6 +2,7 @@
 import math
 from dataclasses import dataclass
 
+import numpy as np
 import rclpy
 from nav_msgs.msg import MapMetaData, OccupancyGrid
 from rclpy.node import Node
@@ -188,7 +189,7 @@ class TeamMapFusion(Node):
             )
             return None
 
-        merged_data = [-1] * (width * height)
+        merged_data = np.full(width * height, -1, dtype=np.int16)
         for state in available_states:
             self._merge_one_map(
                 state,
@@ -210,7 +211,7 @@ class TeamMapFusion(Node):
         merged_map.info.origin.position.x = origin_x
         merged_map.info.origin.position.y = origin_y
         merged_map.info.origin.orientation.w = 1.0
-        merged_map.data = merged_data
+        merged_map.data = merged_data.astype(np.int8).tolist()
         return merged_map
 
     def _compute_bounds(self, states):
@@ -264,6 +265,30 @@ class TeamMapFusion(Node):
         height,
         merged_data,
     ):
+        """Vectorized equivalent of a per-cell Python loop over the source grid.
+
+        Multiple source cells CAN land on the same destination cell -- not just
+        under rotation, but even at yaw=0 with matching resolution, because
+        int()-truncating an offset (non-grid-aligned) coordinate is subject to
+        floating-point rounding that occasionally breaks the "adjacent source
+        cells are exactly 1 destination cell apart" invariant for a handful of
+        cells per grid. A plain scatter-assign silently picks whichever
+        colliding write happens to land last, which can e.g. drop a genuinely
+        occupied (>=50) reading in favor of a free one -- unacceptable for a
+        costmap input. np.maximum.at/np.minimum.at do an order-independent
+        scatter-reduce instead, which is what makes this exact:
+        the original per-cell fold (unknown never overwrites, else max()-wins
+        if either side is occupied, else min()-wins) is associative/commutative
+        over a group of known (>=0) values -- once any value >=50 has entered
+        the fold it "infects" every subsequent step (max() with anything >=50
+        stays >=50), so the fold over any set of known values always reduces to
+        "max of the set if the set's max is >=50, else min of the set",
+        independent of order. That means reducing all of *this* map's
+        contributions to a destination cell first, then folding that single
+        summary value against whatever's already in merged_data (from earlier
+        states/calls), is provably equivalent to folding every value in
+        directly -- just done as two reduction stages instead of one long walk.
+        """
         map_msg = state.map_msg
         map_info = map_msg.info
         map_origin_yaw = yaw_from_quaternion(map_info.origin.orientation)
@@ -272,42 +297,69 @@ class TeamMapFusion(Node):
         offset_cos = math.cos(state.offset_yaw)
         offset_sin = math.sin(state.offset_yaw)
         source_resolution = map_info.resolution
+        src_width = map_info.width
+        src_height = map_info.height
 
-        for row in range(map_info.height):
-            source_y = (row + 0.5) * source_resolution
-            for column in range(map_info.width):
-                source_index = row * map_info.width + column
-                value = map_msg.data[source_index]
-                if value < 0:
-                    continue
+        values = np.asarray(map_msg.data, dtype=np.int16).reshape(src_height, src_width)
+        valid = values >= 0
+        if not np.any(valid):
+            return
 
-                source_x = (column + 0.5) * source_resolution
-                local_x = (
-                    map_info.origin.position.x
-                    + map_origin_cos * source_x
-                    - map_origin_sin * source_y
-                )
-                local_y = (
-                    map_info.origin.position.y
-                    + map_origin_sin * source_x
-                    + map_origin_cos * source_y
-                )
-                global_x = state.offset_x + offset_cos * local_x - offset_sin * local_y
-                global_y = state.offset_y + offset_sin * local_x + offset_cos * local_y
+        rows, columns = np.indices((src_height, src_width))
+        source_x = (columns.astype(np.float64) + 0.5) * source_resolution
+        source_y = (rows.astype(np.float64) + 0.5) * source_resolution
 
-                output_column = int((global_x - origin_x) / resolution)
-                output_row = int((global_y - origin_y) / resolution)
-                if not (0 <= output_column < width and 0 <= output_row < height):
-                    continue
+        local_x = (
+            map_info.origin.position.x
+            + map_origin_cos * source_x
+            - map_origin_sin * source_y
+        )
+        local_y = (
+            map_info.origin.position.y
+            + map_origin_sin * source_x
+            + map_origin_cos * source_y
+        )
+        global_x = state.offset_x + offset_cos * local_x - offset_sin * local_y
+        global_y = state.offset_y + offset_sin * local_x + offset_cos * local_y
 
-                output_index = output_row * width + output_column
-                existing_value = merged_data[output_index]
-                if existing_value < 0:
-                    merged_data[output_index] = int(value)
-                elif value >= 50 or existing_value >= 50:
-                    merged_data[output_index] = max(int(existing_value), int(value))
-                else:
-                    merged_data[output_index] = min(int(existing_value), int(value))
+        # astype (not floor) to match the original's int() truncation-toward-zero.
+        output_column = ((global_x - origin_x) / resolution).astype(np.int64)
+        output_row = ((global_y - origin_y) / resolution).astype(np.int64)
+
+        in_bounds = (
+            (output_column >= 0) & (output_column < width)
+            & (output_row >= 0) & (output_row < height)
+        )
+        mask = valid & in_bounds
+        if not np.any(mask):
+            return
+
+        dest_index = (output_row * width + output_column)[mask]
+        source_values = values[mask]
+
+        # Stage 1: order-independent reduction of this map's own colliding
+        # contributions per destination cell (sentinels: -1 = "no max seen",
+        # 101 = "no min seen", both outside the real 0..100 occupancy range).
+        group_max = np.full(width * height, -1, dtype=np.int16)
+        group_min = np.full(width * height, 101, dtype=np.int16)
+        np.maximum.at(group_max, dest_index, source_values)
+        np.minimum.at(group_min, dest_index, source_values)
+
+        touched = np.zeros(width * height, dtype=bool)
+        touched[dest_index] = True
+        group_summary = np.where(group_max >= 50, group_max, group_min)
+
+        # Stage 2: fold that per-cell summary against whatever's already in
+        # merged_data from earlier states/calls -- same rule as the original.
+        existing = merged_data[touched]
+        summary = group_summary[touched]
+        either_occupied = (summary >= 50) | (existing >= 50)
+        merged = np.where(
+            existing < 0,
+            summary,
+            np.where(either_occupied, np.maximum(existing, summary), np.minimum(existing, summary)),
+        )
+        merged_data[touched] = merged
 
     @staticmethod
     def _apply_pose(origin_x, origin_y, yaw, point_x, point_y):
