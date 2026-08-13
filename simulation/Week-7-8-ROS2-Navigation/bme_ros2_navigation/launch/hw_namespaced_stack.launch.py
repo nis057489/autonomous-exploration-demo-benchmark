@@ -721,7 +721,7 @@ def _create_actions(context):
         RegisterEventHandler(
             OnProcessExit(
                 target_action=wait_bringup,
-                on_exit=_on_ready(namespace, "bringup", slam_group),
+                on_exit=_on_ready(namespace, "bringup", [slam_group]),
             )
         )
     )
