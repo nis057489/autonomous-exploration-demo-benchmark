@@ -486,18 +486,18 @@ def _nav2_actions(namespace, nav_cfg, log_level="info"):
     ]
 
 
-def _on_ready(namespace, label, next_action):
+def _on_ready(namespace, label, next_actions):
     """Build an OnProcessExit on_exit callback for a wait_for_ready node.
 
-    Proceeds to next_action only if the readiness check succeeded (exit 0).
-    On failure (exit 1, i.e. timed out), aborts this robot's whole launch via
-    Shutdown rather than starting the next stage against inputs already known
-    to be missing -- SLAM/Nav2 would just fail anyway, more slowly and more
-    confusingly (see wait_for_ready.py).
+    Proceeds to next_actions (a list) only if the readiness check succeeded
+    (exit 0). On failure (exit 1, i.e. timed out), aborts this robot's whole
+    launch via Shutdown rather than starting the next stage against inputs
+    already known to be missing -- SLAM/Nav2/etc. would just fail anyway,
+    more slowly and more confusingly (see wait_for_ready.py).
     """
     def _handler(event, context):
         if event.returncode == 0:
-            return [next_action]
+            return list(next_actions)
         return [
             LogInfo(
                 msg=f"[{namespace}] {label} readiness check failed -- "
@@ -624,46 +624,51 @@ def _create_actions(context):
             )
         )
 
-    actions.append(
-        Node(
-            package="bme_ros2_navigation",
-            executable="per_robot_map_compositor.py",
-            name=f"per_robot_map_compositor_{namespace}",
-            namespace=abs_namespace,
-            output="screen",
-            parameters=[{
-                "robot_name": namespace,
-                "offset_x": spawn_x,
-                "offset_y": spawn_y,
-                "offset_yaw": spawn_yaw,
-                "publish_rate_hz": 2.0,
-                "use_sim_time": False,
-            }],
-        )
+    # per_robot_map_compositor, frontier_path_tracker, frontier_explorer, and
+    # the whole DDIL/VXCH team-map-share pipeline all need either SLAM's first
+    # map or peer map data that ultimately depends on it -- none of them can
+    # do anything useful before wait_slam succeeds anyway. Deferred (built
+    # here, started later via _on_ready below) instead of launched
+    # immediately at t=0, so they're not competing with slam_toolbox for CPU
+    # during the exact window it needs to successfully process its first scan
+    # -- that contention is what was causing SLAM to drop scans from its very
+    # first cycle (message filter "queue is full") and never commit a map.
+    per_robot_map_compositor_node = Node(
+        package="bme_ros2_navigation",
+        executable="per_robot_map_compositor.py",
+        name=f"per_robot_map_compositor_{namespace}",
+        namespace=abs_namespace,
+        output="screen",
+        parameters=[{
+            "robot_name": namespace,
+            "offset_x": spawn_x,
+            "offset_y": spawn_y,
+            "offset_yaw": spawn_yaw,
+            "publish_rate_hz": 2.0,
+            "use_sim_time": False,
+        }],
     )
 
-    actions.append(
-        Node(
-            package="rviz_autonomous_exploration_benchmark",
-            executable="frontier_path_tracker.py",
-            name=f"frontier_path_tracker_{namespace}",
-            namespace=abs_namespace,
-            output="screen",
-            parameters=[{
-                "global_frame": "map",
-                "robot_base_frame": f"{namespace}/base_footprint",
-                "path_topic": f"/{namespace}/explore/traversed_path",
-                "package_topics": [
-                    f"frontier_exploration_ros2:/{namespace}/explore/traversed_path",
-                ],
-                "default_package": "frontier_exploration_ros2",
-                "active_package_topic": f"/{namespace}/explore/path_tracker/active_package",
-                "initial_pose_topic": f"/{namespace}/explore/path_tracker/initial_pose",
-                "reset_topic": "/explore/reset_traveled_path",
-                "use_sim_time": False,
-            }],
-            remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
-        )
+    frontier_path_tracker_node = Node(
+        package="rviz_autonomous_exploration_benchmark",
+        executable="frontier_path_tracker.py",
+        name=f"frontier_path_tracker_{namespace}",
+        namespace=abs_namespace,
+        output="screen",
+        parameters=[{
+            "global_frame": "map",
+            "robot_base_frame": f"{namespace}/base_footprint",
+            "path_topic": f"/{namespace}/explore/traversed_path",
+            "package_topics": [
+                f"frontier_exploration_ros2:/{namespace}/explore/traversed_path",
+            ],
+            "default_package": "frontier_exploration_ros2",
+            "active_package_topic": f"/{namespace}/explore/path_tracker/active_package",
+            "initial_pose_topic": f"/{namespace}/explore/path_tracker/initial_pose",
+            "reset_topic": "/explore/reset_traveled_path",
+            "use_sim_time": False,
+        }],
+        remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
     )
 
     # Readiness-gated startup, replacing fixed-delay TimerActions that assumed
@@ -742,32 +747,37 @@ def _create_actions(context):
             "use_sim_time": False,
         }],
     )
+    frontier_explorer_node = Node(
+        package="frontier_exploration_ros2",
+        executable="frontier_explorer",
+        name="frontier_explorer",
+        namespace=abs_namespace,
+        output="screen",
+        parameters=[explore_cfg, {"use_sim_time": False}],
+        remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
+    )
+
+    team_map_share = _team_map_share_actions(
+        namespace, peers, map_transport, bandwidth_kbps, loss_pct, delay_ms,
+        haar_levels, laptop_ip,
+    )
+
     actions.append(wait_slam)
     actions.append(
         RegisterEventHandler(
             OnProcessExit(
                 target_action=wait_slam,
-                on_exit=_on_ready(namespace, "SLAM map", nav2_group),
+                on_exit=_on_ready(
+                    namespace, "SLAM map",
+                    [
+                        nav2_group,
+                        per_robot_map_compositor_node,
+                        frontier_path_tracker_node,
+                        frontier_explorer_node,
+                        *team_map_share,
+                    ],
+                ),
             )
-        )
-    )
-
-    actions.append(
-        Node(
-            package="frontier_exploration_ros2",
-            executable="frontier_explorer",
-            name="frontier_explorer",
-            namespace=abs_namespace,
-            output="screen",
-            parameters=[explore_cfg, {"use_sim_time": False}],
-            remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
-        )
-    )
-
-    actions.extend(
-        _team_map_share_actions(
-            namespace, peers, map_transport, bandwidth_kbps, loss_pct, delay_ms,
-            haar_levels, laptop_ip,
         )
     )
 
