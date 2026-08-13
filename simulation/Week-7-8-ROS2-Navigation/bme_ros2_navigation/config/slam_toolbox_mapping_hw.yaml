@@ -50,7 +50,14 @@ slam_toolbox:
     max_submaps: 15
 
     debug_logging: false
-    throttle_scans: 1
+    # 1 (every scan) meant scans arrived faster than the TF-synced message
+    # filter could drain its queue, regardless of other CPU tuning --
+    # observed continuously dropping "queue is full" on every run, success
+    # or failure, with success basically down to one scan getting lucky
+    # timing. Only taking every 3rd scan directly cuts the input rate hitting
+    # that queue, rather than just freeing up CPU elsewhere and hoping it's
+    # enough.
+    throttle_scans: 3
     enable_interactive_mode: false
     use_lifecycle_manager: false
     use_response_expansion: true
