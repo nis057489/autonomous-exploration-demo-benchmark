@@ -39,9 +39,10 @@ from launch.actions import (
     GroupAction,
     IncludeLaunchDescription,
     OpaqueFunction,
+    RegisterEventHandler,
     SetEnvironmentVariable,
-    TimerAction,
 )
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -522,10 +523,6 @@ def _create_actions(context):
         "robot.launch.py"
     )
 
-    bringup_delay = 5.0 if local_bringup else 0.0
-    slam_delay = bringup_delay + 3.0
-    nav2_delay = slam_delay + 10.0
-
     actions = []
 
     if local_bringup:
@@ -644,48 +641,80 @@ def _create_actions(context):
         )
     )
 
+    # Readiness-gated startup, replacing fixed-delay TimerActions that assumed
+    # bringup/SLAM always finish within a guessed number of seconds. When that
+    # guess is wrong (e.g. turtlebot3_ros stalls during startup), the old
+    # behavior started the next stage anyway against missing inputs -- which
+    # only surfaced many minutes later as a cryptic "TF has two or more
+    # unconnected trees" error, with no indication of the actual cause. See
+    # wait_for_ready.py.
+    slam_group = GroupAction([
+        PushRosNamespace(abs_namespace),
+        # slam_toolbox publishes "map"/"map_metadata" as absolute
+        # topics ("/map", "/map_metadata") in its own source, so
+        # node namespacing alone never prefixes them -- without
+        # this, the real map data goes to the bare global /map
+        # and per_robot_map_compositor (subscribed to
+        # {namespace}/map) never sees it.
+        SetRemap(src="/map", dst=f"{abs_namespace}/map"),
+        SetRemap(src="/map_metadata", dst=f"{abs_namespace}/map_metadata"),
+        # slam_toolbox's tf2_ros::Buffer/TransformListener also default to
+        # the absolute /tf(_static) regardless of node namespace -- redirect
+        # to this robot's own namespaced topics (see turtlebot3_bringup
+        # GroupAction above, which is what now publishes there).
+        SetRemap(src="/tf", dst=f"{abs_namespace}/tf"),
+        SetRemap(src="/tf_static", dst=f"{abs_namespace}/tf_static"),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(slam_launch),
+            launch_arguments={
+                "use_sim_time": "false",
+                "slam_params_file": slam_cfg,
+            }.items(),
+        ),
+    ])
+    wait_bringup = Node(
+        package="bme_ros2_navigation",
+        executable="wait_for_ready.py",
+        name=f"wait_bringup_{namespace}",
+        output="screen",
+        parameters=[{
+            "topics": [f"/{namespace}/scan"],
+            "tf_target_frames": [f"{namespace}/odom"],
+            "tf_source_frames": [f"{namespace}/base_footprint"],
+            "timeout_sec": 30.0,
+            "label": f"{namespace} bringup",
+            "use_sim_time": False,
+        }],
+    )
+    actions.append(wait_bringup)
     actions.append(
-        TimerAction(
-            period=slam_delay,
-            actions=[
-                GroupAction([
-                    PushRosNamespace(abs_namespace),
-                    # slam_toolbox publishes "map"/"map_metadata" as absolute
-                    # topics ("/map", "/map_metadata") in its own source, so
-                    # node namespacing alone never prefixes them -- without
-                    # this, the real map data goes to the bare global /map
-                    # and per_robot_map_compositor (subscribed to
-                    # {namespace}/map) never sees it.
-                    SetRemap(src="/map", dst=f"{abs_namespace}/map"),
-                    SetRemap(src="/map_metadata", dst=f"{abs_namespace}/map_metadata"),
-                    # slam_toolbox's tf2_ros::Buffer/TransformListener also default to
-                    # the absolute /tf(_static) regardless of node namespace -- redirect
-                    # to this robot's own namespaced topics (see turtlebot3_bringup
-                    # GroupAction above, which is what now publishes there).
-                    SetRemap(src="/tf", dst=f"{abs_namespace}/tf"),
-                    SetRemap(src="/tf_static", dst=f"{abs_namespace}/tf_static"),
-                    IncludeLaunchDescription(
-                        PythonLaunchDescriptionSource(slam_launch),
-                        launch_arguments={
-                            "use_sim_time": "false",
-                            "slam_params_file": slam_cfg,
-                        }.items(),
-                    ),
-                ])
-            ],
-        )
+        RegisterEventHandler(OnProcessExit(target_action=wait_bringup, on_exit=[slam_group]))
     )
 
+    nav2_group = GroupAction([
+        PushRosNamespace(abs_namespace),
+        *_nav2_actions(namespace, nav_cfg),
+    ])
+    # Started in parallel with the bringup wait above (not chained after it) --
+    # it polls independently, so its own timeout just needs enough margin to
+    # cover bringup + SLAM's first map, whichever order things resolve in.
+    wait_slam = Node(
+        package="bme_ros2_navigation",
+        executable="wait_for_ready.py",
+        name=f"wait_slam_{namespace}",
+        output="screen",
+        parameters=[{
+            "topics": [f"/{namespace}/map"],
+            "tf_target_frames": [""],
+            "tf_source_frames": [""],
+            "timeout_sec": 60.0,
+            "label": f"{namespace} SLAM map",
+            "use_sim_time": False,
+        }],
+    )
+    actions.append(wait_slam)
     actions.append(
-        TimerAction(
-            period=nav2_delay,
-            actions=[
-                GroupAction([
-                    PushRosNamespace(abs_namespace),
-                    *_nav2_actions(namespace, nav_cfg),
-                ])
-            ],
-        )
+        RegisterEventHandler(OnProcessExit(target_action=wait_slam, on_exit=[nav2_group]))
     )
 
     actions.append(
