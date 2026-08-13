@@ -719,23 +719,18 @@ def _create_actions(context):
             "use_sim_time": False,
         }],
     )
-    actions.append(wait_bringup)
-    actions.append(
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=wait_bringup,
-                on_exit=_on_ready(namespace, "bringup", [slam_group]),
-            )
-        )
-    )
-
     nav2_group = GroupAction([
         PushRosNamespace(abs_namespace),
         *_nav2_actions(namespace, nav_cfg),
     ])
-    # Started in parallel with the bringup wait above (not chained after it) --
-    # it polls independently, so its own timeout just needs enough margin to
-    # cover bringup + SLAM's first map, whichever order things resolve in.
+    # wait_slam is now started together with slam_group (see wait_bringup's
+    # on_exit below), not in parallel with wait_bringup from t=0. It used to
+    # run independently starting at launch time, meaning its own timeout
+    # clock was already ticking for however long bringup took -- since
+    # slam_toolbox can't publish a map before it's even been launched, that
+    # was silently eating into the budget this timeout is supposed to give
+    # SLAM specifically (observed: bringup alone took ~79s on one run, so
+    # SLAM only actually had timeout_sec-79s, not the full timeout_sec).
     wait_slam = Node(
         package="bme_ros2_navigation",
         executable="wait_for_ready.py",
@@ -802,7 +797,15 @@ def _create_actions(context):
         }],
     )
 
-    actions.append(wait_slam)
+    actions.append(wait_bringup)
+    actions.append(
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=wait_bringup,
+                on_exit=_on_ready(namespace, "bringup", [slam_group, wait_slam]),
+            )
+        )
+    )
     actions.append(
         RegisterEventHandler(
             OnProcessExit(
