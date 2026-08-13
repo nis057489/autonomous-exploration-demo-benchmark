@@ -796,7 +796,7 @@ def _create_actions(context):
             # bringup taking 147s once under contention -- individual
             # behavior_server plugins alone took 5-12s each to configure.
             # 150s comfortably exceeds the worst duration actually observed.
-            "timeout_sec": 150.0,
+            "timeout_sec": 240.0,
             "label": f"{namespace} Nav2",
             "use_sim_time": False,
         }],
