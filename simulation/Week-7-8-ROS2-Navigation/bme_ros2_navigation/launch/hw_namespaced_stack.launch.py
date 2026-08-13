@@ -644,7 +644,7 @@ def _create_actions(context):
             "offset_x": spawn_x,
             "offset_y": spawn_y,
             "offset_yaw": spawn_yaw,
-            "publish_rate_hz": 2.0,
+            "publish_rate_hz": 0.1,
             "use_sim_time": False,
         }],
     )
