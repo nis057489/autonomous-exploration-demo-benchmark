@@ -50,8 +50,16 @@ controller_server:
     #   max angular 1.82 rad/s → use 1.8
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
-      time_steps: 30
-      model_dt: 0.08
+      # MPPI requires model_dt >= controller period (1/controller_frequency);
+      # controller_frequency dropped to 5.0Hz (period 0.2s) but model_dt was
+      # still 0.08s from the old 12.5Hz setting, so configure() throws
+      # "Controller period more then model dt" and lifecycle_manager aborts
+      # the whole bringup. model_dt=0.2 satisfies the constraint exactly;
+      # time_steps dropped 30->12 to keep the same 2.4s prediction horizon,
+      # which also shrinks the batch_size*time_steps rollout cost 2.5x on
+      # top of running less often -- free CPU, not just fewer calls.
+      time_steps: 12
+      model_dt: 0.2
       batch_size: 700
       ax_max: 1.5
       ax_min: -1.5
