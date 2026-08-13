@@ -762,15 +762,50 @@ def _create_actions(context):
         haar_levels, laptop_ip,
     )
 
+    # Third stage: Nav2's own lifecycle bringup (controller_server ->
+    # planner_server -> behavior_server -> ... -> bt_navigator, each
+    # configured then activated in sequence by lifecycle_manager) can itself
+    # take a long time and time out under CPU contention, exactly like SLAM's
+    # first scan did -- bt_navigator only creates its navigate_to_pose action
+    # server in on_activate(), so waiting for that action server is a direct
+    # proxy for "Nav2 is actually usable", not just "the processes started".
+    # Everything else that piles on afterward (DDIL relay/encode/decode,
+    # frontier_explorer, compositor, team_map_fusion) gets its own clean
+    # window only once Nav2 has cleared this, instead of all starting in one
+    # simultaneous burst that was itself enough to make lifecycle_manager's
+    # service calls to planner_server time out.
+    wait_nav2 = Node(
+        package="bme_ros2_navigation",
+        executable="wait_for_ready.py",
+        name=f"wait_nav2_{namespace}",
+        output="screen",
+        parameters=[{
+            "topics": [""],
+            "tf_target_frames": [""],
+            "tf_source_frames": [""],
+            "action_servers": [f"/{namespace}/navigate_to_pose"],
+            "timeout_sec": 90.0,
+            "label": f"{namespace} Nav2",
+            "use_sim_time": False,
+        }],
+    )
+
     actions.append(wait_slam)
     actions.append(
         RegisterEventHandler(
             OnProcessExit(
                 target_action=wait_slam,
+                on_exit=_on_ready(namespace, "SLAM map", [nav2_group, wait_nav2]),
+            )
+        )
+    )
+    actions.append(
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=wait_nav2,
                 on_exit=_on_ready(
-                    namespace, "SLAM map",
+                    namespace, "Nav2",
                     [
-                        nav2_group,
                         per_robot_map_compositor_node,
                         frontier_path_tracker_node,
                         frontier_explorer_node,

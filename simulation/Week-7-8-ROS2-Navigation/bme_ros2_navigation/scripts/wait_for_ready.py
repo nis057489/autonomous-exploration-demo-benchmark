@@ -32,6 +32,7 @@ class WaitForReady(Node):
         self.declare_parameter("topics", [""])
         self.declare_parameter("tf_target_frames", [""])
         self.declare_parameter("tf_source_frames", [""])
+        self.declare_parameter("action_servers", [""])
         self.declare_parameter("timeout_sec", 30.0)
         self.declare_parameter("label", "bringup")
 
@@ -39,6 +40,7 @@ class WaitForReady(Node):
         tf_targets = [t for t in self.get_parameter("tf_target_frames").value if t]
         tf_sources = [t for t in self.get_parameter("tf_source_frames").value if t]
         self.tf_pairs = list(zip(tf_targets, tf_sources))
+        self.action_servers = [a for a in self.get_parameter("action_servers").value if a]
         self.timeout_sec = float(self.get_parameter("timeout_sec").value)
         self.label = str(self.get_parameter("label").value)
 
@@ -72,6 +74,17 @@ class WaitForReady(Node):
                 qos_profile_sensor_data,
             )
 
+    def _action_server_ready(self, action_name):
+        # No generic "does this action server exist" query in rclpy, but a
+        # Nav2 LifecycleNode (e.g. bt_navigator) only creates its action
+        # servers in on_activate() -- so the underlying send_goal service
+        # existing is a reliable proxy for "this node is actually active",
+        # not just configured/alive. Same existence-based approach ros2
+        # action list uses under the hood.
+        send_goal_service = f"{action_name}/_action/send_goal"
+        names_and_types = dict(self.get_service_names_and_types())
+        return send_goal_service in names_and_types
+
     def _missing(self):
         missing = []
         for t in self.topics:
@@ -80,6 +93,9 @@ class WaitForReady(Node):
         for target, source in self.tf_pairs:
             if not self.tf_buffer.can_transform(target, source, rclpy.time.Time()):
                 missing.append(f"tf '{source}' -> '{target}' not available")
+        for action_name in self.action_servers:
+            if not self._action_server_ready(action_name):
+                missing.append(f"action server '{action_name}' not active")
         return missing
 
     def wait(self):
