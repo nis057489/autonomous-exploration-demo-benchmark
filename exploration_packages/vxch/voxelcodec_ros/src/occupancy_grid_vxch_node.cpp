@@ -47,7 +47,13 @@ public:
     const auto map_qos = rclcpp::QoS(1)
       .reliable()
       .durability(rclcpp::DurabilityPolicy::TransientLocal);
-    const auto band_qos = rclcpp::QoS(1).best_effort();
+    // Was best_effort()/volatile: a late-joining subscriber (a fresh viz
+    // client, a robot reconnecting mid-mission) would never receive a band
+    // unless it happened to be subscribed at the exact moment the encoder
+    // republished it, since volatile keeps no history to replay. Matching
+    // manifest's QoS means a late joiner gets the current value of every
+    // band immediately instead of waiting on the next map change.
+    const auto band_qos = map_qos;
 
     manifest_pub_ = create_publisher<voxelcodec_msgs::msg::VoxelManifest>(
       output_base_topic_ + "/manifest", map_qos);

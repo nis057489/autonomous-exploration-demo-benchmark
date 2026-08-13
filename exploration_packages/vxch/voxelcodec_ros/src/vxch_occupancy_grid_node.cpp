@@ -88,7 +88,11 @@ public:
     const auto map_qos = rclcpp::QoS(1)
       .reliable()
       .durability(rclcpp::DurabilityPolicy::TransientLocal);
-    const auto band_qos = rclcpp::QoS(1).best_effort();
+    // Must match the encoder's band_qos (occupancy_grid_vxch_node.cpp) --
+    // requesting a lower durability than the publisher offers is DDS-legal
+    // but means this subscriber won't get the late-join replay even though
+    // the publisher retains it. See that file for the full rationale.
+    const auto band_qos = map_qos;
 
     map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(output_topic_, map_qos);
 
