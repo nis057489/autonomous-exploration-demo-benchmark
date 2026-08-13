@@ -711,7 +711,10 @@ def _create_actions(context):
             "topics": [f"/{namespace}/scan"],
             "tf_target_frames": [f"{namespace}/odom"],
             "tf_source_frames": [f"{namespace}/base_footprint"],
-            "timeout_sec": 30.0,
+            # Observed successes ranging from ~3s to just under 30s, and at
+            # least one failure that might just have needed more time -- 60s
+            # gives real margin without waiting forever on a truly dead port.
+            "timeout_sec": 60.0,
             "label": f"{namespace} bringup",
             "use_sim_time": False,
         }],
@@ -742,7 +745,10 @@ def _create_actions(context):
             "topics": [f"/{namespace}/map"],
             "tf_target_frames": [""],
             "tf_source_frames": [""],
-            "timeout_sec": 60.0,
+            # Observed successes from ~12s up to timing out at 60s under CPU
+            # contention -- doubling gives SLAM's first scan real room to
+            # land before this gives up and aborts the whole robot.
+            "timeout_sec": 120.0,
             "label": f"{namespace} SLAM map",
             "use_sim_time": False,
         }],
@@ -784,7 +790,11 @@ def _create_actions(context):
             "tf_target_frames": [""],
             "tf_source_frames": [""],
             "action_servers": [f"/{namespace}/navigate_to_pose"],
-            "timeout_sec": 90.0,
+            # We measured the full (unstaged, worst-case) Nav2 lifecycle
+            # bringup taking 147s once under contention -- individual
+            # behavior_server plugins alone took 5-12s each to configure.
+            # 150s comfortably exceeds the worst duration actually observed.
+            "timeout_sec": 150.0,
             "label": f"{namespace} Nav2",
             "use_sim_time": False,
         }],
