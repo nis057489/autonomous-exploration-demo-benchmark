@@ -24,8 +24,13 @@ slam_toolbox:
 
     # LDS-02 (ld08_driver) max range is 8.0 m.
     max_laser_range: 8.0
-    minimum_travel_distance: 0.0
-    minimum_travel_heading: 0.0
+    # 0.0 meant reprocessing every single scan even while stationary -- pure
+    # wasted CPU on an already CPU-constrained Pi, and these robots spend a
+    # lot of time not moving (on blocks) during testing. A few cm/degrees of
+    # dead zone costs negligible map fidelity but skips redundant scan
+    # matching + pose graph work when nothing has actually changed.
+    minimum_travel_distance: 0.05
+    minimum_travel_heading: 0.05
     scan_buffer_size: 20
     scan_buffer_maximum_scan_distance: 8.0
     link_match_minimum_response_fine: 0.25
