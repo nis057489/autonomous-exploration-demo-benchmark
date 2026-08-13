@@ -31,4 +31,4 @@ ros2 launch bme_ros2_navigation viz_vxch_decode.launch.py \
 DECODE_PID=$!
 trap 'kill "${DECODE_PID}" 2>/dev/null' EXIT
 
-rviz2 -d ./real.rviz
+rviz2 -d ./minimal.rviz

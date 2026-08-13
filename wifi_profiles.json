@@ -13,8 +13,7 @@
   },
   "denied": {
     "description": "Severely constrained link, worst case for map transport",
-    "rate": "1mbps",
-    "both_directions": true,
-    "viz_kbps": 300000
+    "rate": "50mbps",
+    "both_directions": true
   }
 }
