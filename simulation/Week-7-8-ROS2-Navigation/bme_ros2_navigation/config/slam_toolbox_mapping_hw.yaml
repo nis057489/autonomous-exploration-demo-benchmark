@@ -18,21 +18,21 @@ slam_toolbox:
 
     use_sim_time: false
     # Looser TF timeout to tolerate real-hardware latency.
-    transform_timeout: 0.5
+    transform_timeout: 5.0
     tf_buffer_duration: 30.0
-    map_update_interval: 0.5
+    map_update_interval: 10.0
 
     # LDS-02 (ld08_driver) max range is 8.0 m.
     max_laser_range: 8.0
-    minimum_travel_distance: 0.0
-    minimum_travel_heading: 0.0
-    scan_buffer_size: 20
+    minimum_travel_distance: 0.05
+    minimum_travel_heading: 0.05
+    scan_buffer_size: 5
     scan_buffer_maximum_scan_distance: 8.0
     link_match_minimum_response_fine: 0.25
     link_scan_maximum_distance: 1.5
 
     loop_search_maximum_distance: 3.0
-    do_loop_closing: true
+    do_loop_closing: false
     loop_match_minimum_chain_size: 10
     loop_match_maximum_variance_coarse: 3.0
     loop_match_minimum_response_coarse: 0.35
