@@ -20,7 +20,10 @@ slam_toolbox:
     # Looser TF timeout to tolerate real-hardware latency.
     transform_timeout: 0.5
     tf_buffer_duration: 30.0
-    map_update_interval: 0.5
+    # Rebuilding+publishing the full OccupancyGrid raster from the pose graph
+    # is itself real CPU cost -- doing it 4x less often doesn't touch
+    # localization/matching quality, only how often the visual map refreshes.
+    map_update_interval: 4.0
 
     # LDS-02 (ld08_driver) max range is 8.0 m.
     max_laser_range: 8.0
@@ -31,20 +34,33 @@ slam_toolbox:
     # matching + pose graph work when nothing has actually changed.
     minimum_travel_distance: 0.05
     minimum_travel_heading: 0.05
-    scan_buffer_size: 20
+    # Fewer historical scans to compare each new scan against for local
+    # linking -- less per-scan CPU, at the cost of slightly less robust
+    # local matching.
+    scan_buffer_size: 10
     scan_buffer_maximum_scan_distance: 8.0
     link_match_minimum_response_fine: 0.25
     link_scan_maximum_distance: 1.5
 
     loop_search_maximum_distance: 3.0
-    do_loop_closing: true
+    # Loop closure triggers full pose-graph Ceres optimization -- one of the
+    # most expensive things this node does, and it only gets more expensive
+    # as the map grows. Not worth it on hardware this CPU-constrained; a
+    # small amount of accumulated drift is a better tradeoff than SLAM
+    # stalling entirely.
+    do_loop_closing: false
     loop_match_minimum_chain_size: 10
     loop_match_maximum_variance_coarse: 3.0
     loop_match_minimum_response_coarse: 0.35
     loop_match_minimum_response_fine: 0.45
 
     correlation_search_space_dimension: 0.8
-    correlation_search_space_resolution: 0.01
+    # This is the local scan-matching search grid, evaluated on EVERY scan
+    # (not just loop closure) -- dimension/resolution steps per axis, so
+    # 0.01->0.02 is a 4x reduction in correlation evaluations per match
+    # (80x80 -> 40x40 grid), directly cutting the cost of the exact
+    # operation that was making even the first scan take unboundedly long.
+    correlation_search_space_resolution: 0.02
     correlation_search_space_smear_deviation: 0.1
 
     loop_search_space_dimension: 8.0
