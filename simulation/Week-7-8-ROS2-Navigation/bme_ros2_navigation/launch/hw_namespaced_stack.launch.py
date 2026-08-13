@@ -714,7 +714,7 @@ def _create_actions(context):
             # Observed successes ranging from ~3s to just under 30s, and at
             # least one failure that might just have needed more time -- 60s
             # gives real margin without waiting forever on a truly dead port.
-            "timeout_sec": 60.0,
+            "timeout_sec": 240.0,
             "label": f"{namespace} bringup",
             "use_sim_time": False,
         }],
