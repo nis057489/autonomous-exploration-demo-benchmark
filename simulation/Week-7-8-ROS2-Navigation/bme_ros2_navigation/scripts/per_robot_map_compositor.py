@@ -55,7 +55,10 @@ class PerRobotMapCompositor(Node):
         self._offset_x = float(self.get_parameter("offset_x").value)
         self._offset_y = float(self.get_parameter("offset_y").value)
         self._offset_yaw = float(self.get_parameter("offset_yaw").value)
-        publish_rate = max(0.1, float(self.get_parameter("publish_rate_hz").value))
+        # Floor is just to avoid a divide-by-zero below, not an intentional
+        # minimum rate -- was previously 0.1, which silently overrode any
+        # slower configured rate (e.g. 0.03 Hz) back up to 0.1 Hz.
+        publish_rate = max(0.001, float(self.get_parameter("publish_rate_hz").value))
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
