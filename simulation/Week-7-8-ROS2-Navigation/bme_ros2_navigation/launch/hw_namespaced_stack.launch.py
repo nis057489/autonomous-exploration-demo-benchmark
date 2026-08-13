@@ -745,10 +745,12 @@ def _create_actions(context):
             "topics": [f"/{namespace}/map"],
             "tf_target_frames": [""],
             "tf_source_frames": [""],
-            # Observed successes from ~12s up to timing out at 60s under CPU
-            # contention -- doubling gives SLAM's first scan real room to
-            # land before this gives up and aborts the whole robot.
-            "timeout_sec": 120.0,
+            # 120s still wasn't enough -- observed runs going fully silent
+            # (no drops, no errors, just nothing) for 60-90s+ after
+            # registering the sensor, consistent with a genuinely slow first
+            # scan-match/optimization on this hardware rather than a hang.
+            # Give it real room rather than keep guessing at the exact number.
+            "timeout_sec": 240.0,
             "label": f"{namespace} SLAM map",
             "use_sim_time": False,
         }],
