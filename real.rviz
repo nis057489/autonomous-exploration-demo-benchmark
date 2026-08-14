@@ -10,7 +10,7 @@ Panels:
     Experimental: false
     Name: Time
     SyncMode: 0
-    SyncSource: ""
+    SyncSource: robot3 LaserScan
   - Class: rviz_autonomous_exploration_benchmark/ExplorationControlPanel
     Name: Exploration Control
 Visualization Manager:
@@ -121,7 +121,7 @@ Visualization Manager:
             Value: /vxch_monitor/robot1/incoming/robot3/map_updates
           Use Timestamp: false
           Value: true
-      Enabled: true
+      Enabled: false
       Name: "VXCH raw stream (laptop decode): robot1"
     - Class: rviz_common/Group
       Displays:
@@ -171,7 +171,7 @@ Visualization Manager:
             Value: /vxch_monitor/robot2/incoming/robot3/map_updates
           Use Timestamp: false
           Value: true
-      Enabled: true
+      Enabled: false
       Name: "VXCH raw stream (laptop decode): robot2"
     - Class: rviz_common/Group
       Displays:
@@ -221,7 +221,7 @@ Visualization Manager:
             Value: /vxch_monitor/robot3/incoming/robot2/map_updates
           Use Timestamp: false
           Value: true
-      Enabled: true
+      Enabled: false
       Name: "VXCH raw stream (laptop decode): robot3"
     - Class: rviz_common/Group
       Displays:
@@ -243,6 +243,57 @@ Visualization Manager:
             Expand Link Details: false
             Expand Tree: false
             Link Tree Style: Links in Alphabetic Order
+            robot3/base_footprint:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+            robot3/base_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot3/base_scan:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot3/camera_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot3/camera_rgb_frame:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+            robot3/camera_rgb_optical_frame:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+            robot3/caster_back_left_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot3/caster_back_right_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot3/imu_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+            robot3/wheel_left_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot3/wheel_right_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
           Mass Properties:
             Inertia: false
             Mass: false
@@ -266,9 +317,9 @@ Visualization Manager:
           Enabled: true
           Invert Rainbow: false
           Max Color: 255; 255; 255
-          Max Intensity: 232
+          Max Intensity: 236
           Min Color: 0; 0; 0
-          Min Intensity: 66
+          Min Intensity: 82
           Name: robot3 LaserScan
           Position Transformer: XYZ
           Selectable: true
@@ -291,7 +342,7 @@ Visualization Manager:
           Class: rviz_default_plugins/Map
           Color Scheme: map
           Draw Behind: false
-          Enabled: true
+          Enabled: false
           Name: robot3 Local SLAM Map
           Topic:
             Depth: 5
@@ -307,7 +358,7 @@ Visualization Manager:
             Reliability Policy: Reliable
             Value: /robot3/map_updates
           Use Timestamp: false
-          Value: true
+          Value: false
         - Alpha: 0.6000000238418579
           Binary representation: false
           Binary threshold: 100
@@ -337,7 +388,7 @@ Visualization Manager:
           Class: rviz_default_plugins/Map
           Color Scheme: map
           Draw Behind: false
-          Enabled: true
+          Enabled: false
           Name: robot3 Team Map DDIL
           Topic:
             Depth: 5
@@ -353,7 +404,7 @@ Visualization Manager:
             Reliability Policy: Reliable
             Value: /robot3/team_map_ddil_updates
           Use Timestamp: false
-          Value: true
+          Value: false
         - Class: rviz_default_plugins/MarkerArray
           Enabled: true
           Name: robot3 Frontiers
@@ -416,6 +467,57 @@ Visualization Manager:
             Expand Link Details: false
             Expand Tree: false
             Link Tree Style: Links in Alphabetic Order
+            robot2/base_footprint:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+            robot2/base_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot2/base_scan:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot2/camera_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot2/camera_rgb_frame:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+            robot2/camera_rgb_optical_frame:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+            robot2/caster_back_left_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot2/caster_back_right_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot2/imu_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+            robot2/wheel_left_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot2/wheel_right_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
           Mass Properties:
             Inertia: false
             Mass: false
@@ -439,9 +541,9 @@ Visualization Manager:
           Enabled: true
           Invert Rainbow: false
           Max Color: 255; 255; 255
-          Max Intensity: 234
+          Max Intensity: 236
           Min Color: 0; 0; 0
-          Min Intensity: 72
+          Min Intensity: 90
           Name: robot2 LaserScan
           Position Transformer: XYZ
           Selectable: true
@@ -464,7 +566,7 @@ Visualization Manager:
           Class: rviz_default_plugins/Map
           Color Scheme: map
           Draw Behind: false
-          Enabled: true
+          Enabled: false
           Name: robot2 Local SLAM Map
           Topic:
             Depth: 5
@@ -480,7 +582,7 @@ Visualization Manager:
             Reliability Policy: Reliable
             Value: /robot2/map_updates
           Use Timestamp: false
-          Value: true
+          Value: false
         - Alpha: 0.6000000238418579
           Binary representation: false
           Binary threshold: 100
@@ -510,7 +612,7 @@ Visualization Manager:
           Class: rviz_default_plugins/Map
           Color Scheme: map
           Draw Behind: false
-          Enabled: true
+          Enabled: false
           Name: robot2 Team Map DDIL
           Topic:
             Depth: 5
@@ -526,12 +628,12 @@ Visualization Manager:
             Reliability Policy: Reliable
             Value: /robot2/team_map_ddil_updates
           Use Timestamp: false
-          Value: true
+          Value: false
         - Class: rviz_default_plugins/MarkerArray
           Enabled: true
           Name: robot2 Frontiers
           Namespaces:
-            {}
+            frontier_frontiers_primitive: true
           Topic:
             Depth: 5
             Durability Policy: Volatile
@@ -589,6 +691,57 @@ Visualization Manager:
             Expand Link Details: false
             Expand Tree: false
             Link Tree Style: Links in Alphabetic Order
+            robot1/base_footprint:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+            robot1/base_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot1/base_scan:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot1/camera_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot1/camera_rgb_frame:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+            robot1/camera_rgb_optical_frame:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+            robot1/caster_back_left_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot1/caster_back_right_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot1/imu_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+            robot1/wheel_left_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            robot1/wheel_right_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
           Mass Properties:
             Inertia: false
             Mass: false
@@ -614,7 +767,7 @@ Visualization Manager:
           Max Color: 255; 255; 255
           Max Intensity: 240
           Min Color: 0; 0; 0
-          Min Intensity: 76
+          Min Intensity: 80
           Name: robot1 LaserScan
           Position Transformer: XYZ
           Selectable: true
@@ -637,7 +790,7 @@ Visualization Manager:
           Class: rviz_default_plugins/Map
           Color Scheme: map
           Draw Behind: false
-          Enabled: true
+          Enabled: false
           Name: robot1 Local SLAM Map
           Topic:
             Depth: 5
@@ -653,7 +806,7 @@ Visualization Manager:
             Reliability Policy: Reliable
             Value: /robot1/map_updates
           Use Timestamp: false
-          Value: true
+          Value: false
         - Alpha: 0.6000000238418579
           Binary representation: false
           Binary threshold: 100
@@ -683,7 +836,7 @@ Visualization Manager:
           Class: rviz_default_plugins/Map
           Color Scheme: map
           Draw Behind: false
-          Enabled: true
+          Enabled: false
           Name: robot1 Team Map DDIL
           Topic:
             Depth: 5
@@ -699,12 +852,12 @@ Visualization Manager:
             Reliability Policy: Reliable
             Value: /robot1/team_map_ddil_updates
           Use Timestamp: false
-          Value: true
+          Value: false
         - Class: rviz_default_plugins/MarkerArray
           Enabled: true
           Name: robot1 Frontiers
           Namespaces:
-            {}
+            frontier_frontiers_primitive: true
           Topic:
             Depth: 5
             Durability Policy: Volatile
@@ -770,7 +923,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 72.38520812988281
+      Distance: 43.88043212890625
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1

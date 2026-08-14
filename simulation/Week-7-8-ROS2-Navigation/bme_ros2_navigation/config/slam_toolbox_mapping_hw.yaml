@@ -50,7 +50,12 @@ slam_toolbox:
     max_submaps: 15
 
     debug_logging: true
-    throttle_scans: 1
+    # 1 (every scan) means scans arrive faster than the TF-synced message
+    # filter can drain its queue -- observed continuously dropping "queue is
+    # full" on all 3 robots, with robot1/robot3 never processing a single
+    # scan successfully. Taking every 3rd scan directly cuts the input rate
+    # hitting that queue.
+    throttle_scans: 3
     enable_interactive_mode: false
     use_lifecycle_manager: false
     use_response_expansion: true
