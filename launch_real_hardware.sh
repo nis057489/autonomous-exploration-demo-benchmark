@@ -285,6 +285,15 @@ if [[ -n "${ROBOT_ID}" ]]; then
   if [[ -n "${PEERS}" ]]; then
     echo "Distributed map sharing (map_transport=${MAP_TRANSPORT}) with peers: ${PEERS}"
   fi
+  # Full stdout+stderr trace of this run, in addition to whatever's on screen.
+  # Some diagnostics (e.g. slam_toolbox's Karto validation warnings) print via
+  # std::cout directly and never reach ~/.ros/log at all -- this is the only
+  # durable record of those. Keeping every attempt (not overwriting) so
+  # successful vs. failed startups can be diffed directly.
+  STARTUP_LOG_DIR="${HOME}/startup_logs"
+  mkdir -p "${STARTUP_LOG_DIR}"
+  STARTUP_LOG="${STARTUP_LOG_DIR}/${ROBOT_ID}_$(date +%Y%m%d_%H%M%S).log"
+  echo "Full startup trace: ${STARTUP_LOG}"
   ros2 launch bme_ros2_navigation hw_namespaced_stack.launch.py \
     namespace:="${ROBOT_ID}" \
     nav_params_file:="${NAVIGATION_PARAMS}" \
@@ -301,8 +310,9 @@ if [[ -n "${ROBOT_ID}" ]]; then
     loss_pct:="${LOSS_PCT}" \
     delay_ms:="${DELAY_MS}" \
     haar_levels:="${HAAR_LEVELS}" \
-    bag_enabled:="${BAG_ENABLED}"
-  exit $?
+    bag_enabled:="${BAG_ENABLED}" \
+    2>&1 | tee "${STARTUP_LOG}"
+  exit "${PIPESTATUS[0]}"
 fi
 
 # ── Nav2 process cleanup (same as launch.sh) ─────────────────────────────────
