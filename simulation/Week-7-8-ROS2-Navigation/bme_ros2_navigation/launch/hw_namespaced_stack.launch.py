@@ -142,7 +142,7 @@ def _patch_slam_params(base_path, namespace, output_dir):
     return _write_yaml(output_dir, f"{namespace}_slam.yaml", data)
 
 
-def _patch_nav_params(base_path, namespace, output_dir):
+def _patch_nav_params(base_path, namespace, output_dir, spawn_x=0.0, spawn_y=0.0):
     data = copy.deepcopy(_load_yaml(base_path))
     base_link = f"{namespace}/base_link"
     base_fp = f"{namespace}/base_footprint"
@@ -168,6 +168,20 @@ def _patch_nav_params(base_path, namespace, output_dir):
     gc.setdefault("obstacle_layer", {}).setdefault(
         "scan", {})["topic"] = f"/{namespace}/scan"
     gc.setdefault("static_layer", {})["map_topic"] = f"/{namespace}/nav_map"
+    # Before nav_map's first message arrives (needs SLAM's own first map +
+    # per_robot_map_compositor to republish it), nav2_costmap_2d falls back to
+    # its built-in placeholder anchored at (0,0). The robot's actual TF pose
+    # in the shared "map" frame is spawn offset + local pose (via the static
+    # map -> {namespace}/map transform below) from the moment odom exists --
+    # long before nav_map exists -- so a robot spawned away from (0,0) reads
+    # as "out of bounds" until that first nav_map lands. Centering the
+    # placeholder on this robot's own spawn point removes that false warning;
+    # always_send_full_costmap resizes it to the real map's bounds once
+    # nav_map actually arrives, so this only affects the pre-map window.
+    gc["width"] = 10
+    gc["height"] = 10
+    gc["origin_x"] = spawn_x - 5.0
+    gc["origin_y"] = spawn_y - 5.0
 
     bs = _node_params(data, "behavior_server")
     bs["local_frame"] = odom
@@ -494,7 +508,7 @@ def _create_actions(context):
     output_dir = tempfile.mkdtemp(prefix=f"bme_hw_{namespace}_")
 
     slam_cfg = _patch_slam_params(slam_params_file, namespace, output_dir)
-    nav_cfg = _patch_nav_params(nav_params_file, namespace, output_dir)
+    nav_cfg = _patch_nav_params(nav_params_file, namespace, output_dir, spawn_x=spawn_x, spawn_y=spawn_y)
     explore_cfg = _patch_explore_params(explore_config, namespace, output_dir, peers)
 
     slam_launch = os.path.join(
