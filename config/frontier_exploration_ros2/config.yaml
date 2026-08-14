@@ -164,7 +164,12 @@ frontier_explorer:
 
     # Distance used to treat a frontier region as recently visited.
     # Use if you are having navigation loops.
-    frontier_visit_tolerance: 0.40
+    # Raised well above goal_preemption_complete_if_within_m (0.50) so the
+    # exclusion zone actually covers the unrevealed gap an early-completed
+    # goal can leave behind -- was 0.40 (smaller than the completion radius
+    # that creates the gap), which let the same spot get reselected almost
+    # immediately and orbit.
+    frontier_visit_tolerance: 1.0
 
 
     # --------------- Map Optimization --------------- #
