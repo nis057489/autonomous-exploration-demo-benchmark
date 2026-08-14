@@ -19,8 +19,9 @@ slam_toolbox:
     use_sim_time: false
     # Looser TF timeout to tolerate real-hardware latency.
     transform_timeout: 0.5
-    tf_buffer_duration: 30.0
-    map_update_interval: 0.5
+    tf_buffer_duration: 60.0
+    map_update_interval: 10.0
+    minimum_time_interval: 0.5
 
     # LDS-02 (ld08_driver) max range is 8.0 m.
     max_laser_range: 8.0
@@ -47,7 +48,7 @@ slam_toolbox:
     loop_search_space_smear_deviation: 0.03
 
     resolution: 0.05
-    max_submaps: 15
+    max_submaps: 5
 
     debug_logging: true
     # 1 (every scan) means scans arrive faster than the TF-synced message
