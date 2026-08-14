@@ -25,6 +25,8 @@
 # What this script does NOT do (run these yourself, on the robot or on another terminal):
 #   - RViz (open it manually, or pass rviz:=true to the launch file)
 
+sync
+
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -235,10 +237,15 @@ ensure_frontier_exploration_ros2() {
   echo "frontier_exploration_ros2 installed successfully."
 }
 
+sync
 check_pkg slam_toolbox
+sync
 check_pkg nav2_bringup
+sync
 check_pkg bme_ros2_navigation
+sync
 ensure_frontier_exploration_ros2
+sync
 
 if [[ "${LOCAL_BRINGUP}" == true ]]; then
   check_pkg turtlebot3_bringup
@@ -331,6 +338,7 @@ cleanup_existing_nav2() {
   for pattern in "${NAV2_PATTERNS[@]}"; do
     pkill -KILL -f "${pattern}" 2>/dev/null || true
   done
+  sync
 }
 
 cleanup() {
