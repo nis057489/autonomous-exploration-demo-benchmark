@@ -445,7 +445,12 @@ def _nav2_actions(namespace, nav_cfg, log_level="info"):
         allow_substs=True,
     )
     remappings = [("/tf", "tf"), ("/tf_static", "tf_static")]
+    # slam_toolbox is already pushed into this same {namespace} group (see the
+    # TimerAction above that includes online_async_launch.py), so it's
+    # addressable by lifecycle_manager_navigation under its bare node name
+    # "slam_toolbox" -- no change needed to how SLAM itself is launched.
     lifecycle_nodes = [
+        "slam_toolbox",
         "controller_server",
         "planner_server",
         "behavior_server",
