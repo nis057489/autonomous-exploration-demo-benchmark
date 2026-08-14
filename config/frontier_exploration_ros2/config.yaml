@@ -45,7 +45,7 @@ frontier_explorer:
 
     # Optional startup-only map durability autodetect helper.
     map_qos_autodetect_on_startup: false
-    map_qos_autodetect_timeout_s: 5.0
+    map_qos_autodetect_timeout_s: 60.0
 
     # Costmap QoS profile selection (durability is fixed volatile in code).
     costmap_qos_reliability: reliable
