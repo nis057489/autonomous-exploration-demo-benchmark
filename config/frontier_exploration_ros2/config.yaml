@@ -58,14 +58,14 @@ frontier_explorer:
     # Refresh Rate of the package.
     # `1.0` is recommended. Use `2.0` if your robot is very fast. 
     # Use `0.50` if your mapping is slow and you want lowest CPU usage.  
-    map_processing_rate_hz: 1.0
+    map_processing_rate_hz: 0.5
 
     # Start exploration immediately at launch.
     autostart: true
 
     # Wait this many seconds after node start before sending the first goal,
     # giving Nav2 time to finish configuring its lifecycle nodes.
-    startup_delay_s: 15.0
+    startup_delay_s: 60.0
 
     # Keep the optional runtime control service available for manual stop/start flows.
     control_service_enabled: false
