@@ -445,10 +445,14 @@ def _nav2_actions(namespace, nav_cfg, log_level="info"):
         allow_substs=True,
     )
     remappings = [("/tf", "tf"), ("/tf_static", "tf_static")]
-    # slam_toolbox is already pushed into this same {namespace} group (see the
-    # TimerAction above that includes online_async_launch.py), so it's
-    # addressable by lifecycle_manager_navigation under its bare node name
-    # "slam_toolbox" -- no change needed to how SLAM itself is launched.
+    # slam_toolbox previously self-activated regardless of the YAML
+    # use_lifecycle_manager param -- root cause was online_async_launch.py's
+    # own separate use_lifecycle_manager launch argument (default false),
+    # which we weren't passing through, so it kept self-emitting
+    # CONFIGURE/ACTIVATE. Now passed through as "true" in the SLAM
+    # IncludeLaunchDescription above, so slam_toolbox genuinely waits for an
+    # external caller like controller_server/bt_navigator do, and can be
+    # safely listed here.
     lifecycle_nodes = [
         "slam_toolbox",
         "controller_server",
@@ -682,6 +686,20 @@ def _create_actions(context):
                         launch_arguments={
                             "use_sim_time": "false",
                             "slam_params_file": slam_cfg,
+                            # online_async_launch.py has its own separate
+                            # use_lifecycle_manager launch argument (default
+                            # false) that self-emits CONFIGURE/ACTIVATE events
+                            # whenever autostart AND NOT use_lifecycle_manager
+                            # -- distinct from the same-named ROS parameter in
+                            # slam_cfg, which only controls the node's own
+                            # bond creation and never reaches this switch.
+                            # Without this, slam_toolbox always self-activates
+                            # regardless of the YAML param, which is exactly
+                            # what caused lifecycle_manager_navigation's
+                            # "Unable to start transition 1 from current state
+                            # active" error when slam_toolbox was added to its
+                            # node_names.
+                            "use_lifecycle_manager": "true",
                         }.items(),
                     ),
                 ])
