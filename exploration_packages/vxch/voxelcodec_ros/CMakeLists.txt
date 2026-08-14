@@ -90,7 +90,7 @@ add_executable(ddil_proxy_node
   src/ddil_proxy_node.cpp
 )
 target_compile_features(ddil_proxy_node PUBLIC cxx_std_17)
-ament_target_dependencies(ddil_proxy_node rclcpp)
+ament_target_dependencies(ddil_proxy_node rclcpp voxelcodec_msgs)
 install(TARGETS ddil_proxy_node RUNTIME DESTINATION lib/${PROJECT_NAME})
 
 if(nav2_msgs_FOUND AND nav2_voxel_grid_FOUND)
