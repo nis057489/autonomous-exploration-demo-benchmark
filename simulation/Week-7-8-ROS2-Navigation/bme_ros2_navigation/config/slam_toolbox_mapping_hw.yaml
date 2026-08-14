@@ -58,6 +58,6 @@ slam_toolbox:
     # hitting that queue.
     throttle_scans: 3
     enable_interactive_mode: false
-    use_lifecycle_manager: false
+    use_lifecycle_manager: true
     use_response_expansion: true
     stack_size_to_use: 40000000
