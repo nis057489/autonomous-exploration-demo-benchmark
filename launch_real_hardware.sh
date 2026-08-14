@@ -51,6 +51,7 @@ ROBOT_STARTUP_DELAY_S="${ROBOT_STARTUP_DELAY_S:-0.0}"
 # distributed map sharing (each robot's own launch excludes itself to get its
 # peer list). Empty = no map sharing.
 ROBOT_HOSTS="${ROBOT_HOSTS:-}"
+BAG_ENABLED="${BAG_ENABLED:-true}"
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 
@@ -299,7 +300,8 @@ if [[ -n "${ROBOT_ID}" ]]; then
     bandwidth_kbps:="${BANDWIDTH_KBPS}" \
     loss_pct:="${LOSS_PCT}" \
     delay_ms:="${DELAY_MS}" \
-    haar_levels:="${HAAR_LEVELS}"
+    haar_levels:="${HAAR_LEVELS}" \
+    bag_enabled:="${BAG_ENABLED}"
   exit $?
 fi
 

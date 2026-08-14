@@ -18,6 +18,8 @@
 #include <rclcpp/serialization.hpp>
 #include <rclcpp/serialized_message.hpp>
 
+#include <voxelcodec_msgs/msg/ddil_stats.hpp>
+
 namespace
 {
 
@@ -203,8 +205,18 @@ public:
       declare_parameter<std::vector<std::string>>("relay_topics", std::vector<std::string>{});
     const auto bypass_entries =
       declare_parameter<std::vector<std::string>>("bypass_topics", std::vector<std::string>{});
+    const auto stats_topic = declare_parameter<std::string>("stats_topic", "");
 
     token_bucket_ = std::make_shared<TokenBucket>(bandwidth_kbps_);
+
+    // Empty (the default) disables this -- bandwidth/loss stats otherwise only
+    // ever reach RCLCPP_INFO console logs, which land in ~/.ros/log/ but never
+    // in a bag, making baseline-vs-vxch bandwidth comparison impossible from
+    // recorded data alone.
+    if (!stats_topic.empty()) {
+      const auto stats_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
+      stats_pub_ = create_publisher<voxelcodec_msgs::msg::DdilStats>(stats_topic, stats_qos);
+    }
 
     // Register parameter change handler
     param_cb_ = add_on_set_parameters_callback(
@@ -414,6 +426,21 @@ private:
       get_logger(),
       "stats | rcvd=%lu  sent=%lu (%lu KB)  dropped=%lu  deduped=%lu  queued=%zu",
       received, sent, kb_sent, dropped, deduped, queue_depth);
+
+    if (stats_pub_) {
+      voxelcodec_msgs::msg::DdilStats msg;
+      msg.header.stamp = get_clock()->now();
+      msg.bandwidth_kbps = bandwidth_kbps_;
+      msg.loss_pct = loss_pct_;
+      msg.delay_ms = delay_ms_;
+      msg.msgs_received = received;
+      msg.msgs_sent = sent;
+      msg.msgs_dropped = dropped;
+      msg.msgs_deduped = deduped;
+      msg.bytes_sent = bytes_sent_.load(std::memory_order_relaxed);
+      msg.queue_depth = static_cast<uint32_t>(queue_depth);
+      stats_pub_->publish(msg);
+    }
   }
 
   rcl_interfaces::msg::SetParametersResult on_param_change(
@@ -446,6 +473,7 @@ private:
   std::vector<std::shared_ptr<rclcpp::GenericSubscription>> subscriptions_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_;
   rclcpp::TimerBase::SharedPtr stats_timer_;
+  rclcpp::Publisher<voxelcodec_msgs::msg::DdilStats>::SharedPtr stats_pub_;
 
   BandQueue queue_;
   std::mutex queue_mutex_;

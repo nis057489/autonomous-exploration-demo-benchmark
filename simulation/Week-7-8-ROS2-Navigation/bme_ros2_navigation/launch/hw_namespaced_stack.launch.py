@@ -28,6 +28,7 @@ merged topic back in.
 """
 
 import copy
+import datetime
 import os
 import tempfile
 
@@ -36,6 +37,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     GroupAction,
     IncludeLaunchDescription,
     OpaqueFunction,
@@ -327,6 +329,7 @@ def _team_map_share_actions(
             "ROS_STATIC_PEERS": f"{laptop_ip};{peer['ip']}",
         }
         seed = 42 + i
+        stats_topic = f"/{namespace}/incoming/{peer_name}/ddil_stats"
 
         if map_transport == "vxch":
             robot_ddil_base = f"/{namespace}/incoming/{peer_name}"
@@ -352,6 +355,7 @@ def _team_map_share_actions(
                         "delay_ms": delay_ms,
                         "rng_seed": seed,
                         "relay_topics": relay_topics,
+                        "stats_topic": stats_topic,
                         "use_sim_time": False,
                     }],
                 )
@@ -388,6 +392,7 @@ def _team_map_share_actions(
                             f"/{peer_name}/map /{namespace}/incoming/{peer_name}/map"
                             " nav_msgs/msg/OccupancyGrid reliable"
                         ],
+                        "stats_topic": stats_topic,
                         "use_sim_time": False,
                     }],
                 )
@@ -503,6 +508,9 @@ def _create_actions(context):
     loss_pct = float(LaunchConfiguration("loss_pct").perform(context))
     delay_ms = float(LaunchConfiguration("delay_ms").perform(context))
     haar_levels = int(LaunchConfiguration("haar_levels").perform(context))
+    bag_enabled = LaunchConfiguration("bag_enabled").perform(context).lower() in (
+        "1", "true", "yes", "on"
+    )
     laptop_ip = os.environ.get("VIZ_LAPTOP_IP", "192.168.100.20")
 
     output_dir = tempfile.mkdtemp(prefix=f"bme_hw_{namespace}_")
@@ -707,6 +715,52 @@ def _create_actions(context):
         )
     )
 
+    # ── Bag recording ────────────────────────────────────────────────────────
+    # Just enough to replay/compare a baseline vs vxch run offline, entirely
+    # local to this robot (no laptop/RViz dependency, so DDS discovery
+    # flakiness on that link can't affect the recorded data): this robot's own
+    # map, what it ends up believing about each peer (direct relay in baseline,
+    # decoded VXCH bands in vxch -- see _team_map_share_actions), the fused
+    # result that actually drives navigation, exploration behavior/coverage,
+    # and each peer link's bandwidth/loss/drop counters (ddil_stats -- see
+    # the stats_topic param passed to ddil_proxy_node above, transport-
+    # agnostic since baseline bandwidth is just as worth comparing). VXCH
+    # band/manifest topics are listed unconditionally -- in baseline mode
+    # they simply don't exist, so `ros2 bag record` just never sees anything
+    # on them.
+    if bag_enabled:
+        bag_topics = [
+            f"/{namespace}/map",
+            f"/{namespace}/nav_map",
+            f"/{namespace}/team_map_ddil",
+            f"/{namespace}/odom",
+            f"/{namespace}/explore/frontiers",
+            f"/{namespace}/explore/traversed_path",
+            "/tf",
+            "/tf_static",
+        ]
+        if map_transport == "vxch":
+            bag_topics.append(f"/{namespace}/vxch/map/manifest")
+            bag_topics.extend(f"/{namespace}/vxch/map/band_{k}" for k in range(haar_levels + 1))
+        for peer in peers:
+            peer_name = peer["name"]
+            bag_topics.append(f"/{namespace}/incoming/{peer_name}/map")
+            bag_topics.append(f"/{namespace}/incoming/{peer_name}/ddil_stats")
+            if map_transport == "vxch":
+                bag_topics.append(f"/{namespace}/incoming/{peer_name}/manifest")
+                bag_topics.extend(
+                    f"/{namespace}/incoming/{peer_name}/band_{k}" for k in range(haar_levels + 1))
+
+        bag_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        bag_dir = os.path.join(
+            os.path.expanduser("~"), "bags", f"{namespace}_{map_transport}_{bag_stamp}")
+        actions.append(
+            ExecuteProcess(
+                cmd=["ros2", "bag", "record", "-o", bag_dir, *bag_topics],
+                output="screen",
+            )
+        )
+
     return actions
 
 
@@ -746,5 +800,9 @@ def generate_launch_description():
         DeclareLaunchArgument("loss_pct", default_value="0.0"),
         DeclareLaunchArgument("delay_ms", default_value="0"),
         DeclareLaunchArgument("haar_levels", default_value="4"),
+        DeclareLaunchArgument(
+            "bag_enabled", default_value="true",
+            description="true = record this robot's bags to ~/bags/ (see the Bag recording "
+                        "block in _create_actions)"),
         OpaqueFunction(function=_create_actions),
     ])

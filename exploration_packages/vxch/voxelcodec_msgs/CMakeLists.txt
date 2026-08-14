@@ -15,6 +15,7 @@ set(msg_files
   "msg/VoxelChannelDescriptor.msg"
   "msg/VoxelManifest.msg"
   "msg/VoxelChannel.msg"
+  "msg/DdilStats.msg"
 )
 
 set(srv_files
