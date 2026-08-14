@@ -248,10 +248,10 @@ frontier_explorer:
     frontier_suppression_no_progress_timeout_s: 20.0
 
     # Minimum distance_remaining improvement in meters required to count as progress.
-    frontier_suppression_progress_epsilon_m: 0.25
+    frontier_suppression_progress_epsilon_m: 0.2
 
     # Delay suppression activation during startup so late navigation bring-up does not poison frontier memory.
-    frontier_suppression_startup_grace_period_s: 15.0
+    frontier_suppression_startup_grace_period_s: 60.0
 
     # Maximum number of tracked failed frontier attempt records kept in memory.
     frontier_suppression_max_attempt_records: 256
