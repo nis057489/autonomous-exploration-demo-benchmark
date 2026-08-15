@@ -293,7 +293,6 @@ fi
 if [[ -n "${ROBOT_ID}" ]]; then
   # Build this robot's peer list from ROBOT_HOSTS, excluding itself.
   PEERS=""
-  PEER_NAMES=()
   if [[ -n "${ROBOT_HOSTS}" ]]; then
     IFS=',' read -ra _robot_hosts <<< "${ROBOT_HOSTS}"
     for _host in "${_robot_hosts[@]}"; do
@@ -302,7 +301,6 @@ if [[ -n "${ROBOT_ID}" ]]; then
       _host_name="${_host%%@*}"
       if [[ "${_host_name}" != "${ROBOT_ID}" ]]; then
         PEERS+="${PEERS:+,}${_host}"
-        PEER_NAMES+=("${_host_name}")
       fi
     done
   fi
@@ -320,37 +318,16 @@ if [[ -n "${ROBOT_ID}" ]]; then
     # Redirect this run's ROS node logs here too -- ddil_proxy_node's periodic
     # "stats | rcvd=... sent=..." lines (bytes actually sent per link) and
     # occupancy_grid_vxch_node's "encode bands [...] total=... KB" lines
-    # (encoded size before DDIL throttling, vxch runs only) give a running
-    # summary for free, but the actual VoxelChannel/VoxelManifest traffic is
-    # bagged below too so it can be replayed/inspected message-by-message.
+    # (encoded size before DDIL throttling, vxch runs only) already have
+    # exactly what we need for the bandwidth comparison, at zero extra
+    # recording cost -- no reason to duplicate that into a topic/bag.
     export ROS_LOG_DIR="${RUN_DIR}/ros_logs"
     echo "Recording metrics to ${RUN_DIR} (RECORD_METRICS=true)"
 
     # Path length: traversed_path already accumulates the full path as one
     # growing nav_msgs/Path, deduplicated by movement distance -- small and
     # low-rate, no need to also bag /tf or /odom for this.
-    BAG_TOPICS=("/${ROBOT_ID}/explore/traversed_path")
-
-    # VXCH map transport: this robot's own encoded bands/manifest (what it
-    # sends to peers) plus, per peer, the bands/manifest this robot actually
-    # received after DDIL throttling -- these are the topics the robots are
-    # communicating over, so bag them to have the real traffic on hand
-    # instead of just the log-line summaries.
-    if [[ "${MAP_TRANSPORT}" == "vxch" ]]; then
-      for ((band = 0; band <= HAAR_LEVELS; band++)); do
-        BAG_TOPICS+=("/${ROBOT_ID}/vxch/map/band_${band}")
-      done
-      BAG_TOPICS+=("/${ROBOT_ID}/vxch/map/manifest")
-
-      for peer_name in "${PEER_NAMES[@]}"; do
-        for ((band = 0; band <= HAAR_LEVELS; band++)); do
-          BAG_TOPICS+=("/${ROBOT_ID}/incoming/${peer_name}/band_${band}")
-        done
-        BAG_TOPICS+=("/${ROBOT_ID}/incoming/${peer_name}/manifest")
-      done
-    fi
-
-    ros2 bag record -o "${RUN_DIR}/bag" "${BAG_TOPICS[@]}" \
+    ros2 bag record -o "${RUN_DIR}/bag" "/${ROBOT_ID}/explore/traversed_path" \
       >"${RUN_DIR}/bag_record.log" 2>&1 &
     METRICS_PIDS+=("$!")
 

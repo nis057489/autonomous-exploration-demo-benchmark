@@ -69,9 +69,7 @@ done
 echo
 echo "All runs pulled into ${LOCAL_OUT_DIR}/<robot_id>/<timestamp>_<transport>_<robot_id>/"
 echo "Each run directory contains:"
-echo "  bag/            -- rosbag with /explore/traversed_path (path length) and, on"
-echo "                     vxch runs, the vxch/map + incoming/<peer> band_*/manifest"
-echo "                     topics (the actual map traffic sent/received)"
+echo "  bag/            -- rosbag with /explore/traversed_path (path length)"
 echo "  ros_logs/       -- ROS node logs, incl. ddil_proxy_node stats (bytes actually"
 echo "                     sent per link) and occupancy_grid_vxch_node stats (encoded"
 echo "                     size before DDIL throttling, vxch runs only)"
