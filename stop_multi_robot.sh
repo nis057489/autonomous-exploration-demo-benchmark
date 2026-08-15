@@ -18,6 +18,8 @@ if [[ "${1:-}" == "--force" ]]; then
   FORCE=1
 fi
 
+./set_wifi_bandwidth.sh clear
+
 for ip in "${IPS[@]}"; do
   echo "==> Stopping session on ${ip}"
   if [[ "${FORCE}" -eq 1 ]]; then
