@@ -1,0 +1,18 @@
+{
+    "good": {
+        "description": "Baseline wifi, no artificial constraint",
+        "rate": "250mbps",
+        "both_directions": false,
+        "viz_kbps": 300000
+    },
+    "degraded": {
+        "description": "Reduced-bandwidth link, still usable for control traffic",
+        "rate": "5mbps",
+        "both_directions": true
+    },
+    "denied": {
+        "description": "Severely constrained link, worst case for map transport",
+        "rate": "1mbps",
+        "both_directions": true
+    }
+}
