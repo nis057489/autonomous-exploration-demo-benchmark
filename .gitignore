@@ -27,3 +27,4 @@ __pycache__/
 Thumbs.db
 logs/
 experiment_runs/
+figures/
