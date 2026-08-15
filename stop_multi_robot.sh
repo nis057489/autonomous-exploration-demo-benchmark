@@ -11,7 +11,7 @@ SSH_USER="ubuntu"
 SSH_KEY="${HOME}/.ssh/lenovo_laptop"
 SSH_OPTS=(-o ConnectTimeout=10 -i "${SSH_KEY}")
 TMUX_SESSION="exploration"
-IPS=(192.168.100.108 192.168.100.135 192.168.100.150)
+IPS=(192.168.100.108 192.168.100.135 192.168.100.114)
 
 FORCE=0
 if [[ "${1:-}" == "--force" ]]; then
