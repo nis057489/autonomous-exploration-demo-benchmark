@@ -17,6 +17,10 @@ set -euo pipefail
 # Usage: ./replay_compare.sh [rate]
 #   rate   Playback speed multiplier (default 8).
 #
+# Each side's bag playback loops automatically (ros2 bag play --loop) so it
+# restarts from the beginning once it reaches the end, until the rviz window
+# is closed.
+#
 # By default the latest baseline/vxch run is picked per robot. To compare
 # specific (e.g. older) runs instead, set BASELINE_RUN_OVERRIDE and/or
 # VXCH_RUN_OVERRIDE to a comma-separated robot:run_dir_name list, e.g.:
@@ -164,7 +168,7 @@ run_side() {
   inner="$(build_inner_cmd bags_ref)"
   inner+="
 echo 'playing back ${#bags_ref[@]} bag(s) for ${condition} at ${RATE}x...'
-ros2 bag play \"\${inputs[@]}\" -r ${RATE} &
+ros2 bag play \"\${inputs[@]}\" -r ${RATE} --loop &
 PLAY_PID=\$!
 rviz2 -d /rviz/real.rviz -t '${condition}' -qwindowgeometry '${geometry}' &
 RVIZ_PID=\$!
