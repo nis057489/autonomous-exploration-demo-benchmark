@@ -271,6 +271,7 @@ check_pkg slam_toolbox
 check_pkg nav2_bringup
 check_pkg bme_ros2_navigation
 ensure_frontier_exploration_ros2
+sync
 
 if [[ "${LOCAL_BRINGUP}" == true ]]; then
   check_pkg turtlebot3_bringup
