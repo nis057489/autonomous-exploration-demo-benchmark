@@ -143,3 +143,5 @@ echo "  ssh -i ${SSH_KEY} ${SSH_USER}@192.168.100.108 -t tmux attach -t ${TMUX_S
 echo "(Ctrl-b d to detach without stopping it.)"
 echo
 echo "Stop everything with: ./stop_multi_robot.sh"
+
+./set_wifi_bandwidth.sh apply --profile degraded --delay-s 100

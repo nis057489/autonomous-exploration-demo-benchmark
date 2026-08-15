@@ -16,9 +16,27 @@ set -euo pipefail
 # additionally `kmod-ifb` for --both-directions.
 #
 # Usage:
-#   ./set_wifi_bandwidth.sh apply <rate>[bps|kbps|mbps|gbps] [--both-directions] [--viz-kbps <n>] [--viz-ip <ip>]
-#   ./set_wifi_bandwidth.sh apply --profile <name> [--viz-kbps <n>] [--viz-ip <ip>]
+#   ./set_wifi_bandwidth.sh apply <rate>[bps|kbps|mbps|gbps] [--both-directions] [--viz-kbps <n>] [--viz-ip <ip>] [--delay-s <n>]
+#   ./set_wifi_bandwidth.sh apply --profile <name> [--viz-kbps <n>] [--viz-ip <ip>] [--delay-s <n>]
 #   ./set_wifi_bandwidth.sh clear
+#
+# --delay-s <n>: sleep n seconds (locally, before touching the router) prior
+# to applying shaping. Because this shapes the *entire* AP link -- ROS
+# control/discovery traffic included, not just the map-transport messages
+# ddil_proxy_node sends -- applying it while robots are still mid-launch can
+# clip DDS discovery's own (bursty, multicast) SPDP/SEDP traffic. FastDDS
+# doesn't reliably retry a discovery handshake that failed at startup, so a
+# robot pair that never finished discovering each other under early shaping
+# can stay silently unmatched (0 messages, both directions) for the rest of
+# that process's lifetime -- indistinguishable from the map link itself
+# being too slow unless you check ddil_proxy_node's rcvd/dropped/queued
+# counters (a starved-but-connected link shows queued/dropped growing;
+# never-discovered peers show everything at a flat 0 forever). Give robots
+# time to fully launch and discover each other before shaping kicks in --
+# start high (60-90s covers slow colcon-rebuilt Pi 4 boots) and dial down
+# once you've confirmed discovery normally completes sooner for your setup
+# (e.g. watch ros_logs/ddil_proxy_node_*.log for each peer's first nonzero
+# rcvd= line). Default 0 (no delay, current behavior).
 #
 # --profile looks <name> up in wifi_profiles.json (rate + both_directions +
 # optional viz_kbps), alongside this script. Flags on the command line
@@ -50,6 +68,7 @@ WIFI_IFACE="${WIFI_IFACE:-phy1-ap0}"
 IFB_IFACE="ifb0"
 VIZ_IP="${VIZ_IP:-${VIZ_LAPTOP_IP:-192.168.100.20}}"
 VIZ_KBPS="${VIZ_KBPS:-0}"  # 0 = no reserved viz lane (default, unchanged behavior)
+DELAY_S=0  # 0 = apply immediately (default, unchanged behavior); see --delay-s above
 
 SSH_OPTS=(-o ConnectTimeout=10)
 [[ -n "${ROUTER_SSH_KEY}" ]] && SSH_OPTS+=(-i "${ROUTER_SSH_KEY}")
@@ -57,7 +76,7 @@ SSH_OPTS=(-o ConnectTimeout=10)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILES_FILE="${SCRIPT_DIR}/wifi_profiles.json"
 
-USAGE="Usage: $0 apply <rate>[bps|kbps|mbps|gbps] [--both-directions] [--viz-kbps <n>] [--viz-ip <ip>] | apply --profile <name> [--viz-kbps <n>] [--viz-ip <ip>] | clear"
+USAGE="Usage: $0 apply <rate>[bps|kbps|mbps|gbps] [--both-directions] [--viz-kbps <n>] [--viz-ip <ip>] [--delay-s <n>] | apply --profile <name> [--viz-kbps <n>] [--viz-ip <ip>] [--delay-s <n>] | clear"
 
 ACTION="${1:-}"
 
@@ -109,6 +128,10 @@ if [[ "${ACTION}" == "apply" ]]; then
         VIZ_IP="${EXTRA_ARGS[1]:-}"
         EXTRA_ARGS=("${EXTRA_ARGS[@]:2}")
         ;;
+      --delay-s)
+        DELAY_S="${EXTRA_ARGS[1]:-}"
+        EXTRA_ARGS=("${EXTRA_ARGS[@]:2}")
+        ;;
       *)
         echo "${USAGE}" >&2
         echo "Unrecognized argument: ${EXTRA_ARGS[0]}" >&2
@@ -126,6 +149,11 @@ if [[ "${ACTION}" == "apply" ]]; then
     echo "Note: --viz-kbps only has an effect together with --both-directions" >&2
     echo "(only the ingress/robot->router leg is shaped otherwise, so a wired" >&2
     echo "viz laptop's traffic never touches this queue to begin with)." >&2
+  fi
+  if ! [[ "${DELAY_S}" =~ ^[0-9]+$ ]]; then
+    echo "${USAGE}" >&2
+    echo "--delay-s must be a non-negative integer (got '${DELAY_S}')." >&2
+    exit 1
   fi
 
   # Bare numbers default to kbps for backward compatibility. Everything is
@@ -231,6 +259,11 @@ DIR_DESC="router->robot only"
 [[ ${BOTH_DIRECTIONS} -eq 1 ]] && DIR_DESC="both directions"
 VIZ_DESC=""
 [[ "${VIZ_KBPS}" -gt 0 ]] && [[ ${BOTH_DIRECTIONS} -eq 1 ]] && VIZ_DESC=", +${VIZ_KBPS}kbit reserved for ${VIZ_IP}"
+if [[ "${DELAY_S}" -gt 0 ]]; then
+  echo "==> Waiting ${DELAY_S}s before shaping (let DDS discovery settle first)"
+  sleep "${DELAY_S}"
+fi
+
 echo "==> Limiting ${WIFI_IFACE} on ${ROUTER_IP} to ${RATE_KBPS}kbit (${DIR_DESC}${VIZ_DESC})"
 remote "${apply_cmd}"
 echo "Done."
