@@ -16,16 +16,19 @@ via `distrobox-host-exec`.
 """
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
-import tkinter as tk
 from datetime import datetime
+import tkinter as tk
 from tkinter import ttk, messagebox
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 RUNS_DIR = os.path.join(PROJECT_ROOT, "experiment_runs")
+FIGURES_DIR = os.path.join(PROJECT_ROOT, "figures")
 REPLAY_SCRIPT = os.path.join(PROJECT_ROOT, "replay_compare.sh")
+FIGURE_SCRIPT = os.path.join(PROJECT_ROOT, "generate_comparison_figure.py")
 
 RUN_DIR_RE = re.compile(r"^(\d{8}_\d{6})_(baseline|vxch)_(\w+)$")
 SESSION_GAP_SECONDS = 90  # runs across robots within this gap = one session
@@ -127,6 +130,7 @@ class ReplayGUI(tk.Tk):
         self.title("Replay Compare")
         self.geometry("760x560")
         self.proc = None
+        self.fig_proc = None
 
         sessions = scan_runs()
         all_robots = sorted(os.listdir(RUNS_DIR)) if os.path.isdir(RUNS_DIR) else []
@@ -162,6 +166,9 @@ class ReplayGUI(tk.Tk):
 
         self.stop_btn = ttk.Button(controls, text="Stop", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=(6, 0))
+
+        self.figure_btn = ttk.Button(controls, text="Generate Figure", command=self.generate_figure)
+        self.figure_btn.pack(side="left", padx=(12, 0))
 
         ttk.Button(controls, text="Refresh runs", command=self.refresh).pack(side="right")
 
@@ -261,6 +268,82 @@ class ReplayGUI(tk.Tk):
             self.proc.terminate()
         except ProcessLookupError:
             pass
+
+    def generate_figure(self):
+        """Produce the bandwidth/coverage comparison figure for whichever
+        baseline and vxch sessions are currently selected in the pickers
+        (defaults to the latest of each, since each RunPicker preselects
+        row 0 and sessions are sorted newest first)."""
+        if self.fig_proc is not None:
+            messagebox.showinfo("Already running", "A figure is already being generated.")
+            return
+
+        baseline_session = self.baseline_picker.selected_session()
+        vxch_session = self.vxch_picker.selected_session()
+        if not baseline_session or not vxch_session:
+            messagebox.showerror("No selection", "Select a baseline run and a vxch run first.")
+            return
+
+        def bag_args(session):
+            return [
+                f"{robot}={os.path.join(RUNS_DIR, robot, run_dir, 'bag')}"
+                for robot, run_dir in session["runs"].items()
+            ]
+
+        os.makedirs(FIGURES_DIR, exist_ok=True)
+        out_name = f"compare_{baseline_session['ts'].strftime('%Y%m%d_%H%M%S')}_vs_{vxch_session['ts'].strftime('%Y%m%d_%H%M%S')}.png"
+        out_path = os.path.join(FIGURES_DIR, out_name)
+
+        # Always "python3" (never sys.executable): this command runs inside
+        # jazzy_env (rosbag2_py/rclpy live there, not on the host), either
+        # directly if replay_gui.py itself is already in-container, or via
+        # the distrobox wrapper below otherwise -- sys.executable would be
+        # the *host* interpreter in that second case, which lacks rosbag2_py.
+        py_cmd = (
+            ["python3", FIGURE_SCRIPT, "--baseline"] + bag_args(baseline_session)
+            + ["--vxch"] + bag_args(vxch_session) + ["--out", out_path]
+        )
+
+        if in_container():
+            cmd = py_cmd
+        else:
+            # generate_comparison_figure.py needs rosbag2_py/rclpy, only
+            # importable inside jazzy_env, and only via a login shell (its
+            # .bashrc.d sources the ROS setup) -- see FIGURE_SCRIPT's docstring.
+            quoted = " ".join(shlex.quote(part) for part in py_cmd)
+            cmd = ["distrobox", "enter", "jazzy_env", "--", "bash", "-lc", quoted]
+
+        self.append_log(f"$ generate figure: baseline={baseline_session['label']} vxch={vxch_session['label']}\n")
+        self.figure_btn.configure(state="disabled")
+
+        threading.Thread(target=self._run_figure_process, args=(cmd, out_path), daemon=True).start()
+
+    def _run_figure_process(self, cmd, out_path):
+        try:
+            self.fig_proc = subprocess.Popen(
+                cmd, cwd=PROJECT_ROOT,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+            )
+        except FileNotFoundError as e:
+            self.after(0, lambda: self._finish_figure(f"Failed to launch: {e}\n", None))
+            return
+
+        for line in self.fig_proc.stdout:
+            self.after(0, self.append_log, line)
+        returncode = self.fig_proc.wait()
+        message = f"[figure generation exited with code {returncode}]\n"
+        self.after(0, lambda: self._finish_figure(message, out_path if returncode == 0 else None))
+
+    def _finish_figure(self, message, out_path):
+        self.append_log(message)
+        self.figure_btn.configure(state="normal")
+        self.fig_proc = None
+        if out_path and os.path.isfile(out_path):
+            self.append_log(f"Figure saved to {out_path}\n")
+            try:
+                subprocess.Popen(["xdg-open", out_path])
+            except FileNotFoundError:
+                pass
 
     def on_close(self):
         if self.proc is not None:
