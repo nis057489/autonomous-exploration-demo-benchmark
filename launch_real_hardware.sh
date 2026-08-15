@@ -319,18 +319,23 @@ if [[ -n "${ROBOT_ID}" ]]; then
     RUN_DIR="${PROJECT_ROOT}/experiment_runs/$(date +%Y%m%d_%H%M%S)_${MAP_TRANSPORT}_${ROBOT_ID}"
     mkdir -p "${RUN_DIR}"
     # Redirect this run's ROS node logs here too -- ddil_proxy_node's periodic
-    # "stats | rcvd=... sent=..." lines (bytes actually sent per link) and
-    # occupancy_grid_vxch_node's "encode bands [...] total=... KB" lines
-    # (encoded size before DDIL throttling, vxch runs only) give a running
-    # summary for free, but the actual VoxelChannel/VoxelManifest traffic is
-    # bagged below too so it can be replayed/inspected message-by-message.
+    # "stats | rcvd=... sent=..." lines and occupancy_grid_vxch_node's
+    # "encode bands [...] total=... KB" lines (vxch runs only) give a running
+    # summary for free, but don't rely on them for bandwidth numbers -- the
+    # actual wire traffic (OccupancyGrid for baseline, VoxelChannel/Manifest
+    # for vxch) is bagged below too, so exact per-topic byte totals can be
+    # read from `ros2 bag info` instead.
     export ROS_LOG_DIR="${RUN_DIR}/ros_logs"
     echo "Recording metrics to ${RUN_DIR} (RECORD_METRICS=true)"
 
     # Path length: traversed_path already accumulates the full path as one
     # growing nav_msgs/Path, deduplicated by movement distance -- small and
     # low-rate, no need to also bag /tf or /odom for this.
-    BAG_TOPICS=("/${ROBOT_ID}/explore/traversed_path")
+    #
+    # nav_map is the per-robot composite (local SLAM + fused team map),
+    # already published in the shared "map" frame regardless of transport,
+    # so no /tf is needed for it to render in replay/rviz either.
+    BAG_TOPICS=("/${ROBOT_ID}/explore/traversed_path" "/${ROBOT_ID}/nav_map")
 
     # VXCH map transport: this robot's own encoded bands/manifest (what it
     # sends to peers) plus, per peer, the bands/manifest this robot actually
@@ -348,6 +353,19 @@ if [[ -n "${ROBOT_ID}" ]]; then
           BAG_TOPICS+=("/${ROBOT_ID}/incoming/${peer_name}/band_${band}")
         done
         BAG_TOPICS+=("/${ROBOT_ID}/incoming/${peer_name}/manifest")
+      done
+    else
+      # Baseline map transport: relays raw nav_msgs/OccupancyGrid instead of
+      # encoded bands (see hw_namespaced_stack.launch.py's per-peer relay
+      # setup), but it's the same shape -- this robot's own /map is what
+      # peers' ddil_proxy instances pull from ("sent"), and
+      # /incoming/<peer>/map is what this robot actually received after
+      # DDIL throttling. Bag both so bandwidth can be measured directly
+      # from `ros2 bag info` per-topic byte totals, the same way as vxch,
+      # rather than trusting ddil_proxy_node's in-process log counters.
+      BAG_TOPICS+=("/${ROBOT_ID}/map")
+      for peer_name in "${PEER_NAMES[@]}"; do
+        BAG_TOPICS+=("/${ROBOT_ID}/incoming/${peer_name}/map")
       done
     fi
 
