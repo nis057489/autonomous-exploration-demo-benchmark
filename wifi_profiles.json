@@ -7,7 +7,7 @@
     },
     "degraded": {
         "description": "Reduced-bandwidth link, still usable for control traffic",
-        "rate": "1mbps",
+        "rate": "2mbps",
         "both_directions": true
     },
     "denied": {
