@@ -5,6 +5,15 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+option(ENABLE_COVERAGE "Build with gcov instrumentation" OFF)
+if(ENABLE_COVERAGE)
+  if(NOT CMAKE_COMPILER_IS_GNUCXX AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "ENABLE_COVERAGE requires GCC or Clang")
+  endif()
+  add_compile_options(--coverage -O0 -g)
+  add_link_options(--coverage)
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -214,6 +223,63 @@ if(BUILD_TESTING)
   )
   if(TARGET test_ddil_stale_epoch)
     target_include_directories(test_ddil_stale_epoch PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  endif()
+
+  # ros_messages.cpp is pure struct<->msg conversion, no rclcpp::Node -- unlike
+  # the node .cpp files, it's already part of ${PROJECT_NAME} and safe to
+  # exercise directly.
+  ament_add_gtest(test_ros_messages
+    test/test_ros_messages.cpp
+  )
+  if(TARGET test_ros_messages)
+    target_link_libraries(test_ros_messages ${PROJECT_NAME})
+  endif()
+
+  # tile_scheduler.hpp holds occupancy_grid_vxch_node's pure tiling/fingerprint/
+  # scheduling logic -- no rclcpp::Node.
+  ament_add_gtest(test_tile_scheduler
+    test/test_tile_scheduler.cpp
+  )
+  if(TARGET test_tile_scheduler)
+    target_link_libraries(test_tile_scheduler ${PROJECT_NAME})
+  endif()
+
+  # tile_reconstructor.hpp holds vxch_occupancy_grid_node's pure tile-decode/
+  # reconstruction logic -- no rclcpp::Node.
+  ament_add_gtest(test_tile_reconstructor
+    test/test_tile_reconstructor.cpp
+  )
+  if(TARGET test_tile_reconstructor)
+    target_link_libraries(test_tile_reconstructor ${PROJECT_NAME})
+  endif()
+
+  # ddil_proxy_logic.hpp holds ddil_proxy_node's pure topic/relay parsing,
+  # token-bucket rate limiter, and priority band queue -- no rclcpp::Node.
+  ament_add_gtest(test_ddil_proxy_logic
+    test/test_ddil_proxy_logic.cpp
+  )
+  if(TARGET test_ddil_proxy_logic)
+    target_include_directories(test_ddil_proxy_logic PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    ament_target_dependencies(test_ddil_proxy_logic rclcpp voxelcodec_msgs)
+  endif()
+
+  # nav2_voxel_grid_logic.hpp holds nav2_voxel_grid_publisher's pure grid-spec
+  # math and message-building, no rclcpp::Node -- only buildable/testable when
+  # the optional nav2 deps that gate nav2_voxel_grid_publisher itself are present.
+  if(nav2_msgs_FOUND AND nav2_voxel_grid_FOUND)
+    ament_add_gtest(test_nav2_voxel_grid_logic
+      test/test_nav2_voxel_grid_logic.cpp
+    )
+    if(TARGET test_nav2_voxel_grid_logic)
+      target_link_libraries(test_nav2_voxel_grid_logic ${PROJECT_NAME})
+      ament_target_dependencies(test_nav2_voxel_grid_logic
+        geometry_msgs
+        nav_msgs
+        nav2_msgs
+        nav2_voxel_grid
+        sensor_msgs
+      )
+    endif()
   endif()
 endif()
 

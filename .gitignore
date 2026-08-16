@@ -1,5 +1,10 @@
 build/
 install/
+build-coverage/
+install-coverage/
+vxch_coverage_html/
+*.gcda
+*.gcno
 log/
 cmake-build-*/
 CMakeFiles/

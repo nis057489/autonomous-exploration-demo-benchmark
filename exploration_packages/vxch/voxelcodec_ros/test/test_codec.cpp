@@ -115,6 +115,40 @@ voxelcodec_ros::DecodedChannel decode_full(
   return voxelcodec_ros::decode_channel(descriptor, payload);
 }
 
+// Little-endian byte packers for building raw-le payloads by hand, mirroring
+// codec.cpp's own store_u16/store_u64 byte-by-byte approach (rather than
+// memcpy) so these tests don't quietly depend on the host being
+// little-endian for the multi-byte integer packing.
+void push_u16le(std::vector<std::uint8_t> & out, std::uint16_t v)
+{
+  out.push_back(static_cast<std::uint8_t>(v & 0xffU));
+  out.push_back(static_cast<std::uint8_t>((v >> 8U) & 0xffU));
+}
+
+void push_u32le(std::vector<std::uint8_t> & out, std::uint32_t v)
+{
+  for (int i = 0; i < 4; ++i) {out.push_back(static_cast<std::uint8_t>((v >> (i * 8U)) & 0xffU));}
+}
+
+void push_u64le(std::vector<std::uint8_t> & out, std::uint64_t v)
+{
+  for (int i = 0; i < 8; ++i) {out.push_back(static_cast<std::uint8_t>((v >> (i * 8U)) & 0xffU));}
+}
+
+void push_f32le(std::vector<std::uint8_t> & out, float v)
+{
+  std::uint32_t bits;
+  std::memcpy(&bits, &v, sizeof(bits));
+  push_u32le(out, bits);
+}
+
+void push_f64le(std::vector<std::uint8_t> & out, double v)
+{
+  std::uint64_t bits;
+  std::memcpy(&bits, &v, sizeof(bits));
+  push_u64le(out, bits);
+}
+
 }  // namespace
 
 TEST(VoxelCodecRos, DecodeStructuredChannels)
@@ -503,4 +537,790 @@ TEST(VoxelCodecRos, HaarVarintPackingSmallerThanFixedWidthForSmallCoefficients)
   EXPECT_LT(varint_total, fixed_total);
   // Fixed-width is exactly 4 bytes per coefficient, always -- no data-dependent variation.
   EXPECT_EQ(fixed_total, total_elements * 4);
+}
+
+// ── raw-le: the one encoding with no other test coverage at all ───────────
+
+TEST(VoxelCodecRos, DecodeRawLeAllDataTypes)
+{
+  {
+    SCOPED_TRACE("uint8");
+    const std::vector<std::uint8_t> values{0, 1, 200, 255};
+    ChannelDescriptor descriptor{
+        "v", "", voxelcodec_ros::kDataTypeUint8, voxelcodec_ros::kEncodingRawLE,
+        voxelcodec_ros::kCompressionNone, 4, 0, 0, 0, {}};
+    const auto decoded = decode_full(descriptor, values);
+    const auto out = std::get<std::vector<std::uint8_t> >(decoded.values);
+    EXPECT_EQ(out, values);
+  }
+  {
+    SCOPED_TRACE("uint16");
+    const std::vector<std::uint16_t> values{0, 1, 500, 65535};
+    std::vector<std::uint8_t> raw;
+    for (const auto v : values) {push_u16le(raw, v);}
+    ChannelDescriptor descriptor{
+        "v", "", voxelcodec_ros::kDataTypeUint16, voxelcodec_ros::kEncodingRawLE,
+        voxelcodec_ros::kCompressionNone, 4, 0, 0, 0, {}};
+    const auto decoded = decode_full(descriptor, raw);
+    const auto out = std::get<std::vector<std::uint16_t> >(decoded.values);
+    EXPECT_EQ(out, values);
+  }
+  {
+    SCOPED_TRACE("uint32");
+    const std::vector<std::uint32_t> values{0, 1, 100000, 4294967295U};
+    std::vector<std::uint8_t> raw;
+    for (const auto v : values) {push_u32le(raw, v);}
+    ChannelDescriptor descriptor{
+        "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingRawLE,
+        voxelcodec_ros::kCompressionNone, 4, 0, 0, 0, {}};
+    const auto decoded = decode_full(descriptor, raw);
+    const auto out = std::get<std::vector<std::uint32_t> >(decoded.values);
+    EXPECT_EQ(out, values);
+  }
+  {
+    SCOPED_TRACE("uint64");
+    const std::vector<std::uint64_t> values{
+        0, 1, 10000000000ULL, 18446744073709551615ULL};
+    std::vector<std::uint8_t> raw;
+    for (const auto v : values) {push_u64le(raw, v);}
+    ChannelDescriptor descriptor{
+        "v", "", voxelcodec_ros::kDataTypeUint64, voxelcodec_ros::kEncodingRawLE,
+        voxelcodec_ros::kCompressionNone, 4, 0, 0, 0, {}};
+    const auto decoded = decode_full(descriptor, raw);
+    const auto out = std::get<std::vector<std::uint64_t> >(decoded.values);
+    EXPECT_EQ(out, values);
+  }
+  {
+    SCOPED_TRACE("float32");
+    const std::vector<float> values{0.0F, 1.5F, -2.25F, 3.14159F};
+    std::vector<std::uint8_t> raw;
+    for (const auto v : values) {push_f32le(raw, v);}
+    ChannelDescriptor descriptor{
+        "v", "", voxelcodec_ros::kDataTypeFloat32, voxelcodec_ros::kEncodingRawLE,
+        voxelcodec_ros::kCompressionNone, 4, 0, 0, 0, {}};
+    const auto decoded = decode_full(descriptor, raw);
+    const auto out = std::get<std::vector<float> >(decoded.values);
+    ASSERT_EQ(out.size(), values.size());
+    for (std::size_t i = 0; i < values.size(); ++i) {EXPECT_FLOAT_EQ(out[i], values[i]);}
+  }
+  {
+    SCOPED_TRACE("float64");
+    const std::vector<double> values{0.0, 1.5, -2.25, 2.718281828};
+    std::vector<std::uint8_t> raw;
+    for (const auto v : values) {push_f64le(raw, v);}
+    ChannelDescriptor descriptor{
+        "v", "", voxelcodec_ros::kDataTypeFloat64, voxelcodec_ros::kEncodingRawLE,
+        voxelcodec_ros::kCompressionNone, 4, 0, 0, 0, {}};
+    const auto decoded = decode_full(descriptor, raw);
+    const auto out = std::get<std::vector<double> >(decoded.values);
+    ASSERT_EQ(out.size(), values.size());
+    for (std::size_t i = 0; i < values.size(); ++i) {EXPECT_DOUBLE_EQ(out[i], values[i]);}
+  }
+}
+
+TEST(VoxelCodecRos, DecodeRawLeAlignmentMismatchThrows)
+{
+  // 3 bytes doesn't divide evenly by uint16's 2-byte width.
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint16, voxelcodec_ros::kEncodingRawLE,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  const std::vector<std::uint8_t> raw{0x01, 0x02, 0x03};
+  EXPECT_THROW(decode_full(descriptor, raw), std::runtime_error);
+}
+
+// ── validate_descriptor / validate_manifest direct throw paths ────────────
+
+TEST(VoxelCodecRos, ValidateDescriptorRejectsUnsupportedDataType)
+{
+  ChannelDescriptor descriptor{
+      "v", "", "uint128", voxelcodec_ros::kEncodingRawLE,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  EXPECT_THROW(voxelcodec_ros::validate_descriptor(descriptor), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, ValidateDescriptorRejectsUnsupportedEncoding)
+{
+  ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, "run-length",
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  EXPECT_THROW(voxelcodec_ros::validate_descriptor(descriptor), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, ValidateDescriptorRejectsUnsupportedCompression)
+{
+  ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingRawLE,
+      "lz4", 1, 0, 0, 0, {}};
+  EXPECT_THROW(voxelcodec_ros::validate_descriptor(descriptor), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, ValidateDescriptorRejectsEmptyName)
+{
+  ChannelDescriptor descriptor{
+      "", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingRawLE,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  EXPECT_THROW(voxelcodec_ros::validate_descriptor(descriptor), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, ValidateManifestRejectsEmptyFormat)
+{
+  voxelcodec_ros::Manifest manifest;
+  manifest.format = "";
+  EXPECT_THROW(voxelcodec_ros::validate_manifest(manifest), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, ValidateManifestRejectsDuplicateChannelNames)
+{
+  voxelcodec_ros::Manifest manifest;
+  const ChannelDescriptor d{
+      "dup", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingRawLE,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  manifest.channels = {d, d};
+  EXPECT_THROW(voxelcodec_ros::validate_manifest(manifest), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, CompressPayloadRejectsUnsupportedCompression)
+{
+  EXPECT_THROW(
+    voxelcodec_ros::compress_payload("lz4", {1, 2, 3}), std::runtime_error);
+}
+
+// ── constant channel: remaining data types + missing-metadata throw ───────
+
+TEST(VoxelCodecRos, DecodeConstantChannelAllDataTypes)
+{
+  auto build = [](const char * data_type, const std::string & value) {
+    ChannelDescriptor descriptor{
+        "v", "", data_type, voxelcodec_ros::kEncodingConstant,
+        voxelcodec_ros::kCompressionNone, 3, 0, 0, 0,
+        {{voxelcodec_ros::kConstantValueKey, value}}};
+    return decode_full(descriptor, {});
+  };
+  {
+    const auto decoded = build(voxelcodec_ros::kDataTypeUint8, "7");
+    const auto out = std::get<std::vector<std::uint8_t> >(decoded.values);
+    EXPECT_EQ(out, (std::vector<std::uint8_t>{7, 7, 7}));
+  }
+  {
+    const auto decoded = build(voxelcodec_ros::kDataTypeUint16, "1000");
+    const auto out = std::get<std::vector<std::uint16_t> >(decoded.values);
+    EXPECT_EQ(out, (std::vector<std::uint16_t>{1000, 1000, 1000}));
+  }
+  {
+    const auto decoded = build(voxelcodec_ros::kDataTypeUint32, "70000");
+    const auto out = std::get<std::vector<std::uint32_t> >(decoded.values);
+    EXPECT_EQ(out, (std::vector<std::uint32_t>{70000, 70000, 70000}));
+  }
+  {
+    const auto decoded = build(voxelcodec_ros::kDataTypeUint64, "10000000000");
+    const auto out = std::get<std::vector<std::uint64_t> >(decoded.values);
+    EXPECT_EQ(out, (std::vector<std::uint64_t>{10000000000ULL, 10000000000ULL, 10000000000ULL}));
+  }
+  {
+    const auto decoded = build(voxelcodec_ros::kDataTypeFloat64, "2.5");
+    const auto out = std::get<std::vector<double> >(decoded.values);
+    ASSERT_EQ(out.size(), 3U);
+    EXPECT_DOUBLE_EQ(out[0], 2.5);
+  }
+}
+
+TEST(VoxelCodecRos, DecodeConstantChannelMissingMetadataThrows)
+{
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingConstant,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  EXPECT_THROW(decode_full(descriptor, {}), std::runtime_error);
+}
+
+// ── palette: remaining index types + all its error paths ──────────────────
+
+TEST(VoxelCodecRos, DecodePaletteChannelUint16Indices)
+{
+  ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingPalette,
+      voxelcodec_ros::kCompressionNone, 2, 0, 0, 0,
+      {{voxelcodec_ros::kPaletteValuesKey, "[10,20,30]"},
+       {voxelcodec_ros::kPaletteIndexTypeKey, voxelcodec_ros::kDataTypeUint16}}};
+  std::vector<std::uint8_t> raw;
+  push_u16le(raw, 2);
+  push_u16le(raw, 0);
+  const auto decoded = decode_full(descriptor, raw);
+  const auto out = std::get<std::vector<std::uint32_t> >(decoded.values);
+  EXPECT_EQ(out, (std::vector<std::uint32_t>{30, 10}));
+}
+
+TEST(VoxelCodecRos, DecodePaletteChannelUint32Indices)
+{
+  ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingPalette,
+      voxelcodec_ros::kCompressionNone, 2, 0, 0, 0,
+      {{voxelcodec_ros::kPaletteValuesKey, "[10,20,30]"},
+       {voxelcodec_ros::kPaletteIndexTypeKey, voxelcodec_ros::kDataTypeUint32}}};
+  std::vector<std::uint8_t> raw;
+  push_u32le(raw, 1);
+  push_u32le(raw, 2);
+  const auto decoded = decode_full(descriptor, raw);
+  const auto out = std::get<std::vector<std::uint32_t> >(decoded.values);
+  EXPECT_EQ(out, (std::vector<std::uint32_t>{20, 30}));
+}
+
+TEST(VoxelCodecRos, DecodePaletteChannelWrongDataTypeThrows)
+{
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint8, voxelcodec_ros::kEncodingPalette,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0,
+      {{voxelcodec_ros::kPaletteValuesKey, "[10]"},
+       {voxelcodec_ros::kPaletteIndexTypeKey, voxelcodec_ros::kDataTypeUint8}}};
+  EXPECT_THROW(decode_full(descriptor, {0}), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, DecodePaletteChannelMissingPaletteValuesThrows)
+{
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingPalette,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0,
+      {{voxelcodec_ros::kPaletteIndexTypeKey, voxelcodec_ros::kDataTypeUint8}}};
+  EXPECT_THROW(decode_full(descriptor, {0}), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, DecodePaletteChannelMissingIndexTypeThrows)
+{
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingPalette,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0,
+      {{voxelcodec_ros::kPaletteValuesKey, "[10]"}}};
+  EXPECT_THROW(decode_full(descriptor, {0}), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, DecodePaletteChannelUnsupportedIndexTypeThrows)
+{
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingPalette,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0,
+      {{voxelcodec_ros::kPaletteValuesKey, "[10]"},
+       {voxelcodec_ros::kPaletteIndexTypeKey, "uint64"}}};
+  EXPECT_THROW(decode_full(descriptor, {0}), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, DecodePaletteChannelIndexOutOfRangeThrows)
+{
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingPalette,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0,
+      {{voxelcodec_ros::kPaletteValuesKey, "[10,20]"},
+       {voxelcodec_ros::kPaletteIndexTypeKey, voxelcodec_ros::kDataTypeUint8}}};
+  EXPECT_THROW(decode_full(descriptor, {5}), std::runtime_error);
+}
+
+// ── delta-varint: error paths (happy path covered by DecodeStructuredChannels) ─
+
+TEST(VoxelCodecRos, DecodeDeltaVarintWrongDataTypeThrows)
+{
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint8, voxelcodec_ros::kEncodingDeltaVarint,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  EXPECT_THROW(decode_full(descriptor, {0}), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, DecodeDeltaVarintNegativeValueThrows)
+{
+  // Zigzag-decoding the single varint byte 0x01 yields -1 as the very first
+  // delta, so the running sum goes negative immediately.
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingDeltaVarint,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  EXPECT_THROW(decode_full(descriptor, {0x01}), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, DecodeDeltaVarintTrailingBytesThrows)
+{
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingDeltaVarint,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  // One value's worth of varint (0x00 -> delta 0) plus an unconsumed extra byte.
+  EXPECT_THROW(decode_full(descriptor, {0x00, 0x00}), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, ReadUvarintOverflowThrows)
+{
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingDeltaVarint,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  // 10 continuation bytes push the accumulated shift past 64 bits.
+  const std::vector<std::uint8_t> raw(10, 0x80);
+  EXPECT_THROW(decode_full(descriptor, raw), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, ReadUvarintTruncatedThrows)
+{
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingDeltaVarint,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  // Continuation bit set on the last (and only) byte -- buffer ends mid-varint.
+  EXPECT_THROW(decode_full(descriptor, {0x80}), std::runtime_error);
+}
+
+// ── byte-shuffle: remaining error paths ────────────────────────────────────
+
+TEST(VoxelCodecRos, DecodeByteShuffleWrongDataTypeThrows)
+{
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint8, voxelcodec_ros::kEncodingByteShuffle,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  EXPECT_THROW(decode_full(descriptor, {0}), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, DecodeByteShufflePayloadSizeMismatchThrows)
+{
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingByteShuffle,
+      voxelcodec_ros::kCompressionNone, 3, 0, 0, 0, {}};
+  // 3 elements need 12 bytes; give it 11.
+  EXPECT_THROW(decode_full(descriptor, std::vector<std::uint8_t>(11, 0)), std::runtime_error);
+}
+
+// ── 1D haar-wavelet: zero-levels passthrough + validation paths ───────────
+
+TEST(VoxelCodecRos, DecodeHaarWavelet1dZeroLevelsPassthrough)
+{
+  // haar_levels absent (defaults to 0) means no transform was ever applied --
+  // the coefficients are the raw values, just zigzag-varint packed.
+  const std::vector<std::uint32_t> values{5, 300, 0, 42};
+  std::vector<std::int64_t> coeffs(values.begin(), values.end());
+  const auto payload = voxelcodec_ros::zigzag_varint_encode(coeffs);
+
+  ChannelDescriptor descriptor;
+  descriptor.name = "v";
+  descriptor.data_type = voxelcodec_ros::kDataTypeUint32;
+  descriptor.encoding = voxelcodec_ros::kEncodingHaarWavelet;
+  descriptor.compression = voxelcodec_ros::kCompressionNone;
+  descriptor.metadata[voxelcodec_ros::kHaarOriginalLengthKey] = std::to_string(values.size());
+  // Deliberately no kHaarLevelsKey and no grid keys -> legacy 1D, levels=0.
+
+  const auto decoded = decode_full(descriptor, payload);
+  const auto out = std::get<std::vector<std::uint32_t> >(decoded.values);
+  EXPECT_EQ(out, values);
+}
+
+TEST(VoxelCodecRos, DecodeHaarWavelet1dWrongDataTypeThrows)
+{
+  ChannelDescriptor descriptor;
+  descriptor.name = "v";
+  descriptor.data_type = voxelcodec_ros::kDataTypeUint8;
+  descriptor.encoding = voxelcodec_ros::kEncodingHaarWavelet;
+  descriptor.compression = voxelcodec_ros::kCompressionNone;
+  EXPECT_THROW(decode_full(descriptor, {}), std::runtime_error);
+}
+
+// ── 2D haar-wavelet (non-progressive) validation paths ─────────────────────
+
+TEST(VoxelCodecRos, DecodeHaarWavelet2dWrongDataTypeThrows)
+{
+  auto descriptor = build_grid_descriptor(4, 4, 2);
+  descriptor.data_type = voxelcodec_ros::kDataTypeUint8;
+  EXPECT_THROW(decode_full(descriptor, {}), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, DecodeHaarWavelet2dMissingLevelsThrows)
+{
+  auto descriptor = build_grid_descriptor(4, 4, 2);
+  descriptor.metadata.erase(voxelcodec_ros::kHaarLevelsKey);
+  EXPECT_THROW(decode_full(descriptor, {}), std::runtime_error);
+}
+
+// ── 2D haar-wavelet progressive: missing-levels path ───────────────────────
+
+TEST(VoxelCodecRos, DecodeHaarProgressive2dMissingLevelsThrows)
+{
+  auto descriptor = build_grid_descriptor(4, 4, 2);
+  descriptor.metadata.erase(voxelcodec_ros::kHaarLevelsKey);
+  EXPECT_THROW(
+    voxelcodec_ros::decode_haar_progressive(descriptor, {}, 1), std::runtime_error);
+}
+
+// ── 1D haar-wavelet progressive: entirely untested via decode_haar_progressive
+// before this, since every other progressive test uses a 2D grid descriptor ──
+
+TEST(VoxelCodecRos, DecodeHaarProgressive1dFullAndPartial)
+{
+  constexpr int levels = 3;
+  const std::vector<std::uint32_t> values{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+
+  std::vector<std::int64_t> coeffs(values.begin(), values.end());
+  std::vector<std::size_t> smooth_lens(levels + 1);
+  smooth_lens[0] = values.size();
+  for (int i = 1; i <= levels; ++i) {smooth_lens[i] = (smooth_lens[i - 1] + 1) / 2;}
+  for (int i = 0; i < levels; ++i) {
+    voxelcodec_ros::haar_forward_level(coeffs, smooth_lens[i]);
+  }
+  const auto payload = voxelcodec_ros::zigzag_varint_encode(coeffs);
+
+  ChannelDescriptor descriptor;
+  descriptor.name = "wvmp_x";
+  descriptor.data_type = voxelcodec_ros::kDataTypeUint32;
+  descriptor.encoding = voxelcodec_ros::kEncodingHaarWavelet;
+  descriptor.compression = voxelcodec_ros::kCompressionNone;
+  descriptor.metadata[voxelcodec_ros::kHaarLevelsKey] = std::to_string(levels);
+  descriptor.metadata[voxelcodec_ros::kHaarOriginalLengthKey] = std::to_string(values.size());
+
+  // max_bands=0 takes the "full decode" branch.
+  {
+    const auto decoded = voxelcodec_ros::decode_haar_progressive(descriptor, payload, 0);
+    const auto out = std::get<std::vector<std::uint32_t> >(decoded.values);
+    EXPECT_EQ(out, values);
+  }
+  // max_bands beyond levels+1 also takes the "full decode" branch.
+  {
+    const auto decoded = voxelcodec_ros::decode_haar_progressive(descriptor, payload, 99);
+    const auto out = std::get<std::vector<std::uint32_t> >(decoded.values);
+    EXPECT_EQ(out, values);
+  }
+  // A genuine partial band count exercises the coarse-reconstruction branch.
+  {
+    const auto decoded = voxelcodec_ros::decode_haar_progressive(descriptor, payload, 2);
+    EXPECT_LT(decoded.descriptor.element_count, values.size());
+    EXPECT_GT(decoded.descriptor.element_count, 0U);
+  }
+  // max_bands=1 is the coarsest possible reconstruction.
+  {
+    const auto decoded = voxelcodec_ros::decode_haar_progressive(descriptor, payload, 1);
+    EXPECT_EQ(decoded.descriptor.element_count, smooth_lens[levels]);
+  }
+}
+
+// ── decompress_payload direct error paths ──────────────────────────────────
+
+TEST(VoxelCodecRos, DecompressPayloadUnsupportedCompressionThrows)
+{
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingRawLE,
+      "lz4", 1, 0, 0, 4, {}};
+  EXPECT_THROW(
+    voxelcodec_ros::decompress_payload(descriptor, {0, 0, 0, 0}), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, DecompressPayloadCorruptZstdThrows)
+{
+  ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingRawLE,
+      voxelcodec_ros::kCompressionZstd, 1, 0, 0, 4, {}};
+  const std::vector<std::uint8_t> garbage{0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01};
+  EXPECT_THROW(voxelcodec_ros::decompress_payload(descriptor, garbage), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, DecompressPayloadSizeMismatchThrows)
+{
+  const std::vector<std::uint8_t> raw_payload{1, 2, 3, 4, 5, 6, 7, 8};
+  const auto compressed =
+    voxelcodec_ros::compress_payload(voxelcodec_ros::kCompressionZstd, raw_payload);
+
+  ChannelDescriptor descriptor;
+  descriptor.name = "v";
+  descriptor.data_type = voxelcodec_ros::kDataTypeUint32;
+  descriptor.encoding = voxelcodec_ros::kEncodingRawLE;
+  descriptor.compression = voxelcodec_ros::kCompressionZstd;
+  // Larger (not smaller) than the real size: a smaller declared size would
+  // make the destination buffer too small and fail inside ZSTD_decompress
+  // itself (the ZSTD_isError branch), never reaching the size-mismatch check.
+  descriptor.uncompressed_size = raw_payload.size() + 1;
+
+  EXPECT_THROW(voxelcodec_ros::decompress_payload(descriptor, compressed), std::runtime_error);
+}
+
+// ── encode_archive error paths ──────────────────────────────────────────────
+
+TEST(VoxelCodecRos, EncodeArchiveChannelCountMismatchThrows)
+{
+  voxelcodec_ros::Manifest manifest;
+  manifest.channels = {ChannelDescriptor{
+      "a", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingRawLE,
+      voxelcodec_ros::kCompressionNone, 0, 0, 0, 0, {}}};
+  EXPECT_THROW(voxelcodec_ros::encode_archive(manifest, {}), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, EncodeArchiveChannelOrderingMismatchThrows)
+{
+  voxelcodec_ros::Manifest manifest;
+  const ChannelDescriptor a{
+      "a", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingRawLE,
+      voxelcodec_ros::kCompressionNone, 0, 0, 0, 0, {}};
+  manifest.channels = {a};
+  EncodedChannel wrong_name{a, {}};
+  wrong_name.descriptor.name = "not-a";
+  EXPECT_THROW(voxelcodec_ros::encode_archive(manifest, {wrong_name}), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, EncodeDecodeArchiveRoundTripsManifestMetadata)
+{
+  // Exercises manifest_from_json's "top-level metadata present" branch --
+  // every other archive test leaves manifest.metadata empty.
+  voxelcodec_ros::Manifest manifest;
+  manifest.metadata["session_id"] = "abc123";
+  const ChannelDescriptor a{
+      "a", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingRawLE,
+      voxelcodec_ros::kCompressionNone, 0, 0, 0, 0, {}};
+  manifest.channels = {a};
+
+  const auto archive_bytes = voxelcodec_ros::encode_archive(manifest, {{a, {}}});
+  const auto archive = voxelcodec_ros::read_archive(archive_bytes);
+  ASSERT_EQ(archive.manifest.metadata.count("session_id"), 1U);
+  EXPECT_EQ(archive.manifest.metadata.at("session_id"), "abc123");
+}
+
+// ── read_archive error paths ────────────────────────────────────────────────
+
+namespace
+{
+std::vector<std::uint8_t> build_minimal_archive()
+{
+  voxelcodec_ros::Manifest manifest;
+  const ChannelDescriptor a{
+      "a", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingRawLE,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  manifest.channels = {a};
+  return voxelcodec_ros::encode_archive(manifest, {{a, {1, 2, 3, 4}}});
+}
+}  // namespace
+
+TEST(VoxelCodecRos, ReadArchiveTooSmallThrows)
+{
+  const std::vector<std::uint8_t> tiny(5, 0);
+  EXPECT_THROW(voxelcodec_ros::read_archive(tiny), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, ReadArchiveInvalidMagicThrows)
+{
+  auto archive_bytes = build_minimal_archive();
+  archive_bytes[0] ^= 0xFF;
+  EXPECT_THROW(voxelcodec_ros::read_archive(archive_bytes), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, ReadArchiveUnsupportedVersionThrows)
+{
+  auto archive_bytes = build_minimal_archive();
+  archive_bytes[4] = 0xFF;
+  archive_bytes[5] = 0xFF;
+  EXPECT_THROW(voxelcodec_ros::read_archive(archive_bytes), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, ReadArchiveManifestLengthOutsideArchiveThrows)
+{
+  auto archive_bytes = build_minimal_archive();
+  // Large enough to blow past the archive's actual size, but far short of
+  // UINT64_MAX -- kHeaderSize + manifest_length must not itself wrap back
+  // under archive_bytes.size(), which would skip the intended check entirely.
+  for (int i = 0; i < 4; ++i) {archive_bytes[8 + i] = 0xFF;}
+  for (int i = 4; i < 8; ++i) {archive_bytes[8 + i] = 0x00;}
+  EXPECT_THROW(voxelcodec_ros::read_archive(archive_bytes), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, ReadArchiveTreatsNonObjectChannelMetadataAsEmpty)
+{
+  // metadata_from_json's is_object() guard: every other archive test only
+  // ever produces well-formed metadata (it's always built from a real
+  // Metadata map via encode_archive), so this manually crafts a manifest
+  // where a channel's "metadata" field is a JSON string instead of an
+  // object -- the only way to exercise this defensive parse path.
+  const std::string manifest_json =
+    "{\"format\":\"voxel-channel-archive\",\"version\":1,\"voxel_count\":0,"
+    "\"channels\":[{\"name\":\"a\",\"semantic\":\"\",\"data_type\":\"uint32\","
+    "\"encoding\":\"raw-le\",\"compression\":\"none\",\"element_count\":0,"
+    "\"payload_offset\":0,\"compressed_size\":0,\"uncompressed_size\":0,"
+    "\"metadata\":\"not-an-object\"}]}";
+
+  std::vector<std::uint8_t> archive_bytes;
+  archive_bytes.insert(
+    archive_bytes.end(), voxelcodec_ros::kArchiveMagic, voxelcodec_ros::kArchiveMagic + 4);
+  push_u16le(archive_bytes, voxelcodec_ros::kArchiveVersion);
+  push_u16le(archive_bytes, 0);
+  push_u64le(archive_bytes, manifest_json.size());
+  archive_bytes.insert(archive_bytes.end(), manifest_json.begin(), manifest_json.end());
+
+  const auto archive = voxelcodec_ros::read_archive(archive_bytes);
+  ASSERT_EQ(archive.manifest.channels.size(), 1U);
+  EXPECT_TRUE(archive.manifest.channels[0].metadata.empty());
+}
+
+TEST(VoxelCodecRos, ReadArchiveChannelPayloadOutsideArchiveThrows)
+{
+  auto archive_bytes = build_minimal_archive();
+  archive_bytes.pop_back();  // last channel's declared payload no longer fits
+  EXPECT_THROW(voxelcodec_ros::read_archive(archive_bytes), std::runtime_error);
+}
+
+// ── decode_channel: remaining direct error path ─────────────────────────────
+
+TEST(VoxelCodecRos, DecodeChannelUncompressedSizeMismatchThrows)
+{
+  ChannelDescriptor descriptor;
+  descriptor.name = "v";
+  descriptor.data_type = voxelcodec_ros::kDataTypeUint32;
+  descriptor.encoding = voxelcodec_ros::kEncodingRawLE;
+  descriptor.compression = voxelcodec_ros::kCompressionNone;
+  descriptor.uncompressed_size = 999;  // doesn't match the payload below
+  EXPECT_THROW(
+    voxelcodec_ros::decode_channel(descriptor, {1, 2, 3, 4}), std::runtime_error);
+}
+
+// ── decode_selected: skip-unrequested / missing-payload / not-found paths ──
+
+TEST(VoxelCodecRos, DecodeSelectedSkipsUnrequestedChannels)
+{
+  voxelcodec_ros::Manifest manifest;
+  const ChannelDescriptor a{
+      "a", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingRawLE,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  const ChannelDescriptor b{
+      "b", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingRawLE,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  manifest.channels = {a, b};
+  const auto archive_bytes =
+    voxelcodec_ros::encode_archive(manifest, {{a, {1, 0, 0, 0}}, {b, {2, 0, 0, 0}}});
+  const auto archive = voxelcodec_ros::read_archive(archive_bytes);
+
+  const auto decoded = voxelcodec_ros::decode_selected(archive, {"a"});
+  EXPECT_EQ(decoded.size(), 1U);
+  EXPECT_EQ(decoded.count("a"), 1U);
+  EXPECT_EQ(decoded.count("b"), 0U);
+}
+
+TEST(VoxelCodecRos, DecodeSelectedMissingPayloadThrows)
+{
+  voxelcodec_ros::Archive archive;
+  archive.manifest.channels = {ChannelDescriptor{
+      "a", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingRawLE,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}}};
+  // archive.payloads deliberately left empty.
+  EXPECT_THROW(
+    voxelcodec_ros::decode_selected(archive, {"a"}), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, DecodeSelectedRequestedChannelNotFoundThrows)
+{
+  voxelcodec_ros::Archive archive;
+  archive.manifest.channels = {ChannelDescriptor{
+      "a", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingRawLE,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}}};
+  archive.payloads["a"] = {1, 0, 0, 0};
+  EXPECT_THROW(
+    voxelcodec_ros::decode_selected(archive, {"does-not-exist"}), std::runtime_error);
+}
+
+// ── haar_max_bands ───────────────────────────────────────────────────────────
+
+TEST(VoxelCodecRos, HaarMaxBandsReturnsZeroForNonHaarEncoding)
+{
+  const ChannelDescriptor descriptor{
+      "v", "", voxelcodec_ros::kDataTypeUint32, voxelcodec_ros::kEncodingRawLE,
+      voxelcodec_ros::kCompressionNone, 1, 0, 0, 0, {}};
+  EXPECT_EQ(voxelcodec_ros::haar_max_bands(descriptor), 0);
+}
+
+TEST(VoxelCodecRos, HaarMaxBandsReturnsLevelsPlusOne)
+{
+  ChannelDescriptor descriptor;
+  descriptor.encoding = voxelcodec_ros::kEncodingHaarWavelet;
+  descriptor.metadata[voxelcodec_ros::kHaarLevelsKey] = "3";
+  EXPECT_EQ(voxelcodec_ros::haar_max_bands(descriptor), 4);
+}
+
+TEST(VoxelCodecRos, HaarMaxBandsDefaultsToZeroLevelsWhenMetadataMissing)
+{
+  ChannelDescriptor descriptor;
+  descriptor.encoding = voxelcodec_ros::kEncodingHaarWavelet;
+  EXPECT_EQ(voxelcodec_ros::haar_max_bands(descriptor), 1);
+}
+
+// ── decode_haar_progressive dispatch ─────────────────────────────────────────
+
+TEST(VoxelCodecRos, DecodeHaarProgressiveNonHaarDelegatesToDecodeChannel)
+{
+  ChannelDescriptor descriptor;
+  descriptor.name = "v";
+  descriptor.data_type = voxelcodec_ros::kDataTypeUint32;
+  descriptor.encoding = voxelcodec_ros::kEncodingRawLE;
+  descriptor.compression = voxelcodec_ros::kCompressionNone;
+  descriptor.uncompressed_size = 4;
+  const std::vector<std::uint8_t> payload{9, 0, 0, 0};
+
+  const auto decoded = voxelcodec_ros::decode_haar_progressive(descriptor, payload, 1);
+  const auto out = std::get<std::vector<std::uint32_t> >(decoded.values);
+  EXPECT_EQ(out, (std::vector<std::uint32_t>{9}));
+}
+
+TEST(VoxelCodecRos, DecodeHaarProgressiveWrongDataTypeThrows)
+{
+  ChannelDescriptor descriptor;
+  descriptor.name = "v";
+  descriptor.data_type = voxelcodec_ros::kDataTypeUint8;
+  descriptor.encoding = voxelcodec_ros::kEncodingHaarWavelet;
+  descriptor.compression = voxelcodec_ros::kCompressionNone;
+  EXPECT_THROW(
+    voxelcodec_ros::decode_haar_progressive(descriptor, {}, 1), std::runtime_error);
+}
+
+// ── compute_haar_level_dims / reconstruct_haar_from_bands: direct validation ─
+
+TEST(VoxelCodecRos, ComputeHaarLevelDimsRejectsInvalidLevels)
+{
+  EXPECT_THROW(voxelcodec_ros::compute_haar_level_dims(4, 4, 0), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, ReconstructHaarFromBandsRejectsInvalidLevelsOrDimensions)
+{
+  EXPECT_THROW(
+    voxelcodec_ros::reconstruct_haar_from_bands({}, 4, 4, 0, 1), std::runtime_error);
+  EXPECT_THROW(
+    voxelcodec_ros::reconstruct_haar_from_bands({}, 0, 4, 2, 1), std::runtime_error);
+  EXPECT_THROW(
+    voxelcodec_ros::reconstruct_haar_from_bands({}, 4, 0, 2, 1), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, ReconstructHaarFromBandsRejectsMissingOrWrongSizeLlBand)
+{
+  EXPECT_THROW(
+    voxelcodec_ros::reconstruct_haar_from_bands({}, 8, 8, 2, 3), std::runtime_error);
+
+  const auto layout = voxelcodec_ros::compute_haar_band_layout(8, 8, 2);
+  std::vector<std::vector<std::int64_t> > bad_ll = {
+    std::vector<std::int64_t>(layout[0].element_count + 1, 0)};
+  EXPECT_THROW(
+    voxelcodec_ros::reconstruct_haar_from_bands(bad_ll, 8, 8, 2, 3), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, ReconstructHaarFromBandsRejectsMissingDetailBand)
+{
+  const auto layout = voxelcodec_ros::compute_haar_band_layout(8, 8, 2);
+  // Band 0 (LL) and band 1 present and correctly sized; band 2 missing
+  // entirely, but bands_received=3 asks for the full reconstruction.
+  std::vector<std::vector<std::int64_t> > bands = {
+    std::vector<std::int64_t>(layout[0].element_count, 0),
+    std::vector<std::int64_t>(layout[1].element_count, 0)};
+  EXPECT_THROW(
+    voxelcodec_ros::reconstruct_haar_from_bands(bands, 8, 8, 2, 3), std::runtime_error);
+}
+
+// ── haar_forward.hpp: make_haar_bands validation paths ─────────────────────
+
+TEST(VoxelCodecRos, MakeHaarBandsRejectsInvalidLevels)
+{
+  const std::vector<std::uint32_t> values(16, 0);
+  EXPECT_THROW(
+    voxelcodec_ros::make_haar_bands(values, 4, 4, 0, "none"), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, MakeHaarBandsRejectsEmptyGridDimensions)
+{
+  const std::vector<std::uint32_t> values;
+  EXPECT_THROW(
+    voxelcodec_ros::make_haar_bands(values, 0, 4, 1, "none"), std::runtime_error);
+  EXPECT_THROW(
+    voxelcodec_ros::make_haar_bands(values, 4, 0, 1, "none"), std::runtime_error);
+}
+
+TEST(VoxelCodecRos, MakeHaarBandsRejectsValuesSizeMismatch)
+{
+  const std::vector<std::uint32_t> values(15, 0);  // 4x4 needs 16
+  EXPECT_THROW(
+    voxelcodec_ros::make_haar_bands(values, 4, 4, 1, "none"), std::runtime_error);
 }
