@@ -1,0 +1,6 @@
+build/
+maps/*.grid
+maps/*.vxch
+maps/state.json
+!maps/.gitkeep
+__pycache__/
