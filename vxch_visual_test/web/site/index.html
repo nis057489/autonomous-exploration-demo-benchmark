@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wavestream: vxch visual demo</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🌊</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>wavestream</h1>
+  <p class="subtitle">
+    Progressive, bandwidth-aware occupancy-grid streaming for multi-robot
+    exploration &mdash; generate a synthetic map, encode it with a real
+    tiled Haar-wavelet codec compiled to WebAssembly, and watch it stream
+    band-by-band over a simulated bandwidth-limited link.
+  </p>
+</header>
+
+<main>
+  <section class="panel" id="panel-generate">
+    <h2>1. Synthetic map</h2>
+    <div class="controls">
+      <label>Width <input type="number" id="width" value="160" min="8" max="2000"></label>
+      <label>Height <input type="number" id="height" value="120" min="8" max="2000"></label>
+      <label>Seed <input type="number" id="seed" value="42"></label>
+      <button id="btn-generate">Generate Map</button>
+    </div>
+  </section>
+
+  <section class="panel" id="panel-encode">
+    <h2>2. Encode with vxch</h2>
+    <div class="controls">
+      <label>Haar levels <input type="number" id="levels" value="4" min="1" max="12"></label>
+      <label>Tile size (cells) <input type="number" id="tile-size" value="32" min="4" max="512"></label>
+      <label>Compression
+        <select id="compression">
+          <option value="zstd" selected>zstd</option>
+          <option value="none">none</option>
+        </select>
+      </label>
+      <label class="checkbox"><input type="checkbox" id="varint" checked> Varint packing</label>
+      <button id="btn-encode" disabled>Encode</button>
+    </div>
+  </section>
+
+  <section class="panel" id="panel-send">
+    <h2>3. Send bands over a simulated link</h2>
+    <div class="controls">
+      <label>Bandwidth (kbps) <input type="number" id="bandwidth" value="50" min="0.001" step="any"></label>
+      <button class="preset" data-kbps="250000">Good (250 mbps)</button>
+      <button class="preset" data-kbps="1000">Degraded (1 mbps)</button>
+      <button class="preset" data-kbps="1">Denied (1 kbps)</button>
+      <button id="btn-send-next" disabled>Send Next Band</button>
+      <button id="btn-send-all" disabled>Send All</button>
+      <button id="btn-stop" disabled>Stop</button>
+      <button id="btn-reset" disabled>Reset Receiver</button>
+    </div>
+  </section>
+
+  <section class="maps">
+    <div class="map-panel">
+      <h3>Sender &mdash; ground truth map</h3>
+      <canvas id="canvas-sender" width="480" height="480"></canvas>
+    </div>
+    <div class="map-panel">
+      <h3>Receiver &mdash; reconstruction so far</h3>
+      <canvas id="canvas-receiver" width="480" height="480"></canvas>
+    </div>
+  </section>
+
+  <p id="status">Loading WebAssembly module&hellip;</p>
+
+  <section class="log-section">
+    <h2>Log</h2>
+    <div id="log"></div>
+  </section>
+</main>
+
+<footer>
+  <p>
+    The encode/decode math running here is the real vxch codec (tiled 2D
+    Haar wavelet transform, zigzag-varint packing, zstd compression)
+    compiled to WebAssembly with Emscripten &mdash; not a JavaScript
+    reimplementation.
+  </p>
+</footer>
+
+<script src="vxch.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
