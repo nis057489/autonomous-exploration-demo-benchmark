@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -64,6 +65,25 @@ inline std::vector<std::uint8_t> zigzag_varint_encode(const std::vector<std::int
       u >>= 7U;
     }
     out.push_back(static_cast<std::uint8_t>(u));
+  }
+  return out;
+}
+
+// Fixed-width (int32 LE) coefficient encode -- the ablation alternative to
+// zigzag_varint_encode, for isolating how much of vxch's bandwidth win comes
+// from variable-length packing itself vs. the zstd compression layered on
+// top of it (compression=none alone still leaves varint packing in place).
+// Haar lifting keeps coefficient magnitude close to the shifted-occupancy
+// input range (0..101) regardless of levels -- it never explodes the way,
+// say, a naive unbounded transform could -- so int32 has ample headroom;
+// this doesn't defend against a pathological input that would overflow it,
+// same as the rest of this codec's integer arithmetic.
+inline std::vector<std::uint8_t> fixed_width_encode(const std::vector<std::int64_t> & coeffs)
+{
+  std::vector<std::uint8_t> out(coeffs.size() * 4);
+  for (std::size_t i = 0; i < coeffs.size(); ++i) {
+    const std::int32_t v = static_cast<std::int32_t>(coeffs[i]);
+    std::memcpy(&out[i * 4], &v, 4);
   }
   return out;
 }
@@ -140,7 +160,8 @@ inline std::vector<EncodedChannel> make_haar_bands(
   std::size_t width,
   std::size_t height,
   int levels,
-  const std::string & compression)
+  const std::string & compression,
+  bool use_varint = true)
 {
   if (levels < 1) {
     throw std::runtime_error("haar levels must be >= 1");
@@ -174,7 +195,8 @@ inline std::vector<EncodedChannel> make_haar_bands(
 
   for (int k = 0; k < total_bands; ++k) {
     const auto & coeffs = band_coeffs[static_cast<std::size_t>(k)];
-    std::vector<std::uint8_t> raw_payload = zigzag_varint_encode(coeffs);
+    std::vector<std::uint8_t> raw_payload =
+      use_varint ? zigzag_varint_encode(coeffs) : fixed_width_encode(coeffs);
     std::vector<std::uint8_t> payload = compress_payload(compression, raw_payload);
 
     ChannelDescriptor desc;
@@ -192,6 +214,7 @@ inline std::vector<EncodedChannel> make_haar_bands(
     desc.metadata[kHaarGridHeightKey] = std::to_string(height);
     desc.metadata["haar_band_index"] = std::to_string(k);
     desc.metadata["haar_total_bands"] = std::to_string(total_bands);
+    desc.metadata[kHaarVarintKey] = use_varint ? "1" : "0";
 
     EncodedChannel ec;
     ec.descriptor = std::move(desc);

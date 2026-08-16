@@ -20,7 +20,8 @@
 #                       (local bringup does not apply in multi-robot mode).
 #
 # Experiment parameters are read from experiment.conf (project root) or env vars:
-#   MAP_TRANSPORT, BANDWIDTH_KBPS, LOSS_PCT, DELAY_MS, HAAR_LEVELS, TILE_SIZE_M, RECORD_METRICS
+#   MAP_TRANSPORT, BANDWIDTH_KBPS, LOSS_PCT, DELAY_MS, HAAR_LEVELS, COMPRESSION,
+#   VARINT_ENCODING, TILE_SIZE_M, SCHEDULE_MODE, RECORD_METRICS
 #
 # What this script does NOT do (run these yourself, on the robot or on another terminal):
 #   - RViz (open it manually, or pass rviz:=true to the launch file)
@@ -43,7 +44,10 @@ BANDWIDTH_KBPS="${BANDWIDTH_KBPS:-0}"
 LOSS_PCT="${LOSS_PCT:-0.0}"
 DELAY_MS="${DELAY_MS:-0}"
 HAAR_LEVELS="${HAAR_LEVELS:-4}"
+COMPRESSION="${COMPRESSION:-zstd}"
+VARINT_ENCODING="${VARINT_ENCODING:-true}"
 TILE_SIZE_M="${TILE_SIZE_M:-2.0}"
+SCHEDULE_MODE="${SCHEDULE_MODE:-smart}"
 RANDOM_SEED="${RANDOM_SEED:--1}"
 ROBOT_STARTUP_DELAY_S="${ROBOT_STARTUP_DELAY_S:-0.0}"
 # ROBOT_HOSTS: every robot in the team, "name@ip@x@y@yaw" comma-separated, for
@@ -334,8 +338,23 @@ if [[ -n "${ROBOT_ID}" ]]; then
     #
     # nav_map is the per-robot composite (local SLAM + fused team map),
     # already published in the shared "map" frame regardless of transport,
-    # so no /tf is needed for it to render in replay/rviz either.
-    BAG_TOPICS=("/${ROBOT_ID}/explore/traversed_path" "/${ROBOT_ID}/nav_map")
+    # so no /tf is needed for it to render in replay/rviz either. NOTE:
+    # per_robot_map_compositor.py falls back to publishing local-only data
+    # on nav_map, silently, whenever it has never received a team map --
+    # bagging /map and team_map_ddil alongside it (below) is what lets you
+    # tell that apart from a real fusion.
+    #
+    # /map (this robot's own raw local SLAM map, pre-fusion) and
+    # team_map_ddil (team_map_fusion.py's fused-from-peers map, pre-local-
+    # merge -- "the ddil map") are bagged unconditionally in both
+    # transports so nav_map's composite can be checked against its two
+    # inputs, not just trusted at face value.
+    BAG_TOPICS=(
+      "/${ROBOT_ID}/explore/traversed_path"
+      "/${ROBOT_ID}/nav_map"
+      "/${ROBOT_ID}/map"
+      "/${ROBOT_ID}/team_map_ddil"
+    )
 
     # VXCH map transport: this robot's own encoded bands/manifest (what it
     # sends to peers) plus, per peer, the bands/manifest this robot actually
@@ -357,13 +376,13 @@ if [[ -n "${ROBOT_ID}" ]]; then
     else
       # Baseline map transport: relays raw nav_msgs/OccupancyGrid instead of
       # encoded bands (see hw_namespaced_stack.launch.py's per-peer relay
-      # setup), but it's the same shape -- this robot's own /map is what
-      # peers' ddil_proxy instances pull from ("sent"), and
-      # /incoming/<peer>/map is what this robot actually received after
-      # DDIL throttling. Bag both so bandwidth can be measured directly
-      # from `ros2 bag info` per-topic byte totals, the same way as vxch,
-      # rather than trusting ddil_proxy_node's in-process log counters.
-      BAG_TOPICS+=("/${ROBOT_ID}/map")
+      # setup), but it's the same shape -- this robot's own /map (already
+      # bagged unconditionally above) is what peers' ddil_proxy instances
+      # pull from ("sent"), and /incoming/<peer>/map is what this robot
+      # actually received after DDIL throttling. Bag the latter so
+      # bandwidth can be measured directly from `ros2 bag info` per-topic
+      # byte totals, the same way as vxch, rather than trusting
+      # ddil_proxy_node's in-process log counters.
       for peer_name in "${PEER_NAMES[@]}"; do
         BAG_TOPICS+=("/${ROBOT_ID}/incoming/${peer_name}/map")
       done
@@ -408,7 +427,10 @@ if [[ -n "${ROBOT_ID}" ]]; then
     loss_pct:="${LOSS_PCT}" \
     delay_ms:="${DELAY_MS}" \
     haar_levels:="${HAAR_LEVELS}" \
-    tile_size_m:="${TILE_SIZE_M}"
+    compression:="${COMPRESSION}" \
+    varint_encoding:="${VARINT_ENCODING}" \
+    tile_size_m:="${TILE_SIZE_M}" \
+    schedule_mode:="${SCHEDULE_MODE}"
   exit $?
 fi
 
@@ -488,7 +510,10 @@ if (( NUM_ROBOTS > 1 )); then
     loss_pct:="${LOSS_PCT}" \
     delay_ms:="${DELAY_MS}" \
     haar_levels:="${HAAR_LEVELS}" \
+    compression:="${COMPRESSION}" \
+    varint_encoding:="${VARINT_ENCODING}" \
     tile_size_m:="${TILE_SIZE_M}" \
+    schedule_mode:="${SCHEDULE_MODE}" \
     rng_seed:="${RANDOM_SEED}" \
     robot_startup_delay_s:="${ROBOT_STARTUP_DELAY_S}"
 

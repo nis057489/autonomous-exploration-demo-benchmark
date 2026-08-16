@@ -56,7 +56,10 @@ def _create_all_actions(context):
 
     map_transport = LaunchConfiguration("map_transport").perform(context)
     haar_levels = int(LaunchConfiguration("haar_levels").perform(context))
+    compression = LaunchConfiguration("compression").perform(context)
+    varint_encoding = _bool_value(LaunchConfiguration("varint_encoding").perform(context))
     tile_size_m = float(LaunchConfiguration("tile_size_m").perform(context))
+    schedule_mode = LaunchConfiguration("schedule_mode").perform(context)
     bandwidth_kbps = float(LaunchConfiguration("bandwidth_kbps").perform(context))
     loss_pct = float(LaunchConfiguration("loss_pct").perform(context))
     delay_ms = float(LaunchConfiguration("delay_ms").perform(context))
@@ -179,7 +182,9 @@ def _create_all_actions(context):
                     "output_base_topic": vxch_base,
                     "haar_levels": haar_levels,
                     "tile_size_m": tile_size_m,
-                    "compression": "zstd",
+                    "compression": compression,
+                    "varint_encoding": varint_encoding,
+                    "schedule_mode": schedule_mode,
                     "use_sim_time": use_sim_time,
                 }],
             )
@@ -242,11 +247,33 @@ def generate_launch_description():
                 "haar_levels", default_value="4",
                 description="Haar wavelet levels (total bands = levels+1)"),
             DeclareLaunchArgument(
+                "compression", default_value="zstd",
+                description="vxch only. 'zstd' or 'none' -- zstd-compresses each band's "
+                            "zigzag-varint payload before it's sent; 'none' sends the raw "
+                            "varint bytes, useful for isolating how much of vxch's "
+                            "bandwidth win is the wavelet/tiling encoding itself vs. "
+                            "compression on top"),
+            DeclareLaunchArgument(
+                "varint_encoding", default_value="true",
+                description="vxch only. true (default) zigzag-varint packs each band's "
+                            "Haar coefficients before compression; false packs them as "
+                            "fixed-width int32 instead. Independent of compression -- with "
+                            "compression=none this isolates varint packing's own bandwidth "
+                            "contribution, since compression=none alone still leaves "
+                            "varint packing in place"),
+            DeclareLaunchArgument(
                 "tile_size_m", default_value="2.0",
                 description="Encode the map as independent tile_size_m x tile_size_m Haar "
                             "pyramids instead of one pyramid for the whole grid, so a still-"
                             "changing area (wherever a robot currently is) can't starve "
                             "another, already-settled area's detail bands"),
+            DeclareLaunchArgument(
+                "schedule_mode", default_value="smart",
+                description="vxch only. 'smart' = only resend a band when it actually "
+                            "changed, least-recently-sent-first within a tile. 'simple' = "
+                            "always resend every band every cycle, strict coarsest-first, "
+                            "no change detection -- matches how the baseline OccupancyGrid "
+                            "relay behaves (it has no dedup either)"),
             DeclareLaunchArgument(
                 "bandwidth_kbps", default_value="0",
                 description="Token-bucket bandwidth limit for map transport (0 = unlimited)"),

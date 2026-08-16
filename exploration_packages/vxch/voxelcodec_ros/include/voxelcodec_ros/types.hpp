@@ -41,6 +41,10 @@ namespace voxelcodec_ros
   // wvmp point columns) -- see decode_haar_wavelet_channel/decode_haar_progressive.
   inline constexpr char kHaarGridWidthKey[] = "haar_grid_width";
   inline constexpr char kHaarGridHeightKey[] = "haar_grid_height";
+  // "1" = coefficients were zigzag-varint packed (zigzag_varint_encode); "0" =
+  // fixed-width int32 LE (fixed_width_encode) -- see make_haar_bands's use_varint
+  // parameter. Always set by make_haar_bands, so a consumer can rely on it being present.
+  inline constexpr char kHaarVarintKey[] = "haar_varint";
 
   using Metadata = std::unordered_map<std::string, std::string>;
   using ScalarBuffer = std::variant<

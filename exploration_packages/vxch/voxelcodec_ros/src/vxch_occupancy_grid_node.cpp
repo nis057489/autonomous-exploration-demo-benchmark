@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -76,6 +77,20 @@ inline std::vector<std::int64_t> zigzag_varint_decode(
       ? -static_cast<std::int64_t>((value >> 1U) + 1U)
       : static_cast<std::int64_t>(value >> 1U);
     out.push_back(decoded);
+  }
+  return out;
+}
+
+// Mirrors fixed_width_encode in haar_forward.hpp -- the ablation-mode counterpart to
+// zigzag_varint_decode above, selected per band via the descriptor's kHaarVarintKey.
+inline std::vector<std::int64_t> fixed_width_decode(
+  const std::vector<std::uint8_t> & raw, std::size_t count)
+{
+  std::vector<std::int64_t> out(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    std::int32_t v;
+    std::memcpy(&v, &raw[i * 4], 4);
+    out[i] = v;
   }
   return out;
 }
@@ -225,13 +240,18 @@ private:
       return;
     }
 
-    // Decompress and zigzag-varint decode. Always overwrites -- bands are latest-wins (the
-    // encoder only resends a band when its content actually changed), and a band, once
-    // received, must stay refreshable for as long as this tile's geometry is valid; it doesn't
-    // have a one-shot "already received, never touch again" lifetime tied to a manifest stamp.
+    // Decompress, then decode with whichever coefficient packing this band's sender used
+    // (kHaarVarintKey, always set by make_haar_bands). Always overwrites -- bands are
+    // latest-wins (the encoder only resends a band when its content actually changed),
+    // and a band, once received, must stay refreshable for as long as this tile's
+    // geometry is valid; it doesn't have a one-shot "already received, never touch
+    // again" lifetime tied to a manifest stamp.
     try {
       const auto raw = decompress_payload(desc, msg->payload);
-      tile.band_coeffs[idx] = zigzag_varint_decode(raw, desc.element_count);
+      const bool use_varint = desc.metadata.at(kHaarVarintKey) == "1";
+      tile.band_coeffs[idx] = use_varint ?
+        zigzag_varint_decode(raw, desc.element_count) :
+        fixed_width_decode(raw, desc.element_count);
       tile.received[idx] = true;
     } catch (const std::exception & e) {
       RCLCPP_WARN(

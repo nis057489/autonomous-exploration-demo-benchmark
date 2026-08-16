@@ -53,7 +53,17 @@ public:
     input_topic_ = declare_parameter<std::string>("input_topic", "/map");
     output_base_topic_ = declare_parameter<std::string>("output_base_topic", "/vxch/map");
     haar_levels_ = declare_parameter<int>("haar_levels", 4);
-    compression_ = declare_parameter<std::string>("compression", "zstd");
+    compression_ = declare_parameter<std::string>("compression", kCompressionZstd);
+    if (compression_ != kCompressionNone && compression_ != kCompressionZstd) {
+      throw std::runtime_error("compression must be 'zstd' or 'none'");
+    }
+    // Ablation knob, independent of compression above: true (default) zigzag-varint
+    // packs each band's Haar coefficients before compression; false packs them as
+    // fixed-width int32 LE instead (see fixed_width_encode in haar_forward.hpp). With
+    // compression=none this isolates varint packing's own contribution to bandwidth --
+    // compression=none alone still leaves varint packing in place, so it only shows
+    // "wavelet + varint, no zstd" vs. "wavelet + varint + zstd," not "wavelet vs. nothing."
+    varint_encoding_ = declare_parameter<bool>("varint_encoding", true);
     stream_id_ = declare_parameter<std::string>("stream_id", "map_stream");
     // Each Haar pyramid (band_0..band_L) is built over the whole grid it's given.
     // Encoding the full map as ONE pyramid means a single changed cell anywhere
@@ -90,6 +100,21 @@ public:
     // exists purely as a guard against a pathological tile count, e.g. a much
     // smaller tile_size_m_ than the default without re-checking the tradeoff).
     max_tiles_per_update_ = declare_parameter<int>("max_tiles_per_update", -1);
+
+    // "smart" = only queue a band when its fingerprint actually changed, and within a tile
+    // prefer whichever pending band has gone longest without a turn (see send_pending_bands).
+    // "simple" = every tile's every band is queued fresh on every on_map() call (no change
+    // detection) and always sent strict coarsest-first (no recency reordering) -- this is the
+    // same "just iterate over the tiles" scheme the baseline OccupancyGrid relay effectively
+    // gets for free: ddil_proxy_node has no dedup/priority logic for a plain map topic (only
+    // for band_N/manifest topics), so baseline already resends the whole map unconditionally
+    // on every SLAM map_update_interval tick. "simple" exists so a vxch-vs-baseline comparison
+    // can isolate what the wavelet/tiling encoding itself buys, independent of whether vxch's
+    // scheduling is also doing extra work baseline never does.
+    schedule_mode_ = declare_parameter<std::string>("schedule_mode", "smart");
+    if (schedule_mode_ != "smart" && schedule_mode_ != "simple") {
+      throw std::runtime_error("schedule_mode must be 'smart' or 'simple'");
+    }
 
     // Sending used to happen directly inside on_map(), so a robot's send *opportunities* were
     // tied to its own /map republish rate -- which is itself tied to how much SLAM CPU it has.
@@ -144,9 +169,11 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "Encoding %s → %s/manifest + band_0..band_%d (haar_levels=%d, compression=%s, "
-      "tile_size_m=%.2f, send_rate_hz=%.2f, max_bands_per_update=%d)",
+      "varint_encoding=%s, tile_size_m=%.2f, send_rate_hz=%.2f, max_bands_per_update=%d, "
+      "schedule_mode=%s)",
       input_topic_.c_str(), output_base_topic_.c_str(), haar_levels_,
-      haar_levels_, compression_.c_str(), tile_size_m_, send_rate_hz_, max_bands_per_update_);
+      haar_levels_, compression_.c_str(), varint_encoding_ ? "true" : "false", tile_size_m_,
+      send_rate_hz_, max_bands_per_update_, schedule_mode_.c_str());
   }
 
 private:
@@ -233,7 +260,8 @@ private:
         try {
           bands = make_haar_bands(
             tile_values, static_cast<std::size_t>(geom.width),
-            static_cast<std::size_t>(geom.height), haar_levels_, compression_);
+            static_cast<std::size_t>(geom.height), haar_levels_, compression_,
+            varint_encoding_);
         } catch (const std::exception & e) {
           RCLCPP_ERROR(
             get_logger(), "make_haar_bands failed for tile (%d,%d): %s", trow, tcol, e.what());
@@ -263,7 +291,9 @@ private:
           const std::size_t fp =
             payload.size() ^
             std::hash<std::string>{}(std::string(payload.begin(), payload.end()));
-          if (fp != fp_for_tile[k]) {
+          // simple mode: no change detection -- every band is "changed" every cycle,
+          // same as the baseline OccupancyGrid relay's unconditional resend.
+          if (schedule_mode_ == "simple" || fp != fp_for_tile[k]) {
             fp_for_tile[k] = fp;
             pending_by_tile_[key][static_cast<int>(k)] = std::move(band);
             tile_changed = true;
@@ -338,7 +368,7 @@ private:
       auto & last_sent = last_sent_seq_[key];
 
       for (int i = 0; i < max_bands_per_update_ && !bands_for_tile.empty(); ++i) {
-        // Prefer the least-recently-sent pending band over strict coarsest-
+        // "smart": prefer the least-recently-sent pending band over strict coarsest-
         // first -- a never-sent band (no entry in last_sent) always wins,
         // otherwise the one with the oldest send_seq_ wins. The decoder never
         // expires a previously-received band -- a slightly-stale band_0
@@ -355,23 +385,32 @@ private:
         // tile's own bands, not just a one-time bypass -- the same
         // starvation tiling fixed *across* tiles, now also fixed *within*
         // whichever tile is currently active, for as long as it stays active.
+        //
+        // "simple": always take the lowest pending band index (bands_for_tile
+        // is keyed by band index, so begin() is already coarsest-first) --
+        // no fairness tracking, matching baseline's lack of any scheduling
+        // cleverness on top of its unconditional resend.
         auto it = bands_for_tile.begin();
-        std::uint64_t best_seq = std::numeric_limits<std::uint64_t>::max();
-        for (auto candidate = bands_for_tile.begin(); candidate != bands_for_tile.end();
-          ++candidate)
-        {
-          auto sent_it = last_sent.find(candidate->first);
-          const std::uint64_t seq = (sent_it == last_sent.end()) ? 0 : sent_it->second;
-          if (seq < best_seq) {
-            best_seq = seq;
-            it = candidate;
-            if (seq == 0) {break;}  // never sent -- can't do better than this
+        if (schedule_mode_ == "smart") {
+          std::uint64_t best_seq = std::numeric_limits<std::uint64_t>::max();
+          for (auto candidate = bands_for_tile.begin(); candidate != bands_for_tile.end();
+            ++candidate)
+          {
+            auto sent_it = last_sent.find(candidate->first);
+            const std::uint64_t seq = (sent_it == last_sent.end()) ? 0 : sent_it->second;
+            if (seq < best_seq) {
+              best_seq = seq;
+              it = candidate;
+              if (seq == 0) {break;}  // never sent -- can't do better than this
+            }
           }
         }
         const int band_idx = it->first;
         const EncodedChannel channel = std::move(it->second);
         bands_for_tile.erase(it);
-        last_sent[band_idx] = ++send_seq_counter_;
+        if (schedule_mode_ == "smart") {
+          last_sent[band_idx] = ++send_seq_counter_;
+        }
 
         if (sent_count > 0) {ss << " ";}
         const double kb = static_cast<double>(channel.payload.size()) / 1024.0;
@@ -403,12 +442,14 @@ private:
   std::string output_base_topic_;
   int haar_levels_;
   std::string compression_;
+  bool varint_encoding_;
   std::string stream_id_;
   double tile_size_m_;
   int tile_size_cells_{0};
   int max_bands_per_update_;
   int max_tiles_per_update_;
   double send_rate_hz_;
+  std::string schedule_mode_;
 
   rclcpp::Publisher<voxelcodec_msgs::msg::VoxelManifest>::SharedPtr manifest_pub_;
   std::vector<rclcpp::Publisher<voxelcodec_msgs::msg::VoxelChannel>::SharedPtr> band_pubs_;

@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -92,6 +93,19 @@ std::vector<std::int64_t> zigzag_varint_decode(
   return out;
 }
 
+// Mirrors fixed_width_encode in haar_forward.hpp (ablation counterpart to varint packing).
+std::vector<std::int64_t> fixed_width_decode(
+  const std::vector<std::uint8_t> & raw, std::size_t count)
+{
+  std::vector<std::int64_t> out(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    std::int32_t v;
+    std::memcpy(&v, &raw[i * 4], 4);
+    out[i] = v;
+  }
+  return out;
+}
+
 struct ArgMap
 {
   std::map<std::string, std::string> values;
@@ -110,6 +124,11 @@ struct ArgMap
   {
     const auto it = values.find(key);
     return it == values.end() ? def : std::stod(it->second);
+  }
+  bool get_bool(const std::string & key, bool def) const
+  {
+    const auto it = values.find(key);
+    return it == values.end() ? def : it->second == "true";
   }
   bool require(const std::string & key) const
   {
@@ -234,6 +253,11 @@ int cmd_encode(const ArgMap & args)
   const int levels = args.get_int("levels", 4);
   const int tile_size_cells = args.get_int("tile-size-cells", 32);
   const std::string compression = args.get("compression", kCompressionZstd);
+  // Ablation knob, independent of compression: true (default) zigzag-varint packs each
+  // band's Haar coefficients before compression; false packs them as fixed-width int32
+  // instead. With compression=none this isolates varint packing's own bandwidth
+  // contribution, mirroring occupancy_grid_vxch_node's varint_encoding parameter.
+  const bool use_varint = args.get_bool("varint", true);
   if (tile_size_cells <= 0) {throw std::runtime_error("--tile-size-cells must be > 0");}
 
   const SyntheticGrid grid = vxch_test::read_grid(args.get("map", ""));
@@ -263,7 +287,8 @@ int cmd_encode(const ArgMap & args)
       }
 
       auto bands = make_haar_bands(
-        values, static_cast<std::size_t>(tw), static_cast<std::size_t>(th), levels, compression);
+        values, static_cast<std::size_t>(tw), static_cast<std::size_t>(th), levels, compression,
+        use_varint);
       tile_bands.push_back(std::move(bands));
       tile_coords.emplace_back(trow, tcol);
       tile_dims.emplace_back(tw, th);
@@ -296,6 +321,7 @@ int cmd_encode(const ArgMap & args)
     je["element_count"] = e.descriptor.element_count;
     je["uncompressed_size"] = e.descriptor.uncompressed_size;
     je["compressed_size"] = e.descriptor.compressed_size;
+    je["varint"] = e.descriptor.metadata.at(kHaarVarintKey) == "1";
     je["payload"] = e.payload;
     entries.push_back(std::move(je));
     total_compressed += e.descriptor.compressed_size;
@@ -311,6 +337,7 @@ int cmd_encode(const ArgMap & args)
   result["total_entries"] = order.size();
   result["raw_bytes"] = session["raw_bytes"];
   result["total_compressed_bytes"] = total_compressed;
+  result["varint"] = use_varint;
   std::cout << result.dump() << std::endl;
   return 0;
 }
@@ -369,7 +396,9 @@ int cmd_step(const ArgMap & args)
     const auto element_count = entry.at("element_count").get<std::size_t>();
 
     const auto raw = decompress_payload(desc, payload);
-    const auto coeffs = zigzag_varint_decode(raw, element_count);
+    const bool entry_varint = entry.at("varint").get<bool>();
+    const auto coeffs = entry_varint ?
+      zigzag_varint_decode(raw, element_count) : fixed_width_decode(raw, element_count);
 
     const int trow = entry.at("tile_row").get<int>();
     const int tcol = entry.at("tile_col").get<int>();

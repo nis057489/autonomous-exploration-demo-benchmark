@@ -37,7 +37,11 @@ distrobox enter jazzy_env -- python3 gui/vxch_gui.py
    irregular unexplored fringe) and writes it to `maps/synthetic_map.grid`.
 2. **Encode** -- runs `make_haar_bands` per tile (same tiling
    `occupancy_grid_vxch_node` does) and builds the ordered band send queue
-   in `maps/session.vxch`.
+   in `maps/session.vxch`. Compression (zstd/none) and varint packing
+   (on/off) are both exposed here for ablation -- e.g. compression=none +
+   varint off isolates the wavelet transform's own bandwidth win from
+   everything layered on top of it. Mirrors the real node's `compression`
+   and `varint_encoding` parameters (see `experiment.conf`).
 3. **Send Next Band** / **Send All** -- pops the next queued band, decodes
    it into the receiver's per-tile state via the same
    `reconstruct_haar_from_bands` the real `vxch_occupancy_grid_node` uses,

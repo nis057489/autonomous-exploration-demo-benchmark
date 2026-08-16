@@ -253,7 +253,7 @@ def _parse_peers(peers_str):
 
 def _team_map_share_actions(
     namespace, peers, map_transport, bandwidth_kbps, loss_pct, delay_ms, haar_levels,
-    tile_size_m, laptop_ip
+    compression, varint_encoding, tile_size_m, laptop_ip, schedule_mode
 ):
     """Per-peer DDIL relay (+ vxch encode/decode) feeding this robot's own
     team_map_fusion instance, entirely local except for the relay nodes
@@ -285,8 +285,10 @@ def _team_map_share_actions(
                     "output_base_topic": f"/{namespace}/vxch/map",
                     "haar_levels": haar_levels,
                     "tile_size_m": tile_size_m,
-                    "compression": "zstd",
+                    "compression": compression,
+                    "varint_encoding": varint_encoding,
                     "stream_id": namespace,
+                    "schedule_mode": schedule_mode,
                     "use_sim_time": False,
                 }],
             )
@@ -478,7 +480,12 @@ def _create_actions(context):
     loss_pct = float(LaunchConfiguration("loss_pct").perform(context))
     delay_ms = float(LaunchConfiguration("delay_ms").perform(context))
     haar_levels = int(LaunchConfiguration("haar_levels").perform(context))
+    compression = LaunchConfiguration("compression").perform(context)
+    varint_encoding = LaunchConfiguration("varint_encoding").perform(context).lower() in (
+        "1", "true", "yes", "on"
+    )
     tile_size_m = float(LaunchConfiguration("tile_size_m").perform(context))
+    schedule_mode = LaunchConfiguration("schedule_mode").perform(context)
     laptop_ip = os.environ.get("VIZ_LAPTOP_IP", "192.168.100.20")
 
     output_dir = tempfile.mkdtemp(prefix=f"bme_hw_{namespace}_")
@@ -645,7 +652,7 @@ def _create_actions(context):
     actions.extend(
         _team_map_share_actions(
             namespace, peers, map_transport, bandwidth_kbps, loss_pct, delay_ms,
-            haar_levels, tile_size_m, laptop_ip,
+            haar_levels, compression, varint_encoding, tile_size_m, laptop_ip, schedule_mode,
         )
     )
 
@@ -691,11 +698,32 @@ def generate_launch_description():
         DeclareLaunchArgument("delay_ms", default_value="0"),
         DeclareLaunchArgument("haar_levels", default_value="4"),
         DeclareLaunchArgument(
+            "compression", default_value="zstd",
+            description="vxch only. 'zstd' or 'none' -- zstd-compresses each band's "
+                        "zigzag-varint payload before it's sent; 'none' sends the raw "
+                        "varint bytes, useful for isolating how much of vxch's bandwidth "
+                        "win is the wavelet/tiling encoding itself vs. compression on top"),
+        DeclareLaunchArgument(
+            "varint_encoding", default_value="true",
+            description="vxch only. true (default) zigzag-varint packs each band's Haar "
+                        "coefficients before compression; false packs them as fixed-width "
+                        "int32 instead. Independent of compression -- with compression=none "
+                        "this isolates varint packing's own bandwidth contribution, since "
+                        "compression=none alone still leaves varint packing in place"),
+        DeclareLaunchArgument(
             "tile_size_m", default_value="2.0",
             description="Encode the map as independent tile_size_m x tile_size_m Haar "
                         "pyramids instead of one pyramid for the whole grid, so a "
                         "still-changing area (wherever this robot currently is) can't "
                         "starve another, already-settled area's detail bands from "
                         "reaching a peer"),
+        DeclareLaunchArgument(
+            "schedule_mode", default_value="smart",
+            description="vxch only. 'smart' = only resend a band when it actually "
+                        "changed, least-recently-sent-first within a tile. 'simple' = "
+                        "always resend every band every cycle, strict coarsest-first, "
+                        "no change detection -- matches how the baseline OccupancyGrid "
+                        "relay behaves (it has no dedup either), for isolating what the "
+                        "wavelet/tiling encoding itself buys independent of scheduling"),
         OpaqueFunction(function=_create_actions),
     ])

@@ -142,6 +142,15 @@ class VxchGui(tk.Tk):
             enc, textvariable=self.compression_var, values=["zstd", "none"],
             width=6, state="readonly",
         ).pack(side="left", padx=(2, 12))
+        # Ablation knob, independent of compression above: on = zigzag-varint pack each
+        # band's Haar coefficients before compression (default); off = fixed-width int32
+        # instead. With compression=none this isolates varint packing's own contribution --
+        # compression=none alone still leaves varint packing in place. Mirrors
+        # occupancy_grid_vxch_node's varint_encoding parameter.
+        self.varint_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            enc, text="Varint packing", variable=self.varint_var,
+        ).pack(side="left", padx=(0, 12))
         self.encode_btn = ttk.Button(enc, text="Encode", command=self.encode_map, state="disabled")
         self.encode_btn.pack(side="left")
 
@@ -310,16 +319,18 @@ class VxchGui(tk.Tk):
         self.encode_btn.configure(state="disabled")
         self.status_var.set("Encoding with vxch...")
         threading.Thread(
-            target=self._encode_thread, args=(levels, tile_size, self.compression_var.get()),
+            target=self._encode_thread,
+            args=(levels, tile_size, self.compression_var.get(), self.varint_var.get()),
             daemon=True,
         ).start()
 
-    def _encode_thread(self, levels, tile_size, compression):
+    def _encode_thread(self, levels, tile_size, compression, use_varint):
         try:
             result = run_cli(
                 "encode", "--map", MAP_PATH, "--out", SESSION_PATH,
                 "--levels", levels, "--tile-size-cells", tile_size,
                 "--compression", compression,
+                "--varint", "true" if use_varint else "false",
             )
         except Exception as e:  # noqa: BLE001
             self.after(0, lambda: self._encode_failed(str(e)))
@@ -344,9 +355,10 @@ class VxchGui(tk.Tk):
         self.send_all_btn.configure(state="normal")
         self.reset_btn.configure(state="normal")
         ratio = 100.0 * self.total_compressed_bytes / self.raw_bytes if self.raw_bytes else 0
+        varint_label = "varint" if result["varint"] else "fixed-width int32"
         self._log(
             f"Encoded {result['tiles']} tiles x {result['bands_per_tile']} bands "
-            f"= {self.total_entries} band messages queued. "
+            f"= {self.total_entries} band messages queued ({varint_label} packing). "
             f"Full stream = {fmt_bytes(self.total_compressed_bytes)} vs "
             f"{fmt_bytes(self.raw_bytes)} raw ({ratio:.0f}%)."
         )
