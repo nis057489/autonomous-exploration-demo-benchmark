@@ -27,15 +27,15 @@ std::uint32_t shift_to_uint32(std::int8_t v)
 
 Metadata manifest_metadata(
   std::uint32_t width, std::uint32_t height, int tile_size_cells, double resolution = 1.0,
-  const std::string & frame_id = "map")
+  const std::string & frame_id = "map", double origin_x = 0.0, double origin_y = 0.0)
 {
   return {
     {"grid_width", std::to_string(width)},
     {"grid_height", std::to_string(height)},
     {"tile_size_cells", std::to_string(tile_size_cells)},
     {"resolution", std::to_string(resolution)},
-    {"origin_x", "0"},
-    {"origin_y", "0"},
+    {"origin_x", std::to_string(origin_x)},
+    {"origin_y", std::to_string(origin_y)},
     {"frame_id", frame_id},
   };
 }
@@ -219,8 +219,14 @@ TEST(TileReconstructor, IngestBandDecodeFailureReturnsErrorWithoutThrowing)
   EXPECT_FALSE(error->empty());
 }
 
-TEST(TileReconstructor, ManifestGeometryChangeClearsAccumulatedTiles)
+TEST(TileReconstructor, ManifestWidthHeightGrowthPreservesAccumulatedTiles)
 {
+  // Grid growth alone (origin + tile_size_cells unchanged) must NOT drop
+  // already-decoded tile state -- tile_row/tile_col are pure array-index
+  // offsets, so growing grid_width/grid_height doesn't change what world
+  // location an existing tile's data belongs to. Regression test for a bug
+  // where production SLAM's routine grid growth (every few seconds, origin
+  // usually unchanged) wiped a peer's entire already-known map.
   constexpr int levels = 2;
   TileReconstructor reconstructor(levels);
   reconstructor.ingest_manifest(manifest_metadata(4, 4, 4), Stamp{1, 0});
@@ -231,9 +237,65 @@ TEST(TileReconstructor, ManifestGeometryChangeClearsAccumulatedTiles)
   }
   ASSERT_TRUE(reconstructor.reconstruct().has_value());
 
-  // A manifest announcing a different grid size must drop the old tile
-  // backlog -- it no longer corresponds to the same physical tiles.
+  // Grid grew (e.g. SLAM explored new area); origin and tile_size_cells unchanged.
   reconstructor.ingest_manifest(manifest_metadata(8, 8, 4), Stamp{2, 0});
+
+  const auto grid = reconstructor.reconstruct();
+  ASSERT_TRUE(grid.has_value());
+  EXPECT_EQ(grid->width, 8U);
+  EXPECT_EQ(grid->height, 8U);
+  // Original tile's decoded content must still be present at its same offset.
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      EXPECT_EQ(
+        grid->data[static_cast<std::size_t>(r) * 8 + static_cast<std::size_t>(c)],
+        occupancy[static_cast<std::size_t>(r) * 4 + static_cast<std::size_t>(c)])
+        << "cell (" << r << "," << c << ")";
+    }
+  }
+  // The newly-added region (never covered by any tile) reads as unknown.
+  EXPECT_EQ(grid->data[4], -1);          // row 0, col 4
+  EXPECT_EQ(grid->data[4 * 8 + 0], -1);  // row 4, col 0
+}
+
+TEST(TileReconstructor, ManifestOriginChangeClearsAccumulatedTiles)
+{
+  // An actual origin shift reindexes what world location array position
+  // (0,0) corresponds to -- existing tile_row/tile_col keys no longer mean
+  // the same place, so accumulated tile state must still be dropped.
+  constexpr int levels = 2;
+  TileReconstructor reconstructor(levels);
+  reconstructor.ingest_manifest(
+    manifest_metadata(4, 4, 4, 1.0, "map", 0.0, 0.0), Stamp{1, 0});
+  const auto occupancy = make_occupancy(4, 4);
+  const auto bands = encode_tile(occupancy, 4, 4, levels, 0, 0, 4);
+  for (std::size_t k = 0; k < bands.size(); ++k) {
+    reconstructor.ingest_band(static_cast<int>(k), bands[k].descriptor, bands[k].payload);
+  }
+  ASSERT_TRUE(reconstructor.reconstruct().has_value());
+
+  // Same grid dimensions and tile_size_cells -- only origin moved.
+  reconstructor.ingest_manifest(
+    manifest_metadata(4, 4, 4, 1.0, "map", 0.5, 0.0), Stamp{2, 0});
+  EXPECT_FALSE(reconstructor.reconstruct().has_value());
+}
+
+TEST(TileReconstructor, ManifestTileSizeChangeClearsAccumulatedTiles)
+{
+  // Same dimensions/origin -- only tile_size_cells changes (e.g. a resolution
+  // rescale) -- this genuinely invalidates tile_row/tile_col addressing and
+  // must still clear, unlike plain width/height growth above.
+  constexpr int levels = 2;
+  TileReconstructor reconstructor(levels);
+  reconstructor.ingest_manifest(manifest_metadata(8, 8, 4), Stamp{1, 0});
+  const auto occupancy = make_occupancy(4, 4);
+  const auto bands = encode_tile(occupancy, 4, 4, levels, 0, 0, 4);
+  for (std::size_t k = 0; k < bands.size(); ++k) {
+    reconstructor.ingest_band(static_cast<int>(k), bands[k].descriptor, bands[k].payload);
+  }
+  ASSERT_TRUE(reconstructor.reconstruct().has_value());
+
+  reconstructor.ingest_manifest(manifest_metadata(8, 8, 2), Stamp{2, 0});
   EXPECT_FALSE(reconstructor.reconstruct().has_value());
 }
 

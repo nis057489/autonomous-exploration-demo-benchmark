@@ -143,24 +143,36 @@ public:
     const auto new_height = static_cast<std::uint32_t>(std::stoul(h_str));
     const std::string tile_size_str = get_meta("tile_size_cells");
     const int new_tile_size_cells = tile_size_str.empty() ? 0 : std::stoi(tile_size_str);
+    // Parsed before the clear-decision below so geometry_.origin_x/y still hold the
+    // previous manifest's values for comparison.
+    const std::string ox = get_meta("origin_x");
+    const double new_origin_x = std::stod(ox.empty() ? "0" : ox);
+    const std::string oy = get_meta("origin_y");
+    const double new_origin_y = std::stod(oy.empty() ? "0" : oy);
 
-    if (new_width != geometry_.grid_width || new_height != geometry_.grid_height ||
+    // tile_row/tile_col are pure array-index offsets (see TileScheduler::
+    // compute_tile_geom) -- NOT world-coordinate addressing. grid_width/grid_height
+    // growing (routine as SLAM explores new area -- happens every few seconds in
+    // practice) does NOT change what world location an existing tile's data belongs
+    // to, so it must not invalidate accumulated tile state; reconstruct() already
+    // bounds-checks tile placement against the current grid_width/height on every
+    // call. Only an actual origin shift (which reindexes what array position (0,0)
+    // means in the world) or a tile-partition-shape change invalidates existing tiles.
+    if (new_origin_x != geometry_.origin_x || new_origin_y != geometry_.origin_y ||
       (new_tile_size_cells != 0 && new_tile_size_cells != geometry_.tile_size_cells))
     {
       tiles_.clear();
-      geometry_.grid_width = new_width;
-      geometry_.grid_height = new_height;
     }
+    geometry_.grid_width = new_width;
+    geometry_.grid_height = new_height;
     if (new_tile_size_cells != 0) {
       geometry_.tile_size_cells = new_tile_size_cells;
     }
 
     const std::string res_str = get_meta("resolution");
     geometry_.grid_resolution = res_str.empty() ? 0.05F : std::stof(res_str);
-    const std::string ox = get_meta("origin_x");
-    geometry_.origin_x = std::stod(ox.empty() ? "0" : ox);
-    const std::string oy = get_meta("origin_y");
-    geometry_.origin_y = std::stod(oy.empty() ? "0" : oy);
+    geometry_.origin_x = new_origin_x;
+    geometry_.origin_y = new_origin_y;
     geometry_.frame_id = get_meta("frame_id");
     if (geometry_.frame_id.empty()) {geometry_.frame_id = "map";}
     geometry_.manifest_stamp = stamp;
@@ -306,6 +318,10 @@ public:
 private:
   int haar_levels_;
   GridGeometry geometry_;
+  // Not actively pruned if the grid ever shrinks below a tile's offset --
+  // reconstruct()'s bounds checks already skip placing such a tile, so a stale entry
+  // here is a correctness no-op, only a minor unbounded-growth risk. Not observed in
+  // practice (grids only grow as SLAM explores); revisit if that changes.
   std::map<TileKey, TileBandState> tiles_;
 };
 
