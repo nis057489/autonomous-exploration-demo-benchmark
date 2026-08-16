@@ -65,8 +65,19 @@ def run_cli(*args):
 def array_to_photo(cells):
     rgb = grid_io.grid_to_rgb(cells)
     img = Image.fromarray(rgb, mode="RGB")
-    scale = max(1, CANVAS_PX // max(img.width, img.height))
-    img = img.resize((img.width * scale, img.height * scale), Image.NEAREST)
+    # Always fit the longer side to CANVAS_PX, in both directions -- the old
+    # integer-floor-div-clamped-to-1 version only ever upscaled, so a map
+    # larger than the display box (e.g. a 640x480 generated map) rendered at
+    # full native pixel size and grew the whole window (Tk auto-sizes to its
+    # widgets) past the screen. NEAREST keeps small maps crisp/blocky when
+    # enlarging; BOX area-averages when shrinking, so a heavily downscaled
+    # large map still shows where mixed free/occupied/unknown regions are
+    # (as gray blends) instead of aliasing into an arbitrary sparse subsample.
+    scale = CANVAS_PX / max(img.width, img.height)
+    new_w = max(1, round(img.width * scale))
+    new_h = max(1, round(img.height * scale))
+    resample = Image.NEAREST if scale >= 1 else Image.BOX
+    img = img.resize((new_w, new_h), resample)
     return ImageTk.PhotoImage(img)
 
 

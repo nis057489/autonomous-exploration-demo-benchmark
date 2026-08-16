@@ -2,7 +2,9 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <functional>
+#include <string>
 #include <vector>
 
 #include "voxelcodec_ros/codec.hpp"
@@ -57,6 +59,50 @@ std::vector<std::uint32_t> make_grid(
     }
   }
   return values;
+}
+
+// The streaming per-band consumers (occupancy_grid_vxch_node's decoder counterpart,
+// vxch_occupancy_grid_node, and vxch_visual_test's CLI) each keep their own local copy
+// of these two decode functions rather than sharing one from the library -- see
+// zigzag_varint_decode's own comment in vxch_occupancy_grid_node.cpp. Mirrored here so
+// tests can drive the exact same decompress -> decode -> reconstruct_haar_from_bands
+// path production code uses, instead of the archive-style decode_channel/
+// decode_haar_progressive path below (which -- unlike this one -- doesn't consult
+// kHaarVarintKey and always assumes varint packing).
+std::vector<std::int64_t> zigzag_varint_decode(
+  const std::vector<std::uint8_t> & raw, std::size_t count)
+{
+  std::vector<std::int64_t> out;
+  out.reserve(count);
+  std::size_t offset = 0;
+  while (out.size() < count) {
+    std::uint64_t value = 0;
+    int shift = 0;
+    while (offset < raw.size()) {
+      const std::uint8_t byte = raw[offset++];
+      value |= static_cast<std::uint64_t>(byte & 0x7FU) << shift;
+      if ((byte & 0x80U) == 0) {break;}
+      shift += 7;
+      if (shift >= 64) {throw std::runtime_error("varint overflow");}
+    }
+    const std::int64_t decoded = (value & 1U)
+      ? -static_cast<std::int64_t>((value >> 1U) + 1U)
+      : static_cast<std::int64_t>(value >> 1U);
+    out.push_back(decoded);
+  }
+  return out;
+}
+
+std::vector<std::int64_t> fixed_width_decode(
+  const std::vector<std::uint8_t> & raw, std::size_t count)
+{
+  std::vector<std::int64_t> out(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    std::int32_t v;
+    std::memcpy(&v, &raw[i * 4], 4);
+    out[i] = v;
+  }
+  return out;
 }
 
 // decode_channel() (unlike decode_haar_progressive()) validates
@@ -385,4 +431,76 @@ TEST(VoxelCodecRos, HaarWaveletLegacy1dPathUnaffectedByGridDispatch)
   for (std::size_t i = 0; i < values.size(); ++i) {
     EXPECT_EQ(out[i], values[i]);
   }
+}
+
+TEST(VoxelCodecRos, HaarAblationMatrixRoundTripExact)
+{
+  // Formalizes the compression x varint_encoding ablation matrix manually verified
+  // via vxch_visual_test/vxch_cli: every combination must reconstruct bit-exact
+  // through the same decompress -> decode -> reconstruct_haar_from_bands path
+  // occupancy_grid_vxch_node / vxch_occupancy_grid_node use for real band traffic
+  // (as opposed to the archive-style decode_channel/decode_haar_progressive path
+  // exercised elsewhere in this file, which doesn't know about kHaarVarintKey).
+  constexpr std::size_t W = 48, H = 36;
+  constexpr int levels = 3;
+  const auto values = make_grid(W, H, [](std::size_t c, std::size_t r) {
+      return static_cast<std::uint32_t>((c * 5 + r * 3) % 47);
+    });
+
+  for (const char * compression :
+    {voxelcodec_ros::kCompressionNone, voxelcodec_ros::kCompressionZstd})
+  {
+    for (const bool use_varint : {true, false}) {
+      SCOPED_TRACE(
+        std::string("compression=") + compression +
+        " varint=" + (use_varint ? "true" : "false"));
+
+      const auto bands =
+        voxelcodec_ros::make_haar_bands(values, W, H, levels, compression, use_varint);
+      ASSERT_EQ(bands.size(), static_cast<std::size_t>(levels + 1));
+
+      std::vector<std::vector<std::int64_t> > band_coeffs(bands.size());
+      for (std::size_t k = 0; k < bands.size(); ++k) {
+        const auto & desc = bands[k].descriptor;
+        EXPECT_EQ(desc.metadata.at(voxelcodec_ros::kHaarVarintKey), use_varint ? "1" : "0");
+        const auto raw = voxelcodec_ros::decompress_payload(desc, bands[k].payload);
+        band_coeffs[k] = use_varint ?
+          zigzag_varint_decode(raw, desc.element_count) :
+          fixed_width_decode(raw, desc.element_count);
+      }
+
+      const auto recon =
+        voxelcodec_ros::reconstruct_haar_from_bands(band_coeffs, W, H, levels, levels + 1);
+      ASSERT_EQ(recon.width, W);
+      ASSERT_EQ(recon.height, H);
+      for (std::size_t i = 0; i < values.size(); ++i) {
+        EXPECT_EQ(recon.values[i], values[i]) << "mismatch at index " << i;
+      }
+    }
+  }
+}
+
+TEST(VoxelCodecRos, HaarVarintPackingSmallerThanFixedWidthForSmallCoefficients)
+{
+  // Small-magnitude coefficients (typical for a mostly-flat occupancy region) should
+  // pack to fewer bytes under varint than the flat 4 bytes/coefficient fixed-width
+  // encoding always uses -- the whole reason varint packing exists as a bandwidth win
+  // independent of zstd (see occupancy_grid_vxch_node's varint_encoding parameter).
+  constexpr std::size_t W = 32, H = 32;
+  constexpr int levels = 2;
+  const auto values = make_grid(W, H, [](std::size_t, std::size_t) {return 0U;});
+
+  const auto varint_bands = voxelcodec_ros::make_haar_bands(values, W, H, levels, "none", true);
+  const auto fixed_bands = voxelcodec_ros::make_haar_bands(values, W, H, levels, "none", false);
+
+  std::size_t varint_total = 0, fixed_total = 0, total_elements = 0;
+  for (const auto & b : varint_bands) {varint_total += b.payload.size();}
+  for (const auto & b : fixed_bands) {
+    fixed_total += b.payload.size();
+    total_elements += b.descriptor.element_count;
+  }
+
+  EXPECT_LT(varint_total, fixed_total);
+  // Fixed-width is exactly 4 bytes per coefficient, always -- no data-dependent variation.
+  EXPECT_EQ(fixed_total, total_elements * 4);
 }

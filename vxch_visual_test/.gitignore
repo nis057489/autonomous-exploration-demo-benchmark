@@ -3,4 +3,6 @@ maps/*.grid
 maps/*.vxch
 maps/state.json
 !maps/.gitkeep
+figures/*.png
+!figures/.gitkeep
 __pycache__/

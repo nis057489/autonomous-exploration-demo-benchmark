@@ -54,6 +54,22 @@ distrobox enter jazzy_env -- python3 gui/vxch_gui.py
 State persists across restarts in `maps/` (`.grid`/`.vxch`/`state.json`,
 all gitignored) -- reopening the GUI resumes wherever the last run left off.
 
+## Compression/varint sweep
+
+`compression_size_sweep.py` sweeps map size against the full compression x
+varint ablation matrix (the same four points as the GUI's Compression/Varint
+controls) via `vxch_cli gen-map`/`encode` and plots encoded band-stream size,
+absolute and as a percentage of the raw `OccupancyGrid` size:
+
+```
+distrobox enter jazzy_env -- python3 compression_size_sweep.py
+```
+
+Writes `figures/compression_size_sweep.png` (gitignored) and prints the
+underlying numbers to stdout. `none + fixed-width` is a useful sanity check
+in its own right -- it should sit at a flat 400% of raw at every size (int32
+per coefficient vs. int8 per raw cell), independent of map content.
+
 ## What's real vs. simplified
 
 The encode/decode math (Haar forward/inverse, zigzag-varint, zstd
@@ -79,5 +95,7 @@ src/map_gen.hpp        synthetic occupancy grid generator
 src/main.cpp           gen-map / encode / step subcommands
 gui/grid_io.py          Python .grid reader (numpy) + grayscale colorizing
 gui/vxch_gui.py         Tkinter GUI
+compression_size_sweep.py  map-size x compression/varint ablation sweep + plot
 maps/                   generated grids/sessions/state (gitignored)
+figures/                generated plots (gitignored)
 ```
