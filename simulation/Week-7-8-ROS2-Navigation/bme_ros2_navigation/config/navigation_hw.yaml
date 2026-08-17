@@ -4,9 +4,9 @@ bt_navigator:
     robot_base_frame: base_link
     odom_topic: /odom
     bt_loop_duration: 10
-    default_server_timeout: 5000
-    wait_for_service_timeout: 1000
-    action_server_result_timeout: 900.0
+    default_server_timeout: 15000
+    wait_for_service_timeout: 10000
+    action_server_result_timeout: 5000.0
     navigators: ["navigate_to_pose", "navigate_through_poses"]
     navigate_to_pose:
       plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
