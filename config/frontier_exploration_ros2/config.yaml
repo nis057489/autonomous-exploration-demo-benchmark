@@ -292,11 +292,11 @@ frontier_explorer:
     # Filter out candidate frontiers that another team member has already resolved (via the
     # shared team map) or is currently near (via peer poses). Disable for single-robot runs
     # or if you want every robot to plan independently of its teammates.
-    team_awareness_enabled: false
+    team_awareness_enabled: true
 
     # Relative topic (resolved under this robot's own namespace) for the shared/fused team
     # occupancy map used by goal_point_known_to_team filtering above.
-    team_map_topic: nav_map
+    team_map_topic: team_map_ddil
 
     # Radius in meters around a candidate frontier to check against the team map above.
     # If any cell in this radius is already known (free or occupied) to the team, the
@@ -321,4 +321,4 @@ frontier_explorer:
 
     # Rate in Hz at which this robot publishes its own pose above. Only runs when
     # peer_pose_topics is non-empty. 0.0 disables publishing.
-    own_pose_publish_rate_hz: 1.0
+    own_pose_publish_rate_hz: 2.0
