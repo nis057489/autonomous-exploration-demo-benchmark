@@ -4,7 +4,7 @@ frontier_explorer:
     # --------------- TOPICS --------------- #
 
     # Occupancy grid topic used to compute frontiers.
-    map_topic: /nav_map
+    map_topic: /map
 
     # Global costmap topic used to filter candidate frontiers.
     costmap_topic: /global_costmap/costmap
