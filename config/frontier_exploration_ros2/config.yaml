@@ -197,7 +197,7 @@ frontier_explorer:
     # This removes tiny fragments caused by noise or partial unknown boundaries.
     # Lower values increase responsiveness but can create jittery micro-goals.
     # Higher values stabilize behavior but may ignore narrow real openings.
-    min_frontier_size_cells: 10
+    min_frontier_size_cells: 5
 
     # Spatial sigma of the bilateral filter in map cells.
     # Larger values smooth over wider neighborhoods before frontier extraction.
@@ -258,7 +258,7 @@ frontier_explorer:
     frontier_suppression_timeout_s: 90.0
 
     # Maximum allowed time in seconds without meaningful progress before a frontier goal is canceled.
-    frontier_suppression_no_progress_timeout_s: 10.0
+    frontier_suppression_no_progress_timeout_s: 30.0
 
     # Minimum distance_remaining improvement in meters required to count as progress.
     frontier_suppression_progress_epsilon_m: 0.25
