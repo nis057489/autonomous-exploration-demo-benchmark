@@ -144,4 +144,4 @@ echo "(Ctrl-b d to detach without stopping it.)"
 echo
 echo "Stop everything with: ./stop_multi_robot.sh"
 
-./set_wifi_bandwidth.sh apply --profile degraded --delay-s 120
+./set_wifi_bandwidth.sh apply --profile degraded --delay-s 150
