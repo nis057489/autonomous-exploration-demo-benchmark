@@ -292,7 +292,7 @@ frontier_explorer:
     # Filter out candidate frontiers that another team member has already resolved (via the
     # shared team map) or is currently near (via peer poses). Disable for single-robot runs
     # or if you want every robot to plan independently of its teammates.
-    team_awareness_enabled: true
+    team_awareness_enabled: false
 
     # Relative topic (resolved under this robot's own namespace) for the shared/fused team
     # occupancy map used by goal_point_known_to_team filtering above.
@@ -307,7 +307,7 @@ frontier_explorer:
     # Radius in meters used to reject a candidate frontier if any teammate is currently within
     # it (via peer_pose_topics below). Prevents robots from converging on the same area.
     # 0.0 disables peer-proximity filtering.
-    peer_avoidance_radius_m: 2.0
+    peer_avoidance_radius_m: 1.0
 
     # Absolute topics this robot subscribes to for each teammate's pose, used by
     # peer_avoidance_radius_m above. Multi-robot launch files normally inject this per robot
