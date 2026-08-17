@@ -112,7 +112,7 @@ frontier_explorer:
 
     # Enable the post-goal settle delay after a successful frontier goal.
     # Useful if you want stability over speed. Use if you have slow SLAM & LiDAR configuration. 
-    post_goal_settle_enabled: false
+    post_goal_settle_enabled: true
 
     # Minimum seconds to wait before selecting the next frontier after a successful goal.
     post_goal_min_settle: 1.50
@@ -137,13 +137,13 @@ frontier_explorer:
     # Increasing this makes the explorer more distance-sensitive and conservative.
     # Decreasing it makes information gain dominate more often.
     # Example: 2.0 prefers closer frontiers, 0.5 allows farther high-gain picks.
-    weight_distance_wd: 1.0
+    weight_distance_wd: 2.0
 
     # Weight applied to the frontier information-gain term.
     # Larger values favor large frontier clusters that promise more map expansion.
     # Smaller values make the robot clean up nearby small frontiers first.
     # Example: 2.0 may skip small room corners, 0.5 tends to clear them sooner.
-    weight_gain_ws: 1.0
+    weight_gain_ws: 0.5
 
     # Max linear speed used only in the lower-bound time term.
     # It does not command the robot directly; it estimates how fast a frontier
@@ -197,7 +197,7 @@ frontier_explorer:
     # This removes tiny fragments caused by noise or partial unknown boundaries.
     # Lower values increase responsiveness but can create jittery micro-goals.
     # Higher values stabilize behavior but may ignore narrow real openings.
-    min_frontier_size_cells: 5
+    min_frontier_size_cells: 10
 
     # Spatial sigma of the bilateral filter in map cells.
     # Larger values smooth over wider neighborhoods before frontier extraction.
@@ -258,7 +258,7 @@ frontier_explorer:
     frontier_suppression_timeout_s: 90.0
 
     # Maximum allowed time in seconds without meaningful progress before a frontier goal is canceled.
-    frontier_suppression_no_progress_timeout_s: 20.0
+    frontier_suppression_no_progress_timeout_s: 10.0
 
     # Minimum distance_remaining improvement in meters required to count as progress.
     frontier_suppression_progress_epsilon_m: 0.25
