@@ -21,6 +21,7 @@ the local SLAM map alone into the global frame.
 
 import math
 
+import numpy as np
 import rclpy
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
@@ -193,11 +194,12 @@ class PerRobotMapCompositor(Node):
         out.info.origin.position.x = origin_x
         out.info.origin.position.y = origin_y
         out.info.origin.orientation.w = 1.0
-        out.data = [-1] * (width * height)
 
+        canvas = np.full((height, width), -1, dtype=np.int8)
         if not suppress_team:
-            self._copy_team_cells(team, out)
-        self._stamp_local_cells(local, out)
+            self._copy_team_cells(team, canvas, origin_x, origin_y, res)
+        self._stamp_local_cells(local, canvas, origin_x, origin_y, res)
+        out.data = canvas.reshape(-1).tolist()
         return out
 
     def _local_global_bounds(self, local: OccupancyGrid):
@@ -220,25 +222,28 @@ class PerRobotMapCompositor(Node):
             max_x, max_y = max(max_x, gx), max(max_y, gy)
         return min_x, min_y, max_x, max_y
 
-    def _copy_team_cells(self, team: OccupancyGrid, canvas: OccupancyGrid):
+    def _copy_team_cells(
+        self, team: OccupancyGrid, canvas: np.ndarray, canvas_origin_x: float,
+        canvas_origin_y: float, res_dst: float,
+    ):
         """Copy team's cells into canvas at team's (axis-aligned) position within it."""
-        res_dst = canvas.info.resolution
-        col_offset = round((team.info.origin.position.x - canvas.info.origin.position.x) / res_dst)
-        row_offset = round((team.info.origin.position.y - canvas.info.origin.position.y) / res_dst)
-        out_w = canvas.info.width
-        out_h = canvas.info.height
-        data_out = canvas.data
-        data_in = team.data
+        col_offset = round((team.info.origin.position.x - canvas_origin_x) / res_dst)
+        row_offset = round((team.info.origin.position.y - canvas_origin_y) / res_dst)
+        out_h, out_w = canvas.shape
+        t_h, t_w = team.info.height, team.info.width
+        if t_h == 0 or t_w == 0:
+            return
 
-        for row in range(team.info.height):
-            out_row = row_offset + row
-            if not (0 <= out_row < out_h):
-                continue
-            for col in range(team.info.width):
-                out_col = col_offset + col
-                if not (0 <= out_col < out_w):
-                    continue
-                data_out[out_row * out_w + out_col] = data_in[row * team.info.width + col]
+        src_row0, src_row1 = max(0, -row_offset), min(t_h, out_h - row_offset)
+        src_col0, src_col1 = max(0, -col_offset), min(t_w, out_w - col_offset)
+        if src_row0 >= src_row1 or src_col0 >= src_col1:
+            return  # team map falls entirely outside canvas
+
+        dst_row0, dst_row1 = src_row0 + row_offset, src_row1 + row_offset
+        dst_col0, dst_col1 = src_col0 + col_offset, src_col1 + col_offset
+
+        team_arr = np.asarray(team.data, dtype=np.int8).reshape(t_h, t_w)
+        canvas[dst_row0:dst_row1, dst_col0:dst_col1] = team_arr[src_row0:src_row1, src_col0:src_col1]
 
     def _local_to_global(self, local: OccupancyGrid) -> OccupancyGrid | None:
         """When no team map is available, transform the local SLAM map to global frame."""
@@ -277,54 +282,50 @@ class PerRobotMapCompositor(Node):
         out.info.origin.position.x = origin_x
         out.info.origin.position.y = origin_y
         out.info.origin.orientation.w = 1.0
-        out.data = [-1] * (width * height)
 
-        self._stamp_local_cells(local, out)
+        canvas = np.full((height, width), -1, dtype=np.int8)
+        self._stamp_local_cells(local, canvas, origin_x, origin_y, res)
+        out.data = canvas.reshape(-1).tolist()
         return out
 
-    def _stamp_local_cells(self, local: OccupancyGrid, canvas: OccupancyGrid):
+    def _stamp_local_cells(
+        self, local: OccupancyGrid, canvas: np.ndarray, origin_x: float,
+        origin_y: float, res_dst: float,
+    ):
         """Transform non-unknown local SLAM cells into canvas (in-place)."""
         map_info = local.info
-        if map_info.width == 0 or map_info.height == 0:
+        w, h = map_info.width, map_info.height
+        if w == 0 or h == 0:
             return
 
         res_src = map_info.resolution
-        res_dst = canvas.info.resolution
-        origin_x = canvas.info.origin.position.x
-        origin_y = canvas.info.origin.position.y
-        out_w = canvas.info.width
-        out_h = canvas.info.height
+        out_h, out_w = canvas.shape
+
+        data = np.asarray(local.data, dtype=np.int8).reshape(h, w)
+        rows, cols = np.nonzero(data >= 0)  # skip unknown cells — don't clear team knowledge
+        if rows.size == 0:
+            return
+        values = data[rows, cols]
+
+        src_x = (cols.astype(np.float64) + 0.5) * res_src
+        src_y = (rows.astype(np.float64) + 0.5) * res_src
 
         map_yaw = _yaw_from_quaternion(map_info.origin.orientation)
-        map_cos = math.cos(map_yaw)
-        map_sin = math.sin(map_yaw)
-        off_cos = math.cos(self._offset_yaw)
-        off_sin = math.sin(self._offset_yaw)
+        map_cos, map_sin = math.cos(map_yaw), math.sin(map_yaw)
+        off_cos, off_sin = math.cos(self._offset_yaw), math.sin(self._offset_yaw)
 
-        data_in = local.data
-        data_out = canvas.data
+        # local cell → map frame (apply map origin)
+        mx = map_info.origin.position.x + map_cos * src_x - map_sin * src_y
+        my = map_info.origin.position.y + map_sin * src_x + map_cos * src_y
+        # map frame → global frame (apply spawn offset)
+        gx = self._offset_x + off_cos * mx - off_sin * my
+        gy = self._offset_y + off_sin * mx + off_cos * my
 
-        for row in range(map_info.height):
-            src_y = (row + 0.5) * res_src
-            for col in range(map_info.width):
-                value = data_in[row * map_info.width + col]
-                if value < 0:
-                    continue  # unknown in local SLAM — don't clear team knowledge
+        out_col = ((gx - origin_x) / res_dst).astype(np.int64)
+        out_row = ((gy - origin_y) / res_dst).astype(np.int64)
 
-                src_x = (col + 0.5) * res_src
-                # local cell → map frame (apply map origin)
-                mx = map_info.origin.position.x + map_cos * src_x - map_sin * src_y
-                my = map_info.origin.position.y + map_sin * src_x + map_cos * src_y
-                # map frame → global frame (apply spawn offset)
-                gx = self._offset_x + off_cos * mx - off_sin * my
-                gy = self._offset_y + off_sin * mx + off_cos * my
-
-                out_col = int((gx - origin_x) / res_dst)
-                out_row = int((gy - origin_y) / res_dst)
-                if not (0 <= out_col < out_w and 0 <= out_row < out_h):
-                    continue
-
-                data_out[out_row * out_w + out_col] = int(value)
+        mask = (out_col >= 0) & (out_col < out_w) & (out_row >= 0) & (out_row < out_h)
+        canvas[out_row[mask], out_col[mask]] = values[mask]
 
 
 def main():
