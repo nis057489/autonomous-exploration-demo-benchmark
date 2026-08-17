@@ -112,7 +112,7 @@ frontier_explorer:
 
     # Enable the post-goal settle delay after a successful frontier goal.
     # Useful if you want stability over speed. Use if you have slow SLAM & LiDAR configuration. 
-    post_goal_settle_enabled: true
+    post_goal_settle_enabled: false
 
     # Minimum seconds to wait before selecting the next frontier after a successful goal.
     post_goal_min_settle: 1.50
@@ -143,7 +143,7 @@ frontier_explorer:
     # Larger values favor large frontier clusters that promise more map expansion.
     # Smaller values make the robot clean up nearby small frontiers first.
     # Example: 2.0 may skip small room corners, 0.5 tends to clear them sooner.
-    weight_gain_ws: 0.5
+    weight_gain_ws: 1.0
 
     # Max linear speed used only in the lower-bound time term.
     # It does not command the robot directly; it estimates how fast a frontier
@@ -162,7 +162,7 @@ frontier_explorer:
     # This favors frontiers that can reveal more space from farther away.
     # Example: 0.5 makes costs distance-heavy, 2.0 rewards sensing reach more.
     # Doesn't have to be a real sensor value. Used for distance scoring.
-    sensor_effective_range_m: 0.5
+    sensor_effective_range_m: 1.5
 
 
     # --------------- Navigation Safety --------------- #
@@ -258,7 +258,7 @@ frontier_explorer:
     frontier_suppression_timeout_s: 90.0
 
     # Maximum allowed time in seconds without meaningful progress before a frontier goal is canceled.
-    frontier_suppression_no_progress_timeout_s: 30.0
+    frontier_suppression_no_progress_timeout_s: 20.0
 
     # Minimum distance_remaining improvement in meters required to count as progress.
     frontier_suppression_progress_epsilon_m: 0.25
@@ -267,7 +267,7 @@ frontier_explorer:
     # Set to cover the real Nav2 lifecycle bring-up time (observed ~35s on this hardware,
     # see startup_delay_s above) plus margin, so early goal rejections during bring-up never
     # count as a suppression strike at all.
-    frontier_suppression_startup_grace_period_s: 60.0
+    frontier_suppression_startup_grace_period_s: 35.0
 
     # Maximum number of tracked failed frontier attempt records kept in memory.
     frontier_suppression_max_attempt_records: 256
@@ -302,12 +302,12 @@ frontier_explorer:
     # If any cell in this radius is already known (free or occupied) to the team, the
     # frontier is skipped -- no need to send a robot to re-derive shared information.
     # 0.0 disables the check.
-    team_known_check_radius_m: 2.0
+    team_known_check_radius_m: 1.0
 
     # Radius in meters used to reject a candidate frontier if any teammate is currently within
     # it (via peer_pose_topics below). Prevents robots from converging on the same area.
     # 0.0 disables peer-proximity filtering.
-    peer_avoidance_radius_m: 0.0
+    peer_avoidance_radius_m: 1.0
 
     # Absolute topics this robot subscribes to for each teammate's pose, used by
     # peer_avoidance_radius_m above. Multi-robot launch files normally inject this per robot
