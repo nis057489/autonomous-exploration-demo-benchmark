@@ -23,7 +23,10 @@ Usage:
 """
 import argparse
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import matplotlib
@@ -38,11 +41,12 @@ from rclpy.serialization import deserialize_message
 from nav_msgs.msg import OccupancyGrid
 
 COLOR_BASELINE = "#eb6834"
-COLOR_VXCH = "#2a78d6"
+COLOR_WAVESTREAM = "#2a78d6"
 TEXT_PRIMARY = "#1a1a1a"
 TEXT_SECONDARY = "#52514e"
 GRID_COLOR = "#cccccc"
-CONDITIONS = ("baseline", "vxch")
+CONDITIONS = ("baseline", "vxch")  # internal keys -- match run-dir/CLI naming, unrelated to display
+DISPLAY_NAMES = {"baseline": "Baseline", "vxch": "Wavestream"}
 LINESTYLES = ("-", "--", ":", "-.")
 
 
@@ -56,18 +60,46 @@ def parse_robot_paths(pairs):
     return out
 
 
+def _reindexed_copy(bag_dir):
+    """metadata.yaml is missing (recorder killed before finalizing, e.g. an
+    interrupted run) -- copy the raw .mcap into a scratch dir and reindex
+    there, mirroring replay_compare.sh's same fallback, so the original
+    recording is never touched. Returns the scratch dir, or raises if there's
+    nothing recoverable (no .mcap file, or reindexing itself fails)."""
+    mcap_files = sorted(bag_dir.glob("*.mcap"))
+    if not mcap_files:
+        raise FileNotFoundError(f"no .mcap file found in {bag_dir}")
+    scratch = Path(tempfile.mkdtemp(prefix="vxch_figure_reindex_"))
+    for mcap_file in mcap_files:
+        shutil.copy2(mcap_file, scratch)
+    subprocess.run(
+        ["ros2", "bag", "reindex", "-s", "mcap", str(scratch)],
+        check=True, capture_output=True, text=True,
+    )
+    return scratch
+
+
 def read_bag(robot, bag_dir):
     """Returns (incoming_bytes, coverage) where coverage is a list of
     (seconds_since_start, known_area_m2), or None if the bag can't be read."""
-    reader = SequentialReader()
+    bag_dir = Path(bag_dir)
+    scratch_dir = None
     try:
+        open_dir = bag_dir
+        if not (bag_dir / "metadata.yaml").is_file():
+            scratch_dir = _reindexed_copy(bag_dir)
+            open_dir = scratch_dir
+
+        reader = SequentialReader()
         reader.open(
-            StorageOptions(uri=str(bag_dir), storage_id=""),
+            StorageOptions(uri=str(open_dir), storage_id=""),
             ConverterOptions(input_serialization_format="", output_serialization_format=""),
         )
-    except RuntimeError as e:
+    except Exception as e:
         print(f"warning: failed to open bag for {robot} ({bag_dir}): {e}", file=sys.stderr)
         print(f"  if metadata.yaml is missing, try: ros2 bag reindex -s mcap {bag_dir}", file=sys.stderr)
+        if scratch_dir is not None:
+            shutil.rmtree(scratch_dir, ignore_errors=True)
         return None
 
     incoming_re = re.compile(rf"^/{re.escape(robot)}/incoming/")
@@ -88,6 +120,10 @@ def read_bag(robot, bag_dir):
             known = int(np.count_nonzero(np.asarray(msg.data) != -1))
             area_m2 = known * (msg.info.resolution ** 2)
             coverage.append(((t_ns - start_ns) / 1e9, area_m2))
+
+    del reader
+    if scratch_dir is not None:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
 
     coverage.sort(key=lambda p: p[0])
     return incoming_bytes, coverage
@@ -111,7 +147,7 @@ def plot_bandwidth(ax, results):
     for robot in robots:
         heights_kb = np.array([results[c].get(robot, (0, []))[0] / 1024 for c in CONDITIONS])
         ax.bar(x, heights_kb, bottom=bottoms, width=0.45,
-               color=[COLOR_BASELINE, COLOR_VXCH], edgecolor="white", linewidth=2, zorder=3)
+               color=[COLOR_BASELINE, COLOR_WAVESTREAM], edgecolor="white", linewidth=2, zorder=3)
         bottoms += heights_kb
 
     totals = bottoms
@@ -122,7 +158,7 @@ def plot_bandwidth(ax, results):
 
     if totals[0] > 0 and totals[1] > 0 and totals[0] != totals[1]:
         bigger, smaller = max(totals), min(totals)
-        winner = "VXCH" if totals[1] < totals[0] else "baseline"
+        winner = DISPLAY_NAMES["vxch"] if totals[1] < totals[0] else DISPLAY_NAMES["baseline"]
         ax.text(0.5, 0.92, f"{bigger / smaller:.1f}× less data ({winner})",
                 transform=ax.transAxes, ha="center", va="top",
                 fontsize=10.5, color=TEXT_SECONDARY, style="italic")
@@ -134,14 +170,14 @@ def plot_bandwidth(ax, results):
         ax.set_ylim(0, max(totals) * 1.25 if max(totals) > 0 else 1)
 
     ax.set_xticks(x)
-    ax.set_xticklabels(["Baseline", "VXCH"], fontsize=11, color=TEXT_PRIMARY, fontweight="bold")
+    ax.set_xticklabels([DISPLAY_NAMES[c] for c in CONDITIONS], fontsize=11, color=TEXT_PRIMARY, fontweight="bold")
     ax.set_ylabel("Inter-robot map traffic (KB)", fontsize=11, color=TEXT_SECONDARY)
     ax.set_title("Map-sharing bandwidth", fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
     style_ax(ax)
 
 
 def plot_coverage(ax, results):
-    colors = {"baseline": COLOR_BASELINE, "vxch": COLOR_VXCH}
+    colors = {"baseline": COLOR_BASELINE, "vxch": COLOR_WAVESTREAM}
     robots = sorted({r for cond in results.values() for r in cond})
     robot_style = {r: LINESTYLES[i % len(LINESTYLES)] for i, r in enumerate(robots)}
 
@@ -161,7 +197,7 @@ def plot_coverage(ax, results):
     ax.set_title("Exploration coverage", fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
     style_ax(ax)
 
-    handles = [Line2D([0], [0], color=colors[c], lw=2, label=c.capitalize())
+    handles = [Line2D([0], [0], color=colors[c], lw=2, label=DISPLAY_NAMES[c])
                for c in CONDITIONS if results[c]]
     if handles:
         ax.legend(handles=handles, frameon=False, fontsize=10, loc="lower right")
@@ -191,7 +227,7 @@ def main():
     fig, (ax_bytes, ax_coverage) = plt.subplots(1, 2, figsize=(13, 5.5))
     plot_bandwidth(ax_bytes, results)
     plot_coverage(ax_coverage, results)
-    fig.suptitle("Map sharing: baseline vs. vxch", fontsize=15, fontweight="bold",
+    fig.suptitle(f"Map sharing: {DISPLAY_NAMES['baseline']} vs. {DISPLAY_NAMES['vxch']}", fontsize=15, fontweight="bold",
                  color=TEXT_PRIMARY, x=0.02, ha="left")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
 
@@ -200,14 +236,14 @@ def main():
 
     baseline_total = sum(b for b, _ in results["baseline"].values())
     vxch_total = sum(b for b, _ in results["vxch"].values())
-    print(f"baseline total: {baseline_total} bytes ({baseline_total / 1024:.1f} KB)")
-    print(f"vxch total:     {vxch_total} bytes ({vxch_total / 1024:.1f} KB)")
+    print(f"{DISPLAY_NAMES['baseline']} total: {baseline_total} bytes ({baseline_total / 1024:.1f} KB)")
+    print(f"{DISPLAY_NAMES['vxch']} total:     {vxch_total} bytes ({vxch_total / 1024:.1f} KB)")
     if baseline_total > 0 and vxch_total > 0:
         print(f"ratio: {max(baseline_total, vxch_total) / min(baseline_total, vxch_total):.2f}x")
     for condition in CONDITIONS:
         for robot, (_, coverage) in sorted(results[condition].items()):
             final = coverage[-1][1] if coverage else 0.0
-            print(f"{condition} {robot}: final coverage {final:.1f} m^2")
+            print(f"{DISPLAY_NAMES[condition]} {robot}: final coverage {final:.1f} m^2")
     print(str(args.out.resolve()))
 
 

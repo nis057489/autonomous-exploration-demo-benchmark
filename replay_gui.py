@@ -70,12 +70,24 @@ def scan_runs():
         items.sort(key=lambda x: x[0])
         clusters = []
         for ts, robot, name in items:
-            if clusters and (ts - clusters[-1]["ts"]).total_seconds() <= SESSION_GAP_SECONDS:
+            # Merge into the current cluster only if this run is both close
+            # in time to the most recently added run (not the cluster's
+            # frozen start -- comparing against the start let far-apart
+            # back-to-back experiments chain-merge whenever every
+            # consecutive gap happened to be small) AND from a robot not
+            # already in this cluster -- a real session launches each robot
+            # exactly once, so a second run from the same robot always means
+            # a new, later experiment, never an additional robot joining the
+            # same one. Without this, that second run's name would silently
+            # overwrite the first under the earlier (and now wrong) label.
+            if (clusters
+                    and (ts - clusters[-1]["last_ts"]).total_seconds() <= SESSION_GAP_SECONDS
+                    and robot not in clusters[-1]["runs"]):
                 cluster = clusters[-1]
-                cluster["ts"] = min(cluster["ts"], ts)
+                cluster["last_ts"] = ts
                 cluster["runs"][robot] = name
             else:
-                clusters.append({"ts": ts, "runs": {robot: name}})
+                clusters.append({"ts": ts, "last_ts": ts, "runs": {robot: name}})
         for c in clusters:
             c["label"] = c["ts"].strftime("%Y-%m-%d %H:%M:%S")
         clusters.sort(key=lambda c: c["ts"], reverse=True)
@@ -144,7 +156,7 @@ class ReplayGUI(tk.Tk):
         self.baseline_picker = RunPicker(picker_frame, "Baseline run", sessions["baseline"], all_robots)
         self.baseline_picker.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
 
-        self.vxch_picker = RunPicker(picker_frame, "vxch run", sessions["vxch"], all_robots)
+        self.vxch_picker = RunPicker(picker_frame, "Wavestream run", sessions["vxch"], all_robots)
         self.vxch_picker.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
 
         if not sessions["baseline"] or not sessions["vxch"]:
@@ -204,7 +216,7 @@ class ReplayGUI(tk.Tk):
         baseline_session = self.baseline_picker.selected_session()
         vxch_session = self.vxch_picker.selected_session()
         if not baseline_session or not vxch_session:
-            messagebox.showerror("No selection", "Select a baseline run and a vxch run first.")
+            messagebox.showerror("No selection", "Select a baseline run and a Wavestream run first.")
             return
 
         rate = self.rate_var.get().strip() or "8"
@@ -231,7 +243,7 @@ class ReplayGUI(tk.Tk):
         else:
             cmd = [REPLAY_SCRIPT, rate]
 
-        self.append_log(f"$ baseline={baseline_session['label']} vxch={vxch_session['label']} rate={rate}\n")
+        self.append_log(f"$ baseline={baseline_session['label']} wavestream={vxch_session['label']} rate={rate}\n")
         self.status_var.set("Launching...")
         self.launch_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
@@ -281,7 +293,7 @@ class ReplayGUI(tk.Tk):
         baseline_session = self.baseline_picker.selected_session()
         vxch_session = self.vxch_picker.selected_session()
         if not baseline_session or not vxch_session:
-            messagebox.showerror("No selection", "Select a baseline run and a vxch run first.")
+            messagebox.showerror("No selection", "Select a baseline run and a Wavestream run first.")
             return
 
         def bag_args(session):
@@ -313,7 +325,7 @@ class ReplayGUI(tk.Tk):
             quoted = " ".join(shlex.quote(part) for part in py_cmd)
             cmd = ["distrobox", "enter", "jazzy_env", "--", "bash", "-lc", quoted]
 
-        self.append_log(f"$ generate figure: baseline={baseline_session['label']} vxch={vxch_session['label']}\n")
+        self.append_log(f"$ generate figure: baseline={baseline_session['label']} wavestream={vxch_session['label']}\n")
         self.figure_btn.configure(state="disabled")
 
         threading.Thread(target=self._run_figure_process, args=(cmd, out_path), daemon=True).start()
