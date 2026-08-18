@@ -243,10 +243,15 @@ frontier_explorer:
     # --------------- Suppression --------------- #
 
     # Number of failed attempts before a frontier area is temporarily suppressed.
-    # 3 gives one extra strike of cushion over the code default of 2, so a single transient
-    # failure (goal rejection during Nav2 bring-up, a TF hiccup) doesn't suppress a region
-    # that's actually fine.
-    frontier_suppression_attempt_threshold: 3
+    # Raised from 3 to 5: goal_preemption's proximity-completion and visible-gain-exhausted
+    # paths (frontier_explorer_core_dispatch.cpp) record a strike here too, not just real
+    # Nav2/CPU-stall failures, and can each land once every goal_preemption_min_interval_s --
+    # so 3 was reachable in ~90s of pure heuristic churn on a stubborn-but-still-real frontier
+    # (e.g. one that's slow to reveal from any reachable standoff point), suppressing rooms
+    # before they were actually exhausted. 5 keeps real dead ends (glass, unreachable spots)
+    # suppressing about as fast, since those usually fail every attempt, while giving marginal
+    # frontiers more chances before the room gets written off.
+    frontier_suppression_attempt_threshold: 5
 
     # Initial side length in meters for a newly suppressed square area.
     frontier_suppression_base_size_m: 1.0
