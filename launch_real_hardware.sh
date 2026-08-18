@@ -351,6 +351,7 @@ if [[ -n "${ROBOT_ID}" ]]; then
     # inputs, not just trusted at face value.
     BAG_TOPICS=(
       "/${ROBOT_ID}/explore/traversed_path"
+      "/${ROBOT_ID}/explore/frontiers"
       "/${ROBOT_ID}/nav_map"
       "/${ROBOT_ID}/map"
       "/${ROBOT_ID}/team_map_ddil"
