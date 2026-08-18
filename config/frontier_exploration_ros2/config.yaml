@@ -112,7 +112,7 @@ frontier_explorer:
 
     # Enable the post-goal settle delay after a successful frontier goal.
     # Useful if you want stability over speed. Use if you have slow SLAM & LiDAR configuration. 
-    post_goal_settle_enabled: false
+    post_goal_settle_enabled: true
 
     # Minimum seconds to wait before selecting the next frontier after a successful goal.
     post_goal_min_settle: 1.50
