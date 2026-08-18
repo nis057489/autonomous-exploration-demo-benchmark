@@ -7,12 +7,12 @@
     },
     "degraded": {
         "description": "Reduced-bandwidth link, still usable for control traffic",
-        "rate": "1mbps",
+        "rate": "900kbps",
         "both_directions": true
     },
     "denied": {
         "description": "Severely constrained link, worst case for map transport",
-        "rate": "1kbps",
+        "rate": "5kbps",
         "both_directions": true
     }
 }
