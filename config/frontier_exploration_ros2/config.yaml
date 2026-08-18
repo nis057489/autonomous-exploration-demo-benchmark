@@ -137,13 +137,13 @@ frontier_explorer:
     # Increasing this makes the explorer more distance-sensitive and conservative.
     # Decreasing it makes information gain dominate more often.
     # Example: 2.0 prefers closer frontiers, 0.5 allows farther high-gain picks.
-    weight_distance_wd: 1.0
+    weight_distance_wd: 50.0
 
     # Weight applied to the frontier information-gain term.
     # Larger values favor large frontier clusters that promise more map expansion.
     # Smaller values make the robot clean up nearby small frontiers first.
     # Example: 2.0 may skip small room corners, 0.5 tends to clear them sooner.
-    weight_gain_ws: 1.0
+    weight_gain_ws: 0.5
 
     # Max linear speed used only in the lower-bound time term.
     # It does not command the robot directly; it estimates how fast a frontier
