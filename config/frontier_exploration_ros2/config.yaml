@@ -97,7 +97,7 @@ frontier_explorer:
 
     # Enable decision-map preprocessing for frontier extraction. 
     # Disable only if you are having performance issues. Not a problem for most CPUs.
-    frontier_map_optimization_enabled: false
+    frontier_map_optimization_enabled: true
 
     # Replan while navigating if target-pose visible reveal gain for active goal is exhausted.
     # Disable if you are having performance issues.
