@@ -1,6 +1,5 @@
 frontier_explorer:
   ros__parameters:
-
     # --------------- TOPICS --------------- #
 
     # Occupancy grid topic used to compute frontiers.
@@ -17,7 +16,7 @@ frontier_explorer:
 
     # Global frame used for frontier goals and TF lookups.
     global_frame: map
- 
+
     # Robot base frame used for TF lookups.
     robot_base_frame: base_footprint
 
@@ -30,7 +29,7 @@ frontier_explorer:
     # OccupancyGrid topic used to publish the optimized decision map for debugging.
     optimized_map_topic: /explore/optimized_map
 
-    # Requires `completion_event_enabled: true` 
+    # Requires `completion_event_enabled: true`
     completion_event_topic: exploration_complete
 
     # Marker size for frontier visualization.
@@ -44,7 +43,7 @@ frontier_explorer:
     frontier_marker_color_b: 0.2
 
     # --------------- QoS --------------- #
-        
+
     # Map QoS profile selection.
     map_qos_durability: transient_local
     map_qos_reliability: reliable
@@ -63,8 +62,8 @@ frontier_explorer:
     # --------------- GENERAL --------------- #
 
     # Refresh Rate of the package.
-    # `1.0` is recommended. Use `2.0` if your robot is very fast. 
-    # Use `0.50` if your mapping is slow and you want lowest CPU usage.  
+    # `1.0` is recommended. Use `2.0` if your robot is very fast.
+    # Use `0.50` if your mapping is slow and you want lowest CPU usage.
     map_processing_rate_hz: 0.5
 
     # Start exploration immediately at launch.
@@ -111,11 +110,11 @@ frontier_explorer:
     goal_skip_on_blocked_goal: true
 
     # Enable the post-goal settle delay after a successful frontier goal.
-    # Useful if you want stability over speed. Use if you have slow SLAM & LiDAR configuration. 
+    # Useful if you want stability over speed. Use if you have slow SLAM & LiDAR configuration.
     post_goal_settle_enabled: true
 
     # Minimum seconds to wait before selecting the next frontier after a successful goal.
-    post_goal_min_settle: 2.0
+    post_goal_min_settle: 1.50
 
     # Enable temporary suppression for frontiers that repeatedly fail or stall.
     # Use if you are having issues with SLAM or Nav2.
@@ -127,7 +126,6 @@ frontier_explorer:
     # goal keeps aborting instantly (e.g. transient TF lookup failures under CPU load), there's
     # no backoff on the resend, and it can busy-loop tens of times in a few seconds.
     all_frontiers_suppressed_behavior: return_to_start
-
 
     # --------------- Algorithm Configuration - Advanced Users --------------- #
 
@@ -143,7 +141,7 @@ frontier_explorer:
     # Larger values favor large frontier clusters that promise more map expansion.
     # Smaller values make the robot clean up nearby small frontiers first.
     # Example: 2.0 may skip small room corners, 0.5 tends to clear them sooner.
-    weight_gain_ws: 0.5
+    weight_gain_ws: 1.0
 
     # Max linear speed used only in the lower-bound time term.
     # It does not command the robot directly; it estimates how fast a frontier
@@ -162,8 +160,10 @@ frontier_explorer:
     # This favors frontiers that can reveal more space from farther away.
     # Example: 0.5 makes costs distance-heavy, 2.0 rewards sensing reach more.
     # Doesn't have to be a real sensor value. Used for distance scoring.
+    # Raised from 1.5 -> 3.5: at 0.22 m/s travel dominates run time, so it's worth biasing the
+    # MRTSP cost matrix toward committing to a farther high-gain frontier over a nearby
+    # low-gain one, rather than re-approaching the same area repeatedly.
     sensor_effective_range_m: 1.5
-
 
     # --------------- Navigation Safety --------------- #
 
@@ -174,8 +174,7 @@ frontier_explorer:
 
     # Distance used to treat a frontier region as recently visited.
     # Use if you are having navigation loops.
-    frontier_visit_tolerance: 3.0
-
+    frontier_visit_tolerance: 2.0
 
     # --------------- Map Optimization --------------- #
 
@@ -217,7 +216,6 @@ frontier_explorer:
     # Example: 0 keeps the map literal, 2 can merge thin fragmented frontiers.
     dilation_kernel_radius_cells: 1
 
-
     # --------------- Preemption --------------- #
 
     # Treat the current frontier as complete once the robot is this close to it; 0.0 disables this shortcut.
@@ -239,18 +237,12 @@ frontier_explorer:
     # Additional yaw offset in degrees applied to the target-pose LiDAR heading model above.
     goal_preemption_lidar_yaw_offset_deg: 0.0
 
-
     # --------------- Suppression --------------- #
 
     # Number of failed attempts before a frontier area is temporarily suppressed.
-    # Raised from 3 to 5: goal_preemption's proximity-completion and visible-gain-exhausted
-    # paths (frontier_explorer_core_dispatch.cpp) record a strike here too, not just real
-    # Nav2/CPU-stall failures, and can each land once every goal_preemption_min_interval_s --
-    # so 3 was reachable in ~90s of pure heuristic churn on a stubborn-but-still-real frontier
-    # (e.g. one that's slow to reveal from any reachable standoff point), suppressing rooms
-    # before they were actually exhausted. 5 keeps real dead ends (glass, unreachable spots)
-    # suppressing about as fast, since those usually fail every attempt, while giving marginal
-    # frontiers more chances before the room gets written off.
+    # 3 gives one extra strike of cushion over the code default of 2, so a single transient
+    # failure (goal rejection during Nav2 bring-up, a TF hiccup) doesn't suppress a region
+    # that's actually fine.
     frontier_suppression_attempt_threshold: 5
 
     # Initial side length in meters for a newly suppressed square area.
@@ -290,7 +282,6 @@ frontier_explorer:
     # you specifically want failed regions (e.g. behind glass, unreachable) to be given up on
     # for the rest of the run rather than retried every frontier_suppression_timeout_s.
     frontier_suppression_permanent_after_threshold: false
-
 
     # --------------- Team Awareness / Multi-Robot --------------- #
 
