@@ -307,7 +307,7 @@ frontier_explorer:
     # If any cell in this radius is already known (free or occupied) to the team, the
     # frontier is skipped -- no need to send a robot to re-derive shared information.
     # 0.0 disables the check.
-    team_known_check_radius_m: 7.0
+    team_known_check_radius_m: 3.0
 
     # Radius in meters used to reject a candidate frontier if any teammate is currently within
     # it (via peer_pose_topics below). Prevents robots from converging on the same area.
