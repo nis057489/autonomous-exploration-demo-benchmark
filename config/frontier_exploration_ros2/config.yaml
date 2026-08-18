@@ -126,7 +126,7 @@ frontier_explorer:
     # `stay` avoids repeatedly re-issuing a return-to-start goal while suppressed -- if that
     # goal keeps aborting instantly (e.g. transient TF lookup failures under CPU load), there's
     # no backoff on the resend, and it can busy-loop tens of times in a few seconds.
-    all_frontiers_suppressed_behavior: stay
+    all_frontiers_suppressed_behavior: return_to_start
 
 
     # --------------- Algorithm Configuration - Advanced Users --------------- #
