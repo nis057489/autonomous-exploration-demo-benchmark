@@ -197,7 +197,7 @@ frontier_explorer:
     # This removes tiny fragments caused by noise or partial unknown boundaries.
     # Lower values increase responsiveness but can create jittery micro-goals.
     # Higher values stabilize behavior but may ignore narrow real openings.
-    min_frontier_size_cells: 3
+    min_frontier_size_cells: 5
 
     # Spatial sigma of the bilateral filter in map cells.
     # Larger values smooth over wider neighborhoods before frontier extraction.
