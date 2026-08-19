@@ -57,23 +57,13 @@ COPY docker docker
 COPY simulation simulation
 COPY rviz rviz
 
-# Third-party exploration packages — effectively never change.
-COPY exploration_packages/roadmap-explorer exploration_packages/roadmap-explorer
-
-
 RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
     apt-get update && \
-    rosdep install --from-paths exploration_packages simulation rviz --ignore-src -r -y && \
+    rosdep install --from-paths simulation rviz --ignore-src -r -y && \
     rm -rf /var/lib/apt/lists/*"
-
-# Build stable third-party packages first — these layers are almost never invalidated.
-RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
-    colcon build --symlink-install --packages-select \
-        roadmap_explorer_msgs roadmap_explorer roadmap_explorer_rviz_plugins"
 
 # Simulation and benchmark rviz package — change occasionally.
 RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
-    source ${WORKSPACE_DIR}/install/setup.bash && \
     colcon build --symlink-install --packages-select \
         bme_ros2_navigation bme_ros2_navigation_py \
         rviz_autonomous_exploration_benchmark"

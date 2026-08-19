@@ -73,6 +73,9 @@ def _frontier_params(base_path, namespace, use_sim_time, autostart, control_serv
     params["frontier_marker_color_r"] = color_255[0] / 255.0
     params["frontier_marker_color_g"] = color_255[1] / 255.0
     params["frontier_marker_color_b"] = color_255[2] / 255.0
+    # launch_ros mis-normalizes empty-list parameters into an invalid empty
+    # tuple, so drop them and let the node's own declare_parameter default apply.
+    params = {k: v for k, v in params.items() if v != []}
     return params
 
 
