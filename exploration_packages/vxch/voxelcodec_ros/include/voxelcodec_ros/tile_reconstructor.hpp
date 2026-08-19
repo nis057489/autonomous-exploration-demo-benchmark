@@ -8,6 +8,7 @@
 // TileReconstructor returns a plain ReconstructedGrid for the caller to wrap.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -156,12 +157,34 @@ public:
     // practice) does NOT change what world location an existing tile's data belongs
     // to, so it must not invalidate accumulated tile state; reconstruct() already
     // bounds-checks tile placement against the current grid_width/height on every
-    // call. Only an actual origin shift (which reindexes what array position (0,0)
-    // means in the world) or a tile-partition-shape change invalidates existing tiles.
-    if (new_origin_x != geometry_.origin_x || new_origin_y != geometry_.origin_y ||
-      (new_tile_size_cells != 0 && new_tile_size_cells != geometry_.tile_size_cells))
-    {
+    // call.
+    //
+    // A tile-partition-shape change (tile_size_cells itself changing) genuinely
+    // invalidates every existing tile_row/tile_col key's meaning -- always clear.
+    // An origin shift also reindexes what array position (0,0) means in the world,
+    // but slam_toolbox recomputes/republishes origin routinely -- not just on rare
+    // real boundary extensions -- so treating every shift as "clear everything" was
+    // itself a bug: since a "smart"-mode sender never resends a tile whose content
+    // hasn't actually changed, a peer's whole accumulated map could go permanently
+    // missing over an origin nudge unrelated to that tile at all. When the shift is
+    // an exact whole number of tiles (the common case -- slam_toolbox grows the
+    // grid in whole cells, and tile boundaries are a fixed multiple of the cell
+    // grid), remap existing tile keys by that offset instead of discarding them.
+    // Only fall back to a full clear when the shift can't be expressed as a clean
+    // tile-key remap (a fractional-tile shift, which would require splitting a
+    // tile's content across two new tile bins -- not attempted here) or the tile
+    // partition itself changed.
+    const bool tile_size_changed =
+      new_tile_size_cells != 0 && new_tile_size_cells != geometry_.tile_size_cells;
+    const bool origin_changed =
+      new_origin_x != geometry_.origin_x || new_origin_y != geometry_.origin_y;
+
+    if (tile_size_changed) {
       tiles_.clear();
+    } else if (origin_changed) {
+      if (!try_remap_tiles_for_origin_shift(new_origin_x, new_origin_y)) {
+        tiles_.clear();
+      }
     }
     geometry_.grid_width = new_width;
     geometry_.grid_height = new_height;
@@ -316,6 +339,59 @@ public:
   const GridGeometry & geometry() const {return geometry_;}
 
 private:
+  // Attempts to shift every entry in tiles_ by the tile-grid offset implied by
+  // an origin move from (geometry_.origin_x, geometry_.origin_y) to
+  // (new_origin_x, new_origin_y), using the OLD geometry_ (resolution,
+  // tile_size_cells) still in effect at call time -- must run before those
+  // fields get overwritten by the rest of ingest_manifest(). Returns false
+  // (tiles_ left untouched) if the shift isn't a whole number of tiles along
+  // both axes, so the caller can fall back to clearing; a tile that shifts
+  // to a negative index is dropped individually rather than failing the
+  // whole remap (defensive only -- grids are only ever observed to grow, so
+  // this shouldn't trigger in practice, same caveat as tiles_'s own comment).
+  bool try_remap_tiles_for_origin_shift(double new_origin_x, double new_origin_y)
+  {
+    const double resolution = static_cast<double>(geometry_.grid_resolution);
+    if (geometry_.tile_size_cells <= 0 || resolution <= 0.0) {
+      return false;
+    }
+
+    // Extending the grid backward (more negative origin) means existing
+    // content's array index has to move forward to keep pointing at the same
+    // world cell -- see the world_x = origin_x + index * resolution identity.
+    const double dx_cells = (geometry_.origin_x - new_origin_x) / resolution;
+    const double dy_cells = (geometry_.origin_y - new_origin_y) / resolution;
+
+    const auto to_tile_shift = [&](double cells, int & out_tiles) -> bool {
+        const double rounded = std::round(cells);
+        if (std::abs(cells - rounded) > 1e-6) {return false;}
+        const auto cell_shift = static_cast<long long>(rounded);
+        if (cell_shift % geometry_.tile_size_cells != 0) {return false;}
+        out_tiles = static_cast<int>(cell_shift / geometry_.tile_size_cells);
+        return true;
+      };
+
+    int tile_shift_row = 0;
+    int tile_shift_col = 0;
+    if (!to_tile_shift(dy_cells, tile_shift_row) || !to_tile_shift(dx_cells, tile_shift_col)) {
+      return false;
+    }
+    if (tile_shift_row == 0 && tile_shift_col == 0) {
+      return true;  // shift rounds to zero whole tiles -- nothing to remap
+    }
+
+    std::map<TileKey, TileBandState> remapped;
+    for (auto & [key, tile] : tiles_) {
+      const TileKey new_key{key.first + tile_shift_row, key.second + tile_shift_col};
+      if (new_key.first < 0 || new_key.second < 0) {
+        continue;
+      }
+      remapped.emplace(new_key, std::move(tile));
+    }
+    tiles_ = std::move(remapped);
+    return true;
+  }
+
   int haar_levels_;
   GridGeometry geometry_;
   // Not actively pruned if the grid ever shrinks below a tile's offset --

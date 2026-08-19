@@ -280,6 +280,53 @@ TEST(TileReconstructor, ManifestOriginChangeClearsAccumulatedTiles)
   EXPECT_FALSE(reconstructor.reconstruct().has_value());
 }
 
+TEST(TileReconstructor, ManifestOriginShiftByWholeTilesRemapsInsteadOfClearing)
+{
+  // Grid extended backward by exactly one tile-width in X -- slam_toolbox's
+  // routine case, not a rare edge case. Previously ANY origin change cleared
+  // the whole cache; a "smart"-mode sender never resends a tile whose content
+  // hasn't changed, so that tile would just vanish from this receiver's view
+  // permanently. It should instead remap to its new position and survive.
+  constexpr int levels = 2;
+  TileReconstructor reconstructor(levels);
+  reconstructor.ingest_manifest(
+    manifest_metadata(8, 8, 4, /*resolution=*/1.0, "map", 0.0, 0.0), Stamp{1, 0});
+  const auto occupancy = make_occupancy(4, 4);
+  const auto bands = encode_tile(occupancy, 4, 4, levels, /*tile_row=*/0, /*tile_col=*/0, 4);
+  for (std::size_t k = 0; k < bands.size(); ++k) {
+    reconstructor.ingest_band(static_cast<int>(k), bands[k].descriptor, bands[k].payload);
+  }
+  ASSERT_TRUE(reconstructor.reconstruct().has_value());
+
+  // Width grows by one whole tile (8 -> 12) and origin_x moves back by exactly
+  // one tile-width (0.0 -> -4.0 at resolution 1.0, tile_size_cells 4) -- the
+  // same physical content the encoder already sent now lives one tile column
+  // further along the array.
+  reconstructor.ingest_manifest(
+    manifest_metadata(12, 8, 4, 1.0, "map", -4.0, 0.0), Stamp{2, 0});
+
+  const auto grid = reconstructor.reconstruct();
+  ASSERT_TRUE(grid.has_value());
+  EXPECT_EQ(grid->width, 12U);
+  EXPECT_EQ(grid->height, 8U);
+
+  // Original content now shows up shifted one tile (4 columns) to the right,
+  // not gone.
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      EXPECT_EQ(
+        grid->data[static_cast<std::size_t>(r) * 12 + static_cast<std::size_t>(c + 4)],
+        occupancy[static_cast<std::size_t>(r * 4 + c)]) << "r=" << r << " c=" << c;
+    }
+  }
+  // Its old position reads as unknown, not stale leftover data.
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      EXPECT_EQ(grid->data[static_cast<std::size_t>(r) * 12 + static_cast<std::size_t>(c)], -1);
+    }
+  }
+}
+
 TEST(TileReconstructor, ManifestTileSizeChangeClearsAccumulatedTiles)
 {
   // Same dimensions/origin -- only tile_size_cells changes (e.g. a resolution
