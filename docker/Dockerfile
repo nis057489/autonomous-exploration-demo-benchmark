@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxkbcommon0 \
     libwayland-client0 \
     wayland-protocols \
+    iproute2 \
     ros-${ROS_DISTRO}-ros-gz \
     ros-${ROS_DISTRO}-nav2-bringup \
     ros-${ROS_DISTRO}-slam-toolbox \

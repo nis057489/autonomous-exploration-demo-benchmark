@@ -32,10 +32,26 @@ HAAR_LEVELS="${HAAR_LEVELS:-4}"
 RANDOM_SEED="${RANDOM_SEED:--1}"
 ROBOT_STARTUP_DELAY_S="${ROBOT_STARTUP_DELAY_S:-0.0}"
 RECORD_METRICS="${RECORD_METRICS:-false}"
+# sim (default): ddil_proxy_node's in-process token-bucket/loss/delay simulation.
+# tc: real netns + veth + `tc netem` per robot (see setup_ddil_netns.sh) -- the
+# same tool used to throttle the wireless interface in the hardware test, instead
+# of software-simulated impairment. Requires the container to have been started
+# with CAP_NET_ADMIN (docker.sh adds this automatically when IMPAIRMENT_MODE=tc).
+IMPAIRMENT_MODE="${IMPAIRMENT_MODE:-sim}"
+
+if [[ "${IMPAIRMENT_MODE}" != "sim" && "${IMPAIRMENT_MODE}" != "tc" ]]; then
+  echo "IMPAIRMENT_MODE must be 'sim' or 'tc' (got '${IMPAIRMENT_MODE}')." >&2
+  exit 1
+fi
 
 if ! [[ "${NUM_ROBOTS}" =~ ^[0-9]+$ ]] || (( NUM_ROBOTS < 1 )); then
   echo "NUM_ROBOTS must be a positive integer (got '${NUM_ROBOTS}')." >&2
   exit 1
+fi
+
+if [[ "${IMPAIRMENT_MODE}" == "tc" && "${NUM_ROBOTS}" -eq 1 ]]; then
+  echo "IMPAIRMENT_MODE=tc has no effect with NUM_ROBOTS=1 (no peer link to shape); falling back to sim." >&2
+  IMPAIRMENT_MODE="sim"
 fi
 
 collect_available_worlds() {
@@ -207,6 +223,8 @@ cleanup_existing_nav2() {
   done
 }
 
+DDIL_NETNS_SCRIPT="${PROJECT_ROOT}/simulation/Week-7-8-ROS2-Navigation/bme_ros2_navigation/scripts/setup_ddil_netns.sh"
+
 cleanup() {
   # Prevent recursive trap calls while we are already in cleanup.
   trap - EXIT INT TERM
@@ -217,6 +235,9 @@ cleanup() {
   [[ -n "${STACK_PID:-}" ]] && kill "${STACK_PID}" 2>/dev/null || true
   [[ -n "${BAG_PID:-}" ]] && kill "${BAG_PID}" 2>/dev/null || true
   [[ -n "${BAG_PID:-}" ]] && wait "${BAG_PID}" 2>/dev/null || true
+  if [[ "${IMPAIRMENT_MODE}" == "tc" && "${NUM_ROBOTS}" -gt 1 ]]; then
+    "${DDIL_NETNS_SCRIPT}" down "${NUM_ROBOTS}" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT INT TERM
 
@@ -275,6 +296,11 @@ if [[ "${RECORD_METRICS}" == true ]]; then
 fi
 
 if (( NUM_ROBOTS > 1 )); then
+  if [[ "${IMPAIRMENT_MODE}" == "tc" ]]; then
+    echo "Setting up per-robot netns + tc netem links (bandwidth_kbps=${BANDWIDTH_KBPS}, loss_pct=${LOSS_PCT}, delay_ms=${DELAY_MS})..."
+    "${DDIL_NETNS_SCRIPT}" up "${NUM_ROBOTS}" "${BANDWIDTH_KBPS}" "${LOSS_PCT}" "${DELAY_MS}"
+  fi
+
   ros2 launch bme_ros2_navigation multi_robot_vxch_experiment.launch.py \
     world:="${WORLD}" \
     num_robots:="${NUM_ROBOTS}" \
@@ -284,6 +310,7 @@ if (( NUM_ROBOTS > 1 )); then
     z:="${SPAWN_Z}" \
     yaw:="${SPAWN_YAW}" \
     map_transport:="${MAP_TRANSPORT}" \
+    impairment_mode:="${IMPAIRMENT_MODE}" \
     bandwidth_kbps:="${BANDWIDTH_KBPS}" \
     loss_pct:="${LOSS_PCT}" \
     delay_ms:="${DELAY_MS}" \
@@ -293,7 +320,7 @@ if (( NUM_ROBOTS > 1 )); then
     spawn_positions_json:="${SPAWN_POSITIONS_JSON}" &
   STACK_PID=$!
 
-  echo "multi_robot_vxch_experiment.launch.py started (pid=${STACK_PID}, world=${WORLD}, robot=${ROBOT}, num_robots=${NUM_ROBOTS}, map_transport=${MAP_TRANSPORT}, bandwidth_kbps=${BANDWIDTH_KBPS}, loss_pct=${LOSS_PCT}, delay_ms=${DELAY_MS}, rng_seed=${RANDOM_SEED})."
+  echo "multi_robot_vxch_experiment.launch.py started (pid=${STACK_PID}, world=${WORLD}, robot=${ROBOT}, num_robots=${NUM_ROBOTS}, map_transport=${MAP_TRANSPORT}, impairment_mode=${IMPAIRMENT_MODE}, bandwidth_kbps=${BANDWIDTH_KBPS}, loss_pct=${LOSS_PCT}, delay_ms=${DELAY_MS}, rng_seed=${RANDOM_SEED})."
   echo "All processes are running. Press Ctrl+C to stop all."
   wait
   exit $?

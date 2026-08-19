@@ -96,12 +96,19 @@ run_docker() {
 
   # Forward experiment parameters into the container.
   # Use -e VAR=value (not bare -e VAR) so sourced-but-unexported variables are forwarded.
-  for _var in MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS RANDOM_SEED ROBOT_STARTUP_DELAY_S SPAWN_PRESET RECORD_METRICS; do
+  for _var in MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS RANDOM_SEED ROBOT_STARTUP_DELAY_S SPAWN_PRESET RECORD_METRICS IMPAIRMENT_MODE; do
     if [[ -n "${!_var:-}" ]]; then
       docker_args+=(-e "${_var}=${!_var}")
     fi
   done
   unset _var
+
+  # tc-based impairment needs real netns/veth/qdisc manipulation, which requires
+  # CAP_NET_ADMIN -- only granted when actually asked for, since it's otherwise
+  # an unnecessary capability to hand the container.
+  if [[ "${IMPAIRMENT_MODE:-sim}" == "tc" ]]; then
+    docker_args+=(--cap-add=NET_ADMIN)
+  fi
 
   if [[ -n "${DISPLAY:-}" ]]; then
     docker_args+=(-e DISPLAY)

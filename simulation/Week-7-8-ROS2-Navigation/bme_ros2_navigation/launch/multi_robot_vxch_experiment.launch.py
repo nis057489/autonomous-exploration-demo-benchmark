@@ -130,11 +130,48 @@ def _create_all_actions(context):
     if map_transport not in ("baseline", "vxch"):
         raise ValueError(f"map_transport must be 'baseline' or 'vxch', got '{map_transport}'")
 
+    impairment_mode = LaunchConfiguration("impairment_mode").perform(context)
+    if impairment_mode not in ("sim", "tc"):
+        raise ValueError(f"impairment_mode must be 'sim' or 'tc', got '{impairment_mode}'")
+    is_tc = impairment_mode == "tc"
+
     is_vxch = map_transport == "vxch"
 
     robot_names = [f"robot{i + 1}" for i in range(num_robots)]
 
     total_bands = haar_levels + 1
+
+    # ── tc impairment mode: netns/IP scheme (must match setup_ddil_netns.sh) ───
+    # Each robot gets its own netns (its "radio"), joined to a shared bridge (the
+    # "router") that also carries the main netns's own address -- see that
+    # script's own topology comment. Only the nodes that actually carry
+    # inter-robot DDIL traffic run inside a robot's netns; everything else
+    # (nav2, slam, physics, team_map_fusion, decoders) stays in the main netns,
+    # since real hardware doesn't throttle a robot's own onboard buses either.
+    MAIN_NETNS_IP = "10.77.0.1"
+
+    def _netns_name(robot_index: int) -> str:
+        return f"ns-robot{robot_index + 1}"
+
+    def _netns_ip(robot_index: int) -> str:
+        return f"10.77.0.{10 + robot_index + 1}"
+
+    def _netns_kwargs(robot_index: int, static_peers: list) -> dict:
+        """Node kwargs that run a node inside robot_index's own netns, restricted
+        to explicit unicast discovery of exactly the given peer addresses -- same
+        ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST + ROS_STATIC_PEERS pattern
+        hw_namespaced_stack.launch.py already uses for real multi-machine
+        discovery, just pointed at netns addresses instead of separate hosts.
+        Empty dict (no namespacing) in sim mode."""
+        if not is_tc:
+            return {}
+        return {
+            "prefix": f"ip netns exec {_netns_name(robot_index)}",
+            "additional_env": {
+                "ROS_AUTOMATIC_DISCOVERY_RANGE": "LOCALHOST",
+                "ROS_STATIC_PEERS": ";".join(static_peers),
+            },
+        }
 
     # Base DDIL params shared across every per-(robot, peer) proxy.
     # rng_seed is offset per (robot, peer) pair so packet-loss patterns are
@@ -149,6 +186,11 @@ def _create_all_actions(context):
 
     def ddil_params_for(robot_index: int, peer_index: int) -> dict:
         seed = (rng_seed + robot_index * num_robots + peer_index) if rng_seed >= 0 else -1
+        if is_tc:
+            # Real tc netem on the netns links is doing the shaping; the
+            # software token bucket/loss/delay would double-impair on top of it.
+            return {"bandwidth_kbps": 0.0, "loss_pct": 0.0, "delay_ms": 0.0,
+                    "use_sim_time": use_sim_time, "rng_seed": seed}
         return {**ddil_params_base, "rng_seed": seed}
 
     # Each robot's (offset_x, offset_y, offset_yaw) in the shared "map" frame --
@@ -215,7 +257,7 @@ def _create_all_actions(context):
     # encodes its own /{robot}/map once, for any peer to pull -- purely local, no
     # DDIL involved yet.
     if is_vxch:
-        for name in robot_names:
+        for i, name in enumerate(robot_names):
             actions.append(
                 Node(
                     package="voxelcodec_ros",
@@ -232,6 +274,30 @@ def _create_all_actions(context):
                         "schedule_mode": schedule_mode,
                         "use_sim_time": use_sim_time,
                     }],
+                    # In tc mode this runs inside the robot's own netns so its
+                    # output genuinely crosses that robot's tc-shaped veth before
+                    # any peer can reach it -- MAIN_NETNS_IP is needed only to
+                    # discover /{name}/map's publisher (slam_toolbox), which
+                    # stays in the main netns.
+                    **_netns_kwargs(i, [MAIN_NETNS_IP]),
+                )
+            )
+    elif is_tc:
+        # Baseline mode has no encode step, but still needs each robot's own map
+        # to genuinely originate from inside that robot's netns (not the main
+        # netns) so a peer's downlink pull crosses BOTH robots' tc-shaped links,
+        # matching vxch mode's two-hop fidelity (source robot's uplink, then the
+        # consuming robot's downlink) instead of only one.
+        for i, name in enumerate(robot_names):
+            actions.append(
+                Node(
+                    package="topic_tools",
+                    executable="relay",
+                    name=f"map_uplink_relay_{name}",
+                    output="screen",
+                    arguments=[f"/{name}/map", f"/{name}/map_uplink"],
+                    parameters=[{"use_sim_time": use_sim_time}],
+                    **_netns_kwargs(i, [MAIN_NETNS_IP]),
                 )
             )
 
@@ -268,6 +334,12 @@ def _create_all_actions(context):
                             **ddil_params_for(i, peer_index),
                             "relay_topics": relay_topics,
                         }],
+                        # Runs inside X's own netns (this is X's own onboard relay
+                        # process): needs peer Y's netns to reach Y's encoder
+                        # output, and the main netns so this node's own output
+                        # (consumed by vxch_decoder_{X}_from_{Y}, which stays in
+                        # the main netns) is discoverable there.
+                        **_netns_kwargs(i, [_netns_ip(peer_index), MAIN_NETNS_IP]),
                     )
                 )
                 actions.append(
@@ -286,6 +358,11 @@ def _create_all_actions(context):
                     )
                 )
             else:
+                # In tc mode, subscribe to the peer's netns-sourced map_uplink
+                # relay instead of /{peer}/map directly, so this hop crosses the
+                # peer's own tc-shaped link too (see map_uplink_relay_{name}
+                # above) -- same two-hop fidelity as vxch mode.
+                source_topic = f"/{peer_name}/map_uplink" if is_tc else f"/{peer_name}/map"
                 actions.append(
                     Node(
                         package="voxelcodec_ros",
@@ -295,10 +372,11 @@ def _create_all_actions(context):
                         parameters=[{
                             **ddil_params_for(i, peer_index),
                             "relay_topics": [
-                                f"/{peer_name}/map {robot_ddil_base}/map"
+                                f"{source_topic} {robot_ddil_base}/map"
                                 " nav_msgs/msg/OccupancyGrid reliable"
                             ],
                         }],
+                        **_netns_kwargs(i, [_netns_ip(peer_index), MAIN_NETNS_IP]),
                     )
                 )
 
@@ -341,6 +419,16 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "map_transport", default_value="baseline",
                 description="'baseline' or 'vxch'"),
+            DeclareLaunchArgument(
+                "impairment_mode", default_value="sim",
+                description="'sim' (default) = ddil_proxy_node's in-process token-bucket/"
+                            "loss/delay simulation. 'tc' = real per-robot network "
+                            "namespaces joined by veth pairs, shaped with actual `tc "
+                            "netem` (see setup_ddil_netns.sh) -- the same tool used to "
+                            "throttle the wireless interface in the hardware test. "
+                            "Requires the container to have CAP_NET_ADMIN and "
+                            "setup_ddil_netns.sh to have already been run for this "
+                            "num_robots (launch.sh does this automatically)."),
             DeclareLaunchArgument(
                 "haar_levels", default_value="4",
                 description="Haar wavelet levels (total bands = levels+1)"),
