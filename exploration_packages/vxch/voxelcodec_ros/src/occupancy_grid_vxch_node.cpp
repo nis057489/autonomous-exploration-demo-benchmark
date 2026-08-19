@@ -45,13 +45,17 @@ public:
     if (compression_ != kCompressionNone && compression_ != kCompressionZstd) {
       throw std::runtime_error("compression must be 'zstd' or 'none'");
     }
-    // Ablation knob, independent of compression above: true (default) zigzag-varint
-    // packs each band's Haar coefficients before compression; false packs them as
-    // fixed-width int32 LE instead (see fixed_width_encode in haar_forward.hpp). With
-    // compression=none this isolates varint packing's own contribution to bandwidth --
-    // compression=none alone still leaves varint packing in place, so it only shows
-    // "wavelet + varint, no zstd" vs. "wavelet + varint + zstd," not "wavelet vs. nothing."
-    varint_encoding_ = declare_parameter<bool>("varint_encoding", true);
+    // Ablation knob, independent of compression above: how each band's Haar
+    // coefficients get packed before compression -- "varint" (default,
+    // zigzag_varint_encode), "fixed_width" (fixed_width_encode), "sparse_rle"
+    // (sparse_rle_encode -- separate gap-length/magnitude streams, see
+    // haar_forward.hpp), or "auto" (try all 3 per band, keep whichever
+    // compresses smallest). With compression=none this isolates packing's own
+    // contribution to bandwidth -- compression=none alone still leaves the
+    // chosen packing in place, so it only shows "wavelet + packing, no zstd"
+    // vs. "wavelet + packing + zstd," not "wavelet vs. nothing."
+    coeff_encoding_ = declare_parameter<std::string>("coeff_encoding", kHaarEncodingVarint);
+    validate_haar_encoding(coeff_encoding_);
     stream_id_ = declare_parameter<std::string>("stream_id", "map_stream");
     // Each Haar pyramid (band_0..band_L) is built over the whole grid it's given.
     // Encoding the full map as ONE pyramid means a single changed cell anywhere
@@ -121,7 +125,7 @@ public:
     }
 
     scheduler_ = std::make_unique<TileScheduler>(
-      tile_size_m_, haar_levels_, compression_, varint_encoding_, schedule_mode_);
+      tile_size_m_, haar_levels_, compression_, coeff_encoding_, schedule_mode_);
 
     const auto map_qos = rclcpp::QoS(1)
       .reliable()
@@ -160,10 +164,10 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "Encoding %s → %s/manifest + band_0..band_%d (haar_levels=%d, compression=%s, "
-      "varint_encoding=%s, tile_size_m=%.2f, send_rate_hz=%.2f, max_bands_per_update=%d, "
+      "coeff_encoding=%s, tile_size_m=%.2f, send_rate_hz=%.2f, max_bands_per_update=%d, "
       "schedule_mode=%s)",
       input_topic_.c_str(), output_base_topic_.c_str(), haar_levels_,
-      haar_levels_, compression_.c_str(), varint_encoding_ ? "true" : "false", tile_size_m_,
+      haar_levels_, compression_.c_str(), coeff_encoding_.c_str(), tile_size_m_,
       send_rate_hz_, max_bands_per_update_, schedule_mode_.c_str());
   }
 
@@ -252,7 +256,7 @@ private:
   std::string output_base_topic_;
   int haar_levels_;
   std::string compression_;
-  bool varint_encoding_;
+  std::string coeff_encoding_;
   std::string stream_id_;
   double tile_size_m_;
   int max_bands_per_update_;

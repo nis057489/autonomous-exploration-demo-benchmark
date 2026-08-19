@@ -63,12 +63,12 @@ std::vector<std::uint32_t> make_grid(
 
 // The streaming per-band consumers (occupancy_grid_vxch_node's decoder counterpart,
 // vxch_occupancy_grid_node, and vxch_visual_test's CLI) each keep their own local copy
-// of these two decode functions rather than sharing one from the library -- see
+// of these three decode functions rather than sharing one from the library -- see
 // zigzag_varint_decode's own comment in vxch_occupancy_grid_node.cpp. Mirrored here so
 // tests can drive the exact same decompress -> decode -> reconstruct_haar_from_bands
 // path production code uses, instead of the archive-style decode_channel/
 // decode_haar_progressive path below (which -- unlike this one -- doesn't consult
-// kHaarVarintKey and always assumes varint packing).
+// kHaarEncodingKey and always assumes varint packing).
 std::vector<std::int64_t> zigzag_varint_decode(
   const std::vector<std::uint8_t> & raw, std::size_t count)
 {
@@ -101,6 +101,45 @@ std::vector<std::int64_t> fixed_width_decode(
     std::int32_t v;
     std::memcpy(&v, &raw[i * 4], 4);
     out[i] = v;
+  }
+  return out;
+}
+
+// Mirrors sparse_rle_encode in haar_forward.hpp -- see its own comment for
+// the [nonzero_count][gaps...][values...] format.
+std::vector<std::int64_t> sparse_rle_decode(
+  const std::vector<std::uint8_t> & raw, std::size_t count)
+{
+  std::vector<std::int64_t> out(count, 0);
+  std::size_t offset = 0;
+
+  auto read_next_uvarint = [&]() -> std::uint64_t {
+    std::uint64_t value = 0;
+    int shift = 0;
+    while (offset < raw.size()) {
+      const std::uint8_t byte = raw[offset++];
+      value |= static_cast<std::uint64_t>(byte & 0x7FU) << shift;
+      if ((byte & 0x80U) == 0) {break;}
+      shift += 7;
+      if (shift >= 64) {throw std::runtime_error("varint overflow");}
+    }
+    return value;
+  };
+
+  const std::uint64_t nonzero_count = read_next_uvarint();
+  std::vector<std::uint64_t> gaps(nonzero_count);
+  for (std::uint64_t i = 0; i < nonzero_count; ++i) {
+    gaps[i] = read_next_uvarint();
+  }
+  std::size_t pos = 0;
+  for (std::uint64_t i = 0; i < nonzero_count; ++i) {
+    pos += static_cast<std::size_t>(gaps[i]);
+    if (pos >= count) {break;}
+    const std::uint64_t zz = read_next_uvarint();
+    out[pos] = (zz & 1U)
+      ? -static_cast<std::int64_t>((zz >> 1U) + 1U)
+      : static_cast<std::int64_t>(zz >> 1U);
+    ++pos;
   }
   return out;
 }
@@ -469,12 +508,12 @@ TEST(VoxelCodecRos, HaarWaveletLegacy1dPathUnaffectedByGridDispatch)
 
 TEST(VoxelCodecRos, HaarAblationMatrixRoundTripExact)
 {
-  // Formalizes the compression x varint_encoding ablation matrix manually verified
+  // Formalizes the compression x coeff_encoding ablation matrix manually verified
   // via vxch_visual_test/vxch_cli: every combination must reconstruct bit-exact
   // through the same decompress -> decode -> reconstruct_haar_from_bands path
   // occupancy_grid_vxch_node / vxch_occupancy_grid_node use for real band traffic
   // (as opposed to the archive-style decode_channel/decode_haar_progressive path
-  // exercised elsewhere in this file, which doesn't know about kHaarVarintKey).
+  // exercised elsewhere in this file, which doesn't know about kHaarEncodingKey).
   constexpr std::size_t W = 48, H = 36;
   constexpr int levels = 3;
   const auto values = make_grid(W, H, [](std::size_t c, std::size_t r) {
@@ -484,23 +523,27 @@ TEST(VoxelCodecRos, HaarAblationMatrixRoundTripExact)
   for (const char * compression :
     {voxelcodec_ros::kCompressionNone, voxelcodec_ros::kCompressionZstd})
   {
-    for (const bool use_varint : {true, false}) {
-      SCOPED_TRACE(
-        std::string("compression=") + compression +
-        " varint=" + (use_varint ? "true" : "false"));
+    for (const char * encoding : {
+      voxelcodec_ros::kHaarEncodingVarint, voxelcodec_ros::kHaarEncodingFixedWidth,
+      voxelcodec_ros::kHaarEncodingSparseRle})
+    {
+      SCOPED_TRACE(std::string("compression=") + compression + " encoding=" + encoding);
 
       const auto bands =
-        voxelcodec_ros::make_haar_bands(values, W, H, levels, compression, use_varint);
+        voxelcodec_ros::make_haar_bands(values, W, H, levels, compression, encoding);
       ASSERT_EQ(bands.size(), static_cast<std::size_t>(levels + 1));
 
       std::vector<std::vector<std::int64_t> > band_coeffs(bands.size());
       for (std::size_t k = 0; k < bands.size(); ++k) {
         const auto & desc = bands[k].descriptor;
-        EXPECT_EQ(desc.metadata.at(voxelcodec_ros::kHaarVarintKey), use_varint ? "1" : "0");
+        EXPECT_EQ(desc.metadata.at(voxelcodec_ros::kHaarEncodingKey), encoding);
         const auto raw = voxelcodec_ros::decompress_payload(desc, bands[k].payload);
-        band_coeffs[k] = use_varint ?
-          zigzag_varint_decode(raw, desc.element_count) :
-          fixed_width_decode(raw, desc.element_count);
+        band_coeffs[k] =
+          (std::string(encoding) == voxelcodec_ros::kHaarEncodingVarint) ?
+            zigzag_varint_decode(raw, desc.element_count) :
+          (std::string(encoding) == voxelcodec_ros::kHaarEncodingFixedWidth) ?
+            fixed_width_decode(raw, desc.element_count) :
+            sparse_rle_decode(raw, desc.element_count);
       }
 
       const auto recon =
@@ -519,13 +562,15 @@ TEST(VoxelCodecRos, HaarVarintPackingSmallerThanFixedWidthForSmallCoefficients)
   // Small-magnitude coefficients (typical for a mostly-flat occupancy region) should
   // pack to fewer bytes under varint than the flat 4 bytes/coefficient fixed-width
   // encoding always uses -- the whole reason varint packing exists as a bandwidth win
-  // independent of zstd (see occupancy_grid_vxch_node's varint_encoding parameter).
+  // independent of zstd (see occupancy_grid_vxch_node's coeff_encoding parameter).
   constexpr std::size_t W = 32, H = 32;
   constexpr int levels = 2;
   const auto values = make_grid(W, H, [](std::size_t, std::size_t) {return 0U;});
 
-  const auto varint_bands = voxelcodec_ros::make_haar_bands(values, W, H, levels, "none", true);
-  const auto fixed_bands = voxelcodec_ros::make_haar_bands(values, W, H, levels, "none", false);
+  const auto varint_bands = voxelcodec_ros::make_haar_bands(
+    values, W, H, levels, "none", voxelcodec_ros::kHaarEncodingVarint);
+  const auto fixed_bands = voxelcodec_ros::make_haar_bands(
+    values, W, H, levels, "none", voxelcodec_ros::kHaarEncodingFixedWidth);
 
   std::size_t varint_total = 0, fixed_total = 0, total_elements = 0;
   for (const auto & b : varint_bands) {varint_total += b.payload.size();}
@@ -537,6 +582,117 @@ TEST(VoxelCodecRos, HaarVarintPackingSmallerThanFixedWidthForSmallCoefficients)
   EXPECT_LT(varint_total, fixed_total);
   // Fixed-width is exactly 4 bytes per coefficient, always -- no data-dependent variation.
   EXPECT_EQ(fixed_total, total_elements * 4);
+}
+
+TEST(VoxelCodecRos, HaarSparseRleSmallerThanVarintOnSparseCoefficients)
+{
+  // An all-zero grid is the sparsest possible input -- every band's Haar
+  // coefficients are exactly zero (a constant input has zero detail at
+  // every level, and the LL band is 0 too), so sparse_rle_encode should
+  // collapse each band to its 1-byte (nonzero_count=0) header while
+  // zigzag_varint_encode still spends 1 byte per coefficient.
+  constexpr std::size_t W = 32, H = 32;
+  constexpr int levels = 3;
+  const auto values = make_grid(W, H, [](std::size_t, std::size_t) {return 0U;});
+
+  const auto sparse_bands = voxelcodec_ros::make_haar_bands(
+    values, W, H, levels, "none", voxelcodec_ros::kHaarEncodingSparseRle);
+  const auto varint_bands = voxelcodec_ros::make_haar_bands(
+    values, W, H, levels, "none", voxelcodec_ros::kHaarEncodingVarint);
+
+  std::size_t sparse_total = 0, varint_total = 0;
+  for (const auto & b : sparse_bands) {sparse_total += b.payload.size();}
+  for (const auto & b : varint_bands) {varint_total += b.payload.size();}
+
+  EXPECT_LT(sparse_total, varint_total);
+  for (const auto & b : sparse_bands) {
+    EXPECT_EQ(b.payload.size(), 1U) << b.descriptor.name << ": expected just the nonzero_count=0 header";
+  }
+}
+
+TEST(VoxelCodecRos, HaarSparseRleDenseCoefficientsDocumentedRelationship)
+{
+  // The other end of the spectrum: every coefficient distinct and nonzero
+  // (no zero-runs to skip at all). sparse_rle still pays a per-coefficient
+  // gap byte (each gap is 0, i.e. the cheapest possible varint) on top of
+  // the same per-value cost varint packing already has -- so it can lose
+  // to plain varint here, unlike the sparse case above. This documents
+  // that expected relationship rather than asserting a winner either way.
+  constexpr std::size_t W = 32, H = 32;
+  constexpr int levels = 2;
+  const auto values = make_grid(W, H, [](std::size_t c, std::size_t r) {
+      return static_cast<std::uint32_t>(1 + (c * 7 + r * 11) % 90);
+    });
+
+  const auto sparse_bands = voxelcodec_ros::make_haar_bands(
+    values, W, H, levels, "none", voxelcodec_ros::kHaarEncodingSparseRle);
+  const auto varint_bands = voxelcodec_ros::make_haar_bands(
+    values, W, H, levels, "none", voxelcodec_ros::kHaarEncodingVarint);
+
+  ASSERT_EQ(sparse_bands.size(), varint_bands.size());
+  for (std::size_t k = 0; k < sparse_bands.size(); ++k) {
+    SCOPED_TRACE(sparse_bands[k].descriptor.name);
+    const std::size_t nonzero_count = sparse_bands[k].descriptor.element_count;
+    if (nonzero_count == 0) {continue;}
+    // sparse_rle's raw size is never more than 1 extra byte/coefficient
+    // over plain varint's (one uvarint(0) gap byte per nonzero value, plus
+    // the small nonzero_count header) -- verifies the "milder than 2x"
+    // worst case the format was designed around, not just that it's worse.
+    EXPECT_LE(
+      sparse_bands[k].descriptor.uncompressed_size,
+      varint_bands[k].descriptor.uncompressed_size + nonzero_count + 1);
+  }
+}
+
+TEST(VoxelCodecRos, HaarAutoEncodingPicksSmallestPerBand)
+{
+  // "auto" is request-time only (see kHaarEncodingAuto's doc comment) --
+  // each band's resulting kHaarEncodingKey metadata must be whichever of
+  // the 3 concrete schemes actually produced the smallest *compressed*
+  // result for that band, computed independently here rather than trusting
+  // the implementation's own bookkeeping.
+  constexpr std::size_t W = 32, H = 32;
+  constexpr int levels = 2;
+
+  for (const auto & values : {
+    make_grid(W, H, [](std::size_t, std::size_t) {return 0U;}),  // sparse
+    make_grid(W, H, [](std::size_t c, std::size_t r) {           // dense
+        return static_cast<std::uint32_t>(1 + (c * 7 + r * 11) % 90);
+      }),
+  }) {
+    for (const char * compression :
+      {voxelcodec_ros::kCompressionNone, voxelcodec_ros::kCompressionZstd})
+    {
+      SCOPED_TRACE(std::string("compression=") + compression);
+      const auto auto_bands = voxelcodec_ros::make_haar_bands(
+        values, W, H, levels, compression, voxelcodec_ros::kHaarEncodingAuto);
+
+      for (const auto & auto_band : auto_bands) {
+        SCOPED_TRACE(auto_band.descriptor.name);
+        const auto & coeffs_source_encoding = auto_band.descriptor.metadata.at(
+          voxelcodec_ros::kHaarEncodingKey);
+
+        std::size_t best_size = SIZE_MAX;
+        std::string best_encoding;
+        for (const char * candidate : {
+          voxelcodec_ros::kHaarEncodingVarint, voxelcodec_ros::kHaarEncodingFixedWidth,
+          voxelcodec_ros::kHaarEncodingSparseRle})
+        {
+          const auto candidate_bands = voxelcodec_ros::make_haar_bands(
+            values, W, H, levels, compression, candidate);
+          for (const auto & cb : candidate_bands) {
+            if (cb.descriptor.name != auto_band.descriptor.name) {continue;}
+            if (cb.payload.size() < best_size) {
+              best_size = cb.payload.size();
+              best_encoding = candidate;
+            }
+          }
+        }
+        EXPECT_EQ(coeffs_source_encoding, best_encoding);
+        EXPECT_EQ(auto_band.payload.size(), best_size);
+      }
+    }
+  }
 }
 
 // ── raw-le: the one encoding with no other test coverage at all ───────────

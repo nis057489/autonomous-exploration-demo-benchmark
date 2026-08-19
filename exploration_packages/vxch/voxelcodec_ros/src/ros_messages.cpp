@@ -1,5 +1,10 @@
 #include "voxelcodec_ros/ros_messages.hpp"
 
+#include <nlohmann/json.hpp>
+
+#include "voxelcodec_ros/codec.hpp"
+#include "voxelcodec_ros/types.hpp"
+
 namespace voxelcodec_ros
 {
 
@@ -62,32 +67,31 @@ voxelcodec_msgs::msg::VoxelManifest manifest_to_msg(
   const std::string & stream_id,
   const Manifest & manifest)
 {
+  // format/version/voxel_count/metadata/channels are packed as JSON and
+  // zstd-compressed instead of sent as native message fields -- these
+  // strings/arrays were previously the bulk of every manifest message
+  // (resent in full on every tick a band goes out, see
+  // occupancy_grid_vxch_node.cpp's send_pending_bands), and JSON's
+  // repeated field names/string values compress well.
+  const std::string raw_json = manifest_to_json(manifest).dump();
+  const std::vector<std::uint8_t> raw_bytes(raw_json.begin(), raw_json.end());
+
   voxelcodec_msgs::msg::VoxelManifest message;
   message.header = header;
   message.stream_id = stream_id;
-  message.format = manifest.format;
-  message.version = manifest.version;
-  message.voxel_count = manifest.voxel_count;
-  message.metadata = metadata_to_msg(manifest.metadata);
-  message.channels.reserve(manifest.channels.size());
-  for (const auto & descriptor : manifest.channels) {
-    message.channels.push_back(descriptor_to_msg(descriptor));
-  }
+  message.compression = kCompressionZstd;
+  message.uncompressed_size = raw_bytes.size();
+  message.payload = compress_payload(kCompressionZstd, raw_bytes);
   return message;
 }
 
 Manifest manifest_from_msg(const voxelcodec_msgs::msg::VoxelManifest & message)
 {
-  Manifest manifest;
-  manifest.format = message.format;
-  manifest.version = message.version;
-  manifest.voxel_count = message.voxel_count;
-  manifest.metadata = metadata_from_msg(message.metadata);
-  manifest.channels.reserve(message.channels.size());
-  for (const auto & descriptor : message.channels) {
-    manifest.channels.push_back(descriptor_from_msg(descriptor));
-  }
-  return manifest;
+  const std::vector<std::uint8_t> raw_bytes = decompress_bytes(
+    message.compression, message.uncompressed_size,
+    std::vector<std::uint8_t>(message.payload.begin(), message.payload.end()));
+  const std::string raw_json(raw_bytes.begin(), raw_bytes.end());
+  return manifest_from_json(nlohmann::json::parse(raw_json));
 }
 
 voxelcodec_msgs::msg::VoxelChannel channel_to_msg(

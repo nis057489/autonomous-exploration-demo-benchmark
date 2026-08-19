@@ -210,8 +210,8 @@ TEST(TileReconstructor, IngestBandDecodeFailureReturnsErrorWithoutThrowing)
   descriptor.encoding = voxelcodec_ros::kEncodingHaarWavelet;
   descriptor.compression = voxelcodec_ros::kCompressionZstd;
   descriptor.uncompressed_size = 4;
-  // Deliberately missing kHaarVarintKey metadata, and not valid zstd either --
-  // decompress_payload should throw first, caught internally.
+  // Deliberately missing kHaarEncodingKey metadata, and not valid zstd
+  // either -- decompress_payload should throw first, caught internally.
   const std::vector<std::uint8_t> garbage{0xDE, 0xAD, 0xBE, 0xEF};
 
   const auto error = reconstructor.ingest_band(0, descriptor, garbage);
@@ -322,7 +322,7 @@ TEST(TileReconstructor, IngestBandFixedWidthEncodingRoundTrips)
 {
   // Every other round-trip test uses make_haar_bands' default varint packing
   // -- this is the only test exercising fixed_width_decode (the ablation
-  // counterpart, selected via kHaarVarintKey="0").
+  // counterpart, selected via kHaarEncodingKey="fixed_width").
   constexpr int levels = 2;
   TileReconstructor reconstructor(levels);
   reconstructor.ingest_manifest(manifest_metadata(4, 4, 4), Stamp{});
@@ -331,7 +331,43 @@ TEST(TileReconstructor, IngestBandFixedWidthEncodingRoundTrips)
   std::vector<std::uint32_t> values(occupancy.size());
   for (std::size_t i = 0; i < occupancy.size(); ++i) {values[i] = shift_to_uint32(occupancy[i]);}
   auto bands = voxelcodec_ros::make_haar_bands(
-    values, 4, 4, levels, "none", /*use_varint=*/false);
+    values, 4, 4, levels, "none", voxelcodec_ros::kHaarEncodingFixedWidth);
+  for (auto & band : bands) {
+    band.descriptor.metadata["tile_row"] = "0";
+    band.descriptor.metadata["tile_col"] = "0";
+    band.descriptor.metadata["tile_width"] = "4";
+    band.descriptor.metadata["tile_height"] = "4";
+    band.descriptor.metadata["tile_size_cells"] = "4";
+  }
+
+  for (std::size_t k = 0; k < bands.size(); ++k) {
+    const auto error = reconstructor.ingest_band(
+      static_cast<int>(k), bands[k].descriptor, bands[k].payload);
+    EXPECT_FALSE(error.has_value()) << "band " << k;
+  }
+
+  const auto grid = reconstructor.reconstruct();
+  ASSERT_TRUE(grid.has_value());
+  for (std::size_t i = 0; i < occupancy.size(); ++i) {
+    EXPECT_EQ(grid->data[i], occupancy[i]) << "cell " << i;
+  }
+}
+
+TEST(TileReconstructor, IngestBandSparseRleEncodingRoundTrips)
+{
+  // Mirrors IngestBandFixedWidthEncodingRoundTrips above, for the 3rd
+  // packing scheme -- validates the actual production TileReconstructor::
+  // ingest_band 3-way branch on kHaarEncodingKey="sparse_rle", not just
+  // sparse_rle_encode/decode in isolation.
+  constexpr int levels = 2;
+  TileReconstructor reconstructor(levels);
+  reconstructor.ingest_manifest(manifest_metadata(4, 4, 4), Stamp{});
+
+  const auto occupancy = make_occupancy(4, 4, /*seed=*/1);
+  std::vector<std::uint32_t> values(occupancy.size());
+  for (std::size_t i = 0; i < occupancy.size(); ++i) {values[i] = shift_to_uint32(occupancy[i]);}
+  auto bands = voxelcodec_ros::make_haar_bands(
+    values, 4, 4, levels, "none", voxelcodec_ros::kHaarEncodingSparseRle);
   for (auto & band : bands) {
     band.descriptor.metadata["tile_row"] = "0";
     band.descriptor.metadata["tile_col"] = "0";
@@ -389,7 +425,7 @@ TEST(TileReconstructor, ReconstructSkipsTileWhenBandSizeMismatchCausesThrow)
   descriptor.metadata["tile_width"] = "4";
   descriptor.metadata["tile_height"] = "4";
   descriptor.metadata["tile_size_cells"] = "4";
-  descriptor.metadata[voxelcodec_ros::kHaarVarintKey] = "1";
+  descriptor.metadata[voxelcodec_ros::kHaarEncodingKey] = voxelcodec_ros::kHaarEncodingVarint;
 
   // A 4x4 grid at levels=2 halves to 1x1 (LL band 0 needs exactly 1
   // coefficient) -- claim 5 instead, so the decoded vector's size disagrees

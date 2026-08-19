@@ -68,12 +68,12 @@ class TileScheduler
 {
 public:
   TileScheduler(
-    double tile_size_m, int haar_levels, std::string compression, bool varint_encoding,
+    double tile_size_m, int haar_levels, std::string compression, std::string coeff_encoding,
     std::string schedule_mode)
   : tile_size_m_(tile_size_m),
     haar_levels_(haar_levels),
     compression_(std::move(compression)),
-    varint_encoding_(varint_encoding),
+    coeff_encoding_(std::move(coeff_encoding)),
     schedule_mode_(std::move(schedule_mode))
   {}
 
@@ -149,7 +149,7 @@ public:
           bands = make_haar_bands(
             tile_values, static_cast<std::size_t>(geom.width),
             static_cast<std::size_t>(geom.height), haar_levels_, compression_,
-            varint_encoding_);
+            coeff_encoding_);
         } catch (const std::exception & e) {
           result.tile_errors.push_back(
             "tile (" + std::to_string(trow) + "," + std::to_string(tcol) + "): " + e.what());
@@ -275,7 +275,7 @@ private:
   double tile_size_m_;
   int haar_levels_;
   std::string compression_;
-  bool varint_encoding_;
+  std::string coeff_encoding_;
   std::string schedule_mode_;
 
   int tile_size_cells_{0};

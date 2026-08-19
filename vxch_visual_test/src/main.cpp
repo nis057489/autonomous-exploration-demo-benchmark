@@ -106,6 +106,45 @@ std::vector<std::int64_t> fixed_width_decode(
   return out;
 }
 
+// Mirrors sparse_rle_encode in haar_forward.hpp -- see its own comment for
+// the [nonzero_count][gaps...][values...] format.
+std::vector<std::int64_t> sparse_rle_decode(
+  const std::vector<std::uint8_t> & raw, std::size_t count)
+{
+  std::vector<std::int64_t> out(count, 0);
+  std::size_t offset = 0;
+
+  auto read_next_uvarint = [&]() -> std::uint64_t {
+    std::uint64_t value = 0;
+    int shift = 0;
+    while (offset < raw.size()) {
+      const std::uint8_t byte = raw[offset++];
+      value |= static_cast<std::uint64_t>(byte & 0x7FU) << shift;
+      if ((byte & 0x80U) == 0) {break;}
+      shift += 7;
+      if (shift >= 64) {throw std::runtime_error("varint overflow");}
+    }
+    return value;
+  };
+
+  const std::uint64_t nonzero_count = read_next_uvarint();
+  std::vector<std::uint64_t> gaps(nonzero_count);
+  for (std::uint64_t i = 0; i < nonzero_count; ++i) {
+    gaps[i] = read_next_uvarint();
+  }
+  std::size_t pos = 0;
+  for (std::uint64_t i = 0; i < nonzero_count; ++i) {
+    pos += static_cast<std::size_t>(gaps[i]);
+    if (pos >= count) {break;}
+    const std::uint64_t zz = read_next_uvarint();
+    out[pos] = (zz & 1U)
+      ? -static_cast<std::int64_t>((zz >> 1U) + 1U)
+      : static_cast<std::int64_t>(zz >> 1U);
+    ++pos;
+  }
+  return out;
+}
+
 struct ArgMap
 {
   std::map<std::string, std::string> values;
@@ -253,11 +292,12 @@ int cmd_encode(const ArgMap & args)
   const int levels = args.get_int("levels", 4);
   const int tile_size_cells = args.get_int("tile-size-cells", 32);
   const std::string compression = args.get("compression", kCompressionZstd);
-  // Ablation knob, independent of compression: true (default) zigzag-varint packs each
-  // band's Haar coefficients before compression; false packs them as fixed-width int32
-  // instead. With compression=none this isolates varint packing's own bandwidth
-  // contribution, mirroring occupancy_grid_vxch_node's varint_encoding parameter.
-  const bool use_varint = args.get_bool("varint", true);
+  // Ablation knob, independent of compression: how each band's Haar coefficients
+  // get packed before compression -- "varint" (default), "fixed_width",
+  // "sparse_rle", or "auto" (try all 3 per band, keep whichever compresses
+  // smallest). With compression=none this isolates packing's own bandwidth
+  // contribution, mirroring occupancy_grid_vxch_node's coeff_encoding parameter.
+  const std::string coeff_encoding = args.get("encoding", kHaarEncodingVarint);
   if (tile_size_cells <= 0) {throw std::runtime_error("--tile-size-cells must be > 0");}
 
   const SyntheticGrid grid = vxch_test::read_grid(args.get("map", ""));
@@ -288,7 +328,7 @@ int cmd_encode(const ArgMap & args)
 
       auto bands = make_haar_bands(
         values, static_cast<std::size_t>(tw), static_cast<std::size_t>(th), levels, compression,
-        use_varint);
+        coeff_encoding);
       tile_bands.push_back(std::move(bands));
       tile_coords.emplace_back(trow, tcol);
       tile_dims.emplace_back(tw, th);
@@ -321,7 +361,7 @@ int cmd_encode(const ArgMap & args)
     je["element_count"] = e.descriptor.element_count;
     je["uncompressed_size"] = e.descriptor.uncompressed_size;
     je["compressed_size"] = e.descriptor.compressed_size;
-    je["varint"] = e.descriptor.metadata.at(kHaarVarintKey) == "1";
+    je["encoding"] = e.descriptor.metadata.at(kHaarEncodingKey);
     je["payload"] = e.payload;
     entries.push_back(std::move(je));
     total_compressed += e.descriptor.compressed_size;
@@ -337,7 +377,11 @@ int cmd_encode(const ArgMap & args)
   result["total_entries"] = order.size();
   result["raw_bytes"] = session["raw_bytes"];
   result["total_compressed_bytes"] = total_compressed;
-  result["varint"] = use_varint;
+  // The requested mode (may be "auto") -- individual bands can pick different
+  // concrete encodings under "auto", see each entry's own "encoding" field
+  // for the per-band truth; this summary field is informational only, not
+  // read by cmd_step (which reads each entry's own field instead).
+  result["encoding"] = coeff_encoding;
   std::cout << result.dump() << std::endl;
   return 0;
 }
@@ -396,9 +440,11 @@ int cmd_step(const ArgMap & args)
     const auto element_count = entry.at("element_count").get<std::size_t>();
 
     const auto raw = decompress_payload(desc, payload);
-    const bool entry_varint = entry.at("varint").get<bool>();
-    const auto coeffs = entry_varint ?
-      zigzag_varint_decode(raw, element_count) : fixed_width_decode(raw, element_count);
+    const std::string entry_encoding = entry.at("encoding").get<std::string>();
+    const auto coeffs =
+      (entry_encoding == kHaarEncodingVarint) ? zigzag_varint_decode(raw, element_count) :
+      (entry_encoding == kHaarEncodingFixedWidth) ? fixed_width_decode(raw, element_count) :
+      sparse_rle_decode(raw, element_count);
 
     const int trow = entry.at("tile_row").get<int>();
     const int tcol = entry.at("tile_col").get<int>();

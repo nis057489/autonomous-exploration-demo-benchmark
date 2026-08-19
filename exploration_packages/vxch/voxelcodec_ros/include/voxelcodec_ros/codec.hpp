@@ -4,6 +4,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <nlohmann/json_fwd.hpp>
+
 #include "voxelcodec_ros/types.hpp"
 
 namespace voxelcodec_ros
@@ -12,9 +14,31 @@ namespace voxelcodec_ros
 void validate_descriptor(const ChannelDescriptor & descriptor);
 void validate_manifest(const Manifest & manifest);
 
+/// Throws if coeff_encoding isn't one of "varint"/"fixed_width"/
+/// "sparse_rle"/"auto" (see kHaarEncoding* in types.hpp). Accepts "auto"
+/// since this validates make_haar_bands's *input* parameter, not what
+/// ends up stored in a band's kHaarEncodingKey metadata (which is always
+/// one of the 3 concrete values).
+void validate_haar_encoding(const std::string & coeff_encoding);
+
+/// Manifest <-> JSON, shared by the file-based archive format (codec.cpp's
+/// encode_archive/read_archive) and the compressed live-wire VoxelManifest
+/// message (ros_messages.cpp's manifest_to_msg/manifest_from_msg).
+nlohmann::json manifest_to_json(const Manifest & manifest);
+Manifest manifest_from_json(const nlohmann::json & item);
+
 std::vector<std::uint8_t> compress_payload(
   const std::string & compression,
   const std::vector<std::uint8_t> & raw_payload);
+
+/// Decompress payload of length uncompressed_size, without needing a full
+/// ChannelDescriptor -- decompress_payload below is a thin wrapper over this
+/// for the channel-payload case; the manifest case (no ChannelDescriptor)
+/// uses it directly.
+std::vector<std::uint8_t> decompress_bytes(
+  const std::string & compression,
+  std::uint64_t uncompressed_size,
+  const std::vector<std::uint8_t> & compressed_payload);
 
 std::vector<std::uint8_t> decompress_payload(
   const ChannelDescriptor & descriptor,

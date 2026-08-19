@@ -82,7 +82,12 @@ TEST(RosMessages, ManifestRoundTrips)
   const auto msg = voxelcodec_ros::manifest_to_msg(header, "stream-1", manifest);
   EXPECT_EQ(msg.header.frame_id, "map");
   EXPECT_EQ(msg.stream_id, "stream-1");
-  ASSERT_EQ(msg.channels.size(), 2U);
+  // format/version/voxel_count/metadata/channels no longer live on the
+  // message directly -- they're packed as compressed JSON in msg.payload
+  // (see manifest_to_msg). Assert that instead of a field that no longer
+  // exists on the wire; the round-trip checks below cover the content.
+  EXPECT_EQ(msg.compression, voxelcodec_ros::kCompressionZstd);
+  EXPECT_FALSE(msg.payload.empty());
 
   const auto round_tripped = voxelcodec_ros::manifest_from_msg(msg);
   EXPECT_EQ(round_tripped.format, manifest.format);
@@ -99,7 +104,6 @@ TEST(RosMessages, ManifestRoundTripsNoChannels)
   const Manifest manifest;
   std_msgs::msg::Header header;
   const auto msg = voxelcodec_ros::manifest_to_msg(header, "s", manifest);
-  EXPECT_TRUE(msg.channels.empty());
   EXPECT_TRUE(voxelcodec_ros::manifest_from_msg(msg).channels.empty());
 }
 
