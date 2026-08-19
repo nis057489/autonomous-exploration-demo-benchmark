@@ -310,7 +310,7 @@ frontier_explorer:
     # Filter out candidate frontiers that another team member has already resolved (via the
     # shared team map) or is currently near (via peer poses). Disable for single-robot runs
     # or if you want every robot to plan independently of its teammates.
-    team_awareness_enabled: true
+    team_awareness_enabled: false
 
     # Relative topic (resolved under this robot's own namespace) for the shared/fused team
     # occupancy map used by goal_point_known_to_team filtering above.
