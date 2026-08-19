@@ -4,12 +4,31 @@ how much data was exchanged between robots to share the map, and how much of
 the map got explored, for each condition.
 
 Reads each robot's recorded rosbag2 (mcap) directly:
-  - inter-robot map traffic: bytes on every /<robot>/incoming/<peer>/... topic
-    (baseline: .../map; vxch: .../band_*+manifest) -- per RECORD_METRICS's
-    doc in experiment.conf, this is the real traffic between robots, already
-    past DDIL throttling, not the free-running node-log counters.
-  - exploration coverage: /<robot>/nav_map (nav_msgs/OccupancyGrid), decoded
-    per message into (seconds since bag start, known-cell area in m^2).
+  - received bandwidth: bytes on every /<robot>/incoming/<peer>/... topic
+    (baseline: .../map; vxch: .../band_*+manifest) -- what this robot
+    actually received from its peers after DDIL throttling, per
+    RECORD_METRICS's doc in experiment.conf, not the free-running node-log
+    counters.
+  - sent bandwidth: bytes this robot itself published for peers to pull --
+    baseline: /<robot>/map (peers' ddil_proxy instances pull straight from
+    it); vxch: /<robot>/vxch/map/band_*+manifest (the encoder's own output,
+    pre-DDIL-relay-fanout). Received and sent are read from disjoint topics,
+    so a robot that explores little but has active peers can easily receive
+    more than it sends -- that's not a contradiction, it's DDIL relaying its
+    peers' progress to it regardless of its own.
+  - communicated map coverage: /<robot>/nav_map (nav_msgs/OccupancyGrid),
+    decoded per message into (seconds since bag start, known-cell area in
+    m^2). nav_map is each robot's post-fusion team map -- it includes cells
+    the robot only knows about because a peer relayed them, not just what
+    the robot itself observed. This is NOT a measure of first-hand
+    exploration; it's how much of the map each robot knows about, team-wide.
+  - locally-observed coverage: /<robot>/map (nav_msgs/OccupancyGrid), same
+    known-cell-area calculation, but this topic is slam_toolbox's raw local
+    output -- it never receives peer-communicated cells (those only ever
+    land in team_map_ddil, which per team_map_fusion.py excludes the
+    robot's own map). So /map and team_map_ddil are disjoint by
+    construction, and /map's known-area is a genuine, non-double-counted
+    measure of what this robot itself has seen.
 
 Must run where rosbag2_py and rclpy are importable, e.g. inside the
 jazzy_env distrobox with a login shell so its ROS setup gets sourced:
@@ -79,9 +98,16 @@ def _reindexed_copy(bag_dir):
     return scratch
 
 
-def read_bag(robot, bag_dir):
-    """Returns (incoming_bytes, coverage) where coverage is a list of
-    (seconds_since_start, known_area_m2), or None if the bag can't be read."""
+def read_bag(robot, bag_dir, condition):
+    """Returns (received_bytes, sent_bytes, coverage, local_coverage) where
+    coverage and local_coverage are each a list of
+    (seconds_since_start, known_area_m2) -- coverage from /<robot>/nav_map
+    (post-fusion team map), local_coverage from /<robot>/map (this robot's
+    own raw SLAM output, never touched by fusion) -- or None if the bag
+    can't be read. received_bytes is traffic on /<robot>/incoming/<peer>/...
+    (what peers sent this robot); sent_bytes is what this robot itself
+    published for peers to pull -- /<robot>/map for baseline,
+    /<robot>/vxch/map/band_*+manifest for vxch (see module docstring)."""
     bag_dir = Path(bag_dir)
     scratch_dir = None
     try:
@@ -103,30 +129,44 @@ def read_bag(robot, bag_dir):
         return None
 
     incoming_re = re.compile(rf"^/{re.escape(robot)}/incoming/")
+    vxch_own_re = re.compile(rf"^/{re.escape(robot)}/vxch/map/")
     nav_map_topic = f"/{robot}/nav_map"
+    local_map_topic = f"/{robot}/map"
 
-    incoming_bytes = 0
+    received_bytes = 0
+    sent_bytes = 0
     coverage = []
+    local_coverage = []
     start_ns = None
+
+    def known_area_m2(msg):
+        known = int(np.count_nonzero(np.asarray(msg.data) != -1))
+        return known * (msg.info.resolution ** 2)
 
     while reader.has_next():
         topic, data, t_ns = reader.read_next()
         if start_ns is None:
             start_ns = t_ns
         if incoming_re.match(topic):
-            incoming_bytes += len(data)
+            received_bytes += len(data)
         elif topic == nav_map_topic:
             msg = deserialize_message(data, OccupancyGrid)
-            known = int(np.count_nonzero(np.asarray(msg.data) != -1))
-            area_m2 = known * (msg.info.resolution ** 2)
-            coverage.append(((t_ns - start_ns) / 1e9, area_m2))
+            coverage.append(((t_ns - start_ns) / 1e9, known_area_m2(msg)))
+        elif topic == local_map_topic:
+            msg = deserialize_message(data, OccupancyGrid)
+            local_coverage.append(((t_ns - start_ns) / 1e9, known_area_m2(msg)))
+            if condition == "baseline":
+                sent_bytes += len(data)
+        elif condition == "vxch" and vxch_own_re.match(topic):
+            sent_bytes += len(data)
 
     del reader
     if scratch_dir is not None:
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
     coverage.sort(key=lambda p: p[0])
-    return incoming_bytes, coverage
+    local_coverage.sort(key=lambda p: p[0])
+    return received_bytes, sent_bytes, coverage, local_coverage
 
 
 def style_ax(ax):
@@ -139,18 +179,33 @@ def style_ax(ax):
     ax.set_axisbelow(True)
 
 
-def plot_bandwidth(ax, results):
+def plot_bandwidth(ax, results, byte_index, title, ylabel):
+    """byte_index selects which per-robot byte count to plot out of the
+    (received_bytes, sent_bytes, coverage, local_coverage) tuple in results
+    -- 0 for received (what peers sent this robot), 1 for sent (what this
+    robot itself published for peers to pull)."""
     robots = sorted({r for cond in results.values() for r in cond})
     x = np.arange(len(CONDITIONS))
-    bottoms = np.zeros(len(CONDITIONS))
+    heights_by_robot = {
+        robot: np.array([results[c].get(robot, (0, 0, [], []))[byte_index] / 1024 for c in CONDITIONS])
+        for robot in robots
+    }
+    totals = np.sum(list(heights_by_robot.values()), axis=0) if robots else np.zeros(len(CONDITIONS))
 
+    bottoms = np.zeros(len(CONDITIONS))
     for robot in robots:
-        heights_kb = np.array([results[c].get(robot, (0, []))[0] / 1024 for c in CONDITIONS])
+        heights_kb = heights_by_robot[robot]
         ax.bar(x, heights_kb, bottom=bottoms, width=0.45,
-               color=[COLOR_BASELINE, COLOR_WAVESTREAM], edgecolor="white", linewidth=2, zorder=3)
+               color=[COLOR_BASELINE, COLOR_WAVESTREAM], edgecolor="white", linewidth=2,
+               zorder=3)
+        # Label each brick with the robot it belongs to, directly on the
+        # segment -- skip slivers too thin for the label to fit legibly.
+        for xi, height, base, total in zip(x, heights_kb, bottoms, totals):
+            if total > 0 and height / total > 0.04:
+                ax.annotate(robot, xy=(xi, base + height / 2), ha="center", va="center",
+                            fontsize=8.5, fontweight="bold", color="white", zorder=4)
         bottoms += heights_kb
 
-    totals = bottoms
     for xi, total in zip(x, totals):
         ax.annotate(f"{total:,.0f} KB", xy=(xi, total), xytext=(0, 6),
                     textcoords="offset points", ha="center", va="bottom",
@@ -159,7 +214,7 @@ def plot_bandwidth(ax, results):
     if totals[0] > 0 and totals[1] > 0 and totals[0] != totals[1]:
         bigger, smaller = max(totals), min(totals)
         winner = DISPLAY_NAMES["vxch"] if totals[1] < totals[0] else DISPLAY_NAMES["baseline"]
-        ax.text(0.5, 0.92, f"{bigger / smaller:.1f}× less data ({winner})",
+        ax.text(0.5, 0.99, f"{bigger / smaller:.1f}× less data ({winner})",
                 transform=ax.transAxes, ha="center", va="top",
                 fontsize=10.5, color=TEXT_SECONDARY, style="italic")
 
@@ -171,18 +226,22 @@ def plot_bandwidth(ax, results):
 
     ax.set_xticks(x)
     ax.set_xticklabels([DISPLAY_NAMES[c] for c in CONDITIONS], fontsize=11, color=TEXT_PRIMARY, fontweight="bold")
-    ax.set_ylabel("Inter-robot map traffic (KB)", fontsize=11, color=TEXT_SECONDARY)
-    ax.set_title("Map-sharing bandwidth", fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
+    ax.set_ylabel(ylabel, fontsize=11, color=TEXT_SECONDARY)
+    ax.set_title(title, fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
     style_ax(ax)
 
 
-def plot_coverage(ax, results):
+def plot_coverage(ax, results, series_index, title, ylabel):
+    """series_index selects which per-robot coverage series to plot out of
+    the (received_bytes, sent_bytes, coverage, local_coverage) tuple in
+    results -- 2 for communicated (nav_map), 3 for locally-observed (map)."""
     colors = {"baseline": COLOR_BASELINE, "vxch": COLOR_WAVESTREAM}
     robots = sorted({r for cond in results.values() for r in cond})
     robot_style = {r: LINESTYLES[i % len(LINESTYLES)] for i, r in enumerate(robots)}
 
     for cond in CONDITIONS:
-        for robot, (_, coverage) in sorted(results[cond].items()):
+        for robot, entry in sorted(results[cond].items()):
+            coverage = entry[series_index]
             if not coverage:
                 continue
             ts = [p[0] for p in coverage]
@@ -193,8 +252,8 @@ def plot_coverage(ax, results):
                         xytext=(6, 0), fontsize=8.5, color=TEXT_SECONDARY, va="center")
 
     ax.set_xlabel("Time since run start (s)", fontsize=11, color=TEXT_SECONDARY)
-    ax.set_ylabel("Explored area (m²)", fontsize=11, color=TEXT_SECONDARY)
-    ax.set_title("Exploration coverage", fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
+    ax.set_ylabel(ylabel, fontsize=11, color=TEXT_SECONDARY)
+    ax.set_title(title, fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
     style_ax(ax)
 
     handles = [Line2D([0], [0], color=colors[c], lw=2, label=DISPLAY_NAMES[c])
@@ -215,7 +274,7 @@ def main():
     results = {"baseline": {}, "vxch": {}}
     for condition, robots in robot_paths.items():
         for robot, bag_dir in sorted(robots.items()):
-            r = read_bag(robot, bag_dir)
+            r = read_bag(robot, bag_dir, condition)
             if r is not None:
                 results[condition][robot] = r
 
@@ -224,9 +283,11 @@ def main():
             print(f"error: no readable bags for condition {condition!r}", file=sys.stderr)
             sys.exit(1)
 
-    fig, (ax_bytes, ax_coverage) = plt.subplots(1, 2, figsize=(13, 5.5))
-    plot_bandwidth(ax_bytes, results)
-    plot_coverage(ax_coverage, results)
+    fig, (ax_sent, ax_received, ax_coverage, ax_local) = plt.subplots(1, 4, figsize=(25, 5.5))
+    plot_bandwidth(ax_sent, results, 1, "Map-sharing bandwidth (sent)", "Sent to peers (KB)")
+    plot_bandwidth(ax_received, results, 0, "Map-sharing bandwidth (received)", "Received from peers (KB)")
+    plot_coverage(ax_coverage, results, 2, "Communicated map coverage", "Known map area (m²)")
+    plot_coverage(ax_local, results, 3, "Locally-observed coverage (self only)", "Self-observed area (m²)")
     fig.suptitle(f"Map sharing: {DISPLAY_NAMES['baseline']} vs. {DISPLAY_NAMES['vxch']}", fontsize=15, fontweight="bold",
                  color=TEXT_PRIMARY, x=0.02, ha="left")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
@@ -234,16 +295,22 @@ def main():
     args.out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.out, dpi=200, facecolor="white")
 
-    baseline_total = sum(b for b, _ in results["baseline"].values())
-    vxch_total = sum(b for b, _ in results["vxch"].values())
-    print(f"{DISPLAY_NAMES['baseline']} total: {baseline_total} bytes ({baseline_total / 1024:.1f} KB)")
-    print(f"{DISPLAY_NAMES['vxch']} total:     {vxch_total} bytes ({vxch_total / 1024:.1f} KB)")
-    if baseline_total > 0 and vxch_total > 0:
-        print(f"ratio: {max(baseline_total, vxch_total) / min(baseline_total, vxch_total):.2f}x")
+    baseline_received = sum(r for r, _, _, _ in results["baseline"].values())
+    vxch_received = sum(r for r, _, _, _ in results["vxch"].values())
+    baseline_sent = sum(s for _, s, _, _ in results["baseline"].values())
+    vxch_sent = sum(s for _, s, _, _ in results["vxch"].values())
+    print(f"{DISPLAY_NAMES['baseline']} received: {baseline_received} bytes ({baseline_received / 1024:.1f} KB), "
+          f"sent: {baseline_sent} bytes ({baseline_sent / 1024:.1f} KB)")
+    print(f"{DISPLAY_NAMES['vxch']} received:     {vxch_received} bytes ({vxch_received / 1024:.1f} KB), "
+          f"sent: {vxch_sent} bytes ({vxch_sent / 1024:.1f} KB)")
+    if baseline_received > 0 and vxch_received > 0:
+        print(f"received ratio: {max(baseline_received, vxch_received) / min(baseline_received, vxch_received):.2f}x")
     for condition in CONDITIONS:
-        for robot, (_, coverage) in sorted(results[condition].items()):
+        for robot, (_, _, coverage, local_coverage) in sorted(results[condition].items()):
             final = coverage[-1][1] if coverage else 0.0
-            print(f"{DISPLAY_NAMES[condition]} {robot}: final coverage {final:.1f} m^2")
+            final_local = local_coverage[-1][1] if local_coverage else 0.0
+            print(f"{DISPLAY_NAMES[condition]} {robot}: final known map area {final:.1f} m^2 (communicated, incl. peer-relayed cells), "
+                  f"{final_local:.1f} m^2 self-observed")
     print(str(args.out.resolve()))
 
 
