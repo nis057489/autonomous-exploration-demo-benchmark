@@ -31,6 +31,7 @@ DELAY_MS="${DELAY_MS:-0}"
 HAAR_LEVELS="${HAAR_LEVELS:-4}"
 RANDOM_SEED="${RANDOM_SEED:--1}"
 ROBOT_STARTUP_DELAY_S="${ROBOT_STARTUP_DELAY_S:-0.0}"
+RECORD_METRICS="${RECORD_METRICS:-false}"
 
 if ! [[ "${NUM_ROBOTS}" =~ ^[0-9]+$ ]] || (( NUM_ROBOTS < 1 )); then
   echo "NUM_ROBOTS must be a positive integer (got '${NUM_ROBOTS}')." >&2
@@ -214,11 +215,64 @@ cleanup() {
   [[ -n "${NAV_PID:-}" ]] && kill "${NAV_PID}" 2>/dev/null || true
   [[ -n "${TRACKER_PID:-}" ]] && kill "${TRACKER_PID}" 2>/dev/null || true
   [[ -n "${STACK_PID:-}" ]] && kill "${STACK_PID}" 2>/dev/null || true
+  [[ -n "${BAG_PID:-}" ]] && kill "${BAG_PID}" 2>/dev/null || true
+  [[ -n "${BAG_PID:-}" ]] && wait "${BAG_PID}" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
 # Ensure a clean process baseline before starting the new run.
 cleanup_existing_nav2
+
+# ── Bag recording (RECORD_METRICS=true) ─────────────────────────────────────
+# Bags this run's traffic to experiment_runs/, mirroring launch_real_hardware.sh's
+# RECORD_METRICS behavior so sim runs are inspectable the same way hw runs are.
+if [[ "${RECORD_METRICS}" == true ]]; then
+  RUN_DIR="${PROJECT_ROOT}/experiment_runs/$(date +%Y%m%d_%H%M%S)_${MAP_TRANSPORT}_${WORLD}"
+  mkdir -p "${RUN_DIR}"
+  export ROS_LOG_DIR="${RUN_DIR}/ros_logs"
+  echo "Recording metrics to ${RUN_DIR} (RECORD_METRICS=true)"
+
+  BAG_TOPICS=()
+  if (( NUM_ROBOTS > 1 )); then
+    for ((i = 1; i <= NUM_ROBOTS; i++)); do
+      name="robot${i}"
+      BAG_TOPICS+=(
+        "/${name}/explore/traversed_path"
+        "/${name}/explore/frontiers"
+        "/${name}/map"
+        "/${name}/team_map_ddil"
+        "/${name}/nav_map"
+      )
+      if [[ "${MAP_TRANSPORT}" == "vxch" ]]; then
+        for ((band = 0; band <= HAAR_LEVELS; band++)); do
+          BAG_TOPICS+=("/${name}/vxch/map/band_${band}")
+        done
+        BAG_TOPICS+=("/${name}/vxch/map/manifest")
+        # Peer-to-peer topology: each robot has its own independent downlink
+        # from every other robot (no centralized base station), so the DDIL'd
+        # bands live under /{name}/incoming/{peer}/... per peer.
+        for ((j = 1; j <= NUM_ROBOTS; j++)); do
+          (( j == i )) && continue
+          peer="robot${j}"
+          for ((band = 0; band <= HAAR_LEVELS; band++)); do
+            BAG_TOPICS+=("/${name}/incoming/${peer}/band_${band}")
+          done
+          BAG_TOPICS+=("/${name}/incoming/${peer}/manifest")
+        done
+      fi
+    done
+  else
+    BAG_TOPICS+=(
+      "/explore/traversed_path"
+      "/explore/frontiers"
+      "/map"
+    )
+  fi
+
+  ros2 bag record -o "${RUN_DIR}/bag" "${BAG_TOPICS[@]}" \
+    >"${RUN_DIR}/bag_record.log" 2>&1 &
+  BAG_PID=$!
+fi
 
 if (( NUM_ROBOTS > 1 )); then
   ros2 launch bme_ros2_navigation multi_robot_vxch_experiment.launch.py \

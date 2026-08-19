@@ -384,8 +384,6 @@ def _rviz_config(output_dir, namespaces):
             "Value": True,
         },
     ]
-    displays.append({**_map_display("Team Global Map", "/map", 0.75), "Enabled": False})
-
     for idx, namespace in enumerate(namespaces):
         color = _PATH_COLORS[min(idx, len(_PATH_COLORS) - 1)]
         displays.extend(
@@ -522,7 +520,6 @@ def _create_multi_robot_actions(context):
     z = float(LaunchConfiguration("z").perform(context))
     yaw = float(LaunchConfiguration("yaw").perform(context))
     spacing = float(LaunchConfiguration("spacing").perform(context))
-    vxch_mode = _bool_value(LaunchConfiguration("vxch_mode").perform(context))
     spawn_positions_raw = LaunchConfiguration("spawn_positions_json").perform(context)
     spawn_positions = json.loads(spawn_positions_raw) if spawn_positions_raw else []
 
@@ -780,27 +777,10 @@ def _create_multi_robot_actions(context):
             )
         )
 
-    actions.append(
-        Node(
-            package="bme_ros2_navigation",
-            executable="team_map_fusion.py",
-            name="team_map_fusion",
-            output="screen",
-            parameters=[
-                {
-                    "robot_names": namespaces,
-                    "offsets_x": robot_offsets_x,
-                    "offsets_y": robot_offsets_y,
-                    "offsets_yaw": robot_offsets_yaw,
-                    "global_frame": "map",
-                    "publish_rate_hz": 1.0,
-                    "use_sim_time": use_sim_time,
-                    "vxch_mode": vxch_mode,
-                }
-            ],
-        )
-    )
-
+    # No centralized team_map_fusion here -- matches hw_namespaced_stack.launch.py,
+    # where each robot fuses its own view of the team locally from whatever peer
+    # maps its own DDIL links delivered. See multi_robot_vxch_experiment.launch.py's
+    # per-robot, per-peer relay + team_map_fusion_{robot} instances.
     actions.append(TimerAction(period=5.0, actions=slam_actions))
     actions.append(TimerAction(period=12.0, actions=nav2_actions))
 
@@ -852,9 +832,6 @@ def generate_launch_description():
             DeclareLaunchArgument("rviz", default_value="true"),
             DeclareLaunchArgument("seed", default_value="-1",
                 description="Gazebo physics RNG seed (-1 = non-deterministic)"),
-            DeclareLaunchArgument(
-                "vxch_mode", default_value="false",
-                description="Suppress per-robot global_map publishing (VXCH decoder takes over)"),
             DeclareLaunchArgument(
                 "spawn_positions_json", default_value="[]",
                 description="JSON array of {x,y,yaw} dicts, one per robot. "

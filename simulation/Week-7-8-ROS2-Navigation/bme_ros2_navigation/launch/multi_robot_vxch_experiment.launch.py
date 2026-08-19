@@ -1,29 +1,48 @@
 """
 VXCH progressive streaming experiment launcher.
 
-Network model: each robot has an independent point-to-point downlink from the base station
-at bandwidth_kbps.  One ddil_proxy instance per robot enforces this — robots cannot starve
-each other and there is no implicit multicast advantage for either method.
+Peer-to-peer network model, matching hw_namespaced_stack.launch.py (the real-robot
+launch path) rather than a simulation-only centralized "base station" fusing every
+robot's map before any DDIL link is applied. There is no base station on the real
+robots -- every robot only ever sees its own local map plus whatever its own DDIL
+links deliver from each peer directly -- so the sim topology mirrors that: one
+independent per-peer downlink per robot, throttled/lossy independently, fused
+locally on each robot via its own team_map_fusion instance.
 
 map_transport:=baseline
-  base station: team_map_fusion → /{robot}/global_map
-  per-robot link (ddil_proxy_{robot}): /{robot}/global_map → /{robot}/team_map_ddil
-  robot: PerRobotMapCompositor merges /{robot}/map (local) + /{robot}/team_map_ddil → /{robot}/nav_map
+  per robot X, per peer Y: ddil_proxy_{X}_from_{Y} relays /{Y}/map (peer's own local
+    map) → /{X}/incoming/{Y}/map
+  per robot X: team_map_fusion_{X} fuses /{X}/incoming/{peer}/map for every peer →
+    /{X}/team_map_ddil
+  robot: PerRobotMapCompositor merges /{X}/map (local) + /{X}/team_map_ddil →
+    /{X}/nav_map
 
 map_transport:=vxch
-  base station: team_map_fusion → /map → encoder → /vxch/map/band_0..N + manifest
-  per-robot link (ddil_proxy_{robot}): bands + manifest → /vxch/map_ddil_{robot}/band_0..N + manifest
-  robot: vxch_decoder_{robot} → /{robot}/team_map_ddil
-         PerRobotMapCompositor merges /{robot}/map (local) + /{robot}/team_map_ddil → /{robot}/nav_map
+  per robot X: occupancy_grid_vxch_encoder_{X} encodes its own /{X}/map →
+    /{X}/vxch/map/band_0..N + manifest
+  per robot X, per peer Y: ddil_proxy_{X}_from_{Y} relays peer Y's bands + manifest →
+    /{X}/incoming/{Y}/band_0..N + manifest; vxch_decoder_{X}_from_{Y} decodes that →
+    /{X}/incoming/{Y}/map
+  per robot X: team_map_fusion_{X} fuses /{X}/incoming/{peer}/map for every peer →
+    /{X}/team_map_ddil
+  robot: PerRobotMapCompositor merges /{X}/map (local) + /{X}/team_map_ddil →
+    /{X}/nav_map
 
 Nav2 and frontier exploration subscribe to /{robot}/nav_map in both modes.
 
-DDIL args (default 0 = no degradation):
-  bandwidth_kbps   token-bucket rate limit per robot downlink
+Each of a robot's per-peer downlinks is independent -- one ddil_proxy instance per
+(robot, peer) pair, so peers cannot starve each other and there is no implicit
+multicast advantage for either transport.
+
+DDIL args (default 0 = no degradation), applied identically to every (robot, peer)
+downlink:
+  bandwidth_kbps   token-bucket rate limit
   loss_pct         per-message drop probability (0–100)
   delay_ms         additional forwarding latency
 """
 
+import json
+import math
 import os
 
 from ament_index_python.packages import get_package_share_directory
@@ -40,6 +59,36 @@ from launch_ros.actions import Node
 
 def _bool_value(s):
     return str(s).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _robot_pose(index, count, x, y, z, yaw, spacing, world):
+    """Mirrors multi_robot_navigation_with_slam.launch.py's _robot_pose exactly --
+    duplicated (not imported) so this file stays a self-contained launch file, same
+    as hw_namespaced_stack.launch.py's own peer-position handling. Needed here only
+    to compute each robot's (offset_x, offset_y, offset_yaw) for team_map_fusion_{X};
+    the actual spawn itself still happens inside the included navigation launch."""
+    if count == 1:
+        return x, y, z, yaw
+
+    if world == "corridor":
+        local_x = (index - ((count - 1) / 2.0)) * spacing
+        local_y = 0.0
+    else:
+        columns = max(1, math.ceil(math.sqrt(count)))
+        rows = max(1, math.ceil(count / columns))
+        row = index // columns
+        column = index % columns
+        local_x = (row - ((rows - 1) / 2.0)) * spacing
+        local_y = (column - ((columns - 1) / 2.0)) * spacing
+
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+    return (
+        x + (cos_yaw * local_x) - (sin_yaw * local_y),
+        y + (sin_yaw * local_x) + (cos_yaw * local_y),
+        z,
+        yaw,
+    )
 
 
 def _create_all_actions(context):
@@ -82,15 +131,15 @@ def _create_all_actions(context):
         raise ValueError(f"map_transport must be 'baseline' or 'vxch', got '{map_transport}'")
 
     is_vxch = map_transport == "vxch"
-    vxch_mode_str = "true" if is_vxch else "false"
 
     robot_names = [f"robot{i + 1}" for i in range(num_robots)]
-    vxch_base = "/vxch/map"
 
     total_bands = haar_levels + 1
 
-    # Base DDIL params shared across per-robot proxies.
-    # rng_seed is offset per robot so packet-loss patterns are independent.
+    # Base DDIL params shared across every per-(robot, peer) proxy.
+    # rng_seed is offset per (robot, peer) pair so packet-loss patterns are
+    # independent -- otherwise every downlink into the same robot, or every
+    # robot's downlink from the same peer, would drop in lockstep.
     ddil_params_base = {
         "bandwidth_kbps": bandwidth_kbps,
         "loss_pct": loss_pct,
@@ -98,16 +147,33 @@ def _create_all_actions(context):
         "use_sim_time": use_sim_time,
     }
 
-    def ddil_params_for(robot_index: int) -> dict:
-        seed = (rng_seed + robot_index) if rng_seed >= 0 else -1
+    def ddil_params_for(robot_index: int, peer_index: int) -> dict:
+        seed = (rng_seed + robot_index * num_robots + peer_index) if rng_seed >= 0 else -1
         return {**ddil_params_base, "rng_seed": seed}
+
+    # Each robot's (offset_x, offset_y, offset_yaw) in the shared "map" frame --
+    # needed here (not just inside the included navigation launch) so each robot's
+    # own team_map_fusion_{X} can place incoming peer maps correctly. Duplicates
+    # multi_robot_navigation_with_slam.launch.py's own per-index pose computation;
+    # both must derive the same values from the same (world, x, y, z, yaw, spacing,
+    # spawn_positions_json) inputs for a robot's own idea of where its peers are to
+    # agree with where those peers actually spawned.
+    spawn_positions_raw = LaunchConfiguration("spawn_positions_json").perform(context)
+    spawn_positions = json.loads(spawn_positions_raw) if spawn_positions_raw else []
+    x_f, y_f, z_f, yaw_f, spacing_f = (float(x), float(y), float(z), float(yaw), float(spacing))
+    robot_poses = []
+    for i in range(num_robots):
+        if spawn_positions:
+            pos = spawn_positions[i % len(spawn_positions)]
+            robot_poses.append(
+                (float(pos["x"]), float(pos["y"]), z_f, float(pos.get("yaw", yaw_f)))
+            )
+        else:
+            robot_poses.append(_robot_pose(i, num_robots, x_f, y_f, z_f, yaw_f, spacing_f, world))
 
     actions = []
 
     # ── Navigation + SLAM + world ──────────────────────────────────────────────
-    # global_map_suffix is intentionally omitted: team_map_fusion always publishes
-    # /{robot}/global_map (default suffix ""). The DdilProxy intercepts that topic
-    # and produces /{robot}/team_map_ddil, making bypass structurally impossible.
     actions.append(
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -124,7 +190,6 @@ def _create_all_actions(context):
                 "spacing": spacing,
                 "use_sim_time": use_sim_time_str,
                 "rviz": rviz,
-                "vxch_mode": vxch_mode_str,
                 "seed": str(rng_seed),
                 "spawn_positions_json": LaunchConfiguration("spawn_positions_json"),
             }.items(),
@@ -145,93 +210,126 @@ def _create_all_actions(context):
         )
     )
 
-    # ── Baseline mode ──────────────────────────────────────────────────────────
-    if not is_vxch:
-        # One proxy per robot — each robot has its own independent downlink.
-        # team_map_fusion publishes /{robot}/global_map; the proxy throttles it
-        # to /{robot}/team_map_ddil; the compositor merges that with the local
-        # /{robot}/map to produce /{robot}/nav_map.
-        for i, name in enumerate(robot_names):
+    # ── VXCH mode: one encoder per robot, encoding that robot's own local map ──
+    # Matches hw_namespaced_stack.launch.py's _team_map_share_actions: every robot
+    # encodes its own /{robot}/map once, for any peer to pull -- purely local, no
+    # DDIL involved yet.
+    if is_vxch:
+        for name in robot_names:
             actions.append(
                 Node(
                     package="voxelcodec_ros",
-                    executable="ddil_proxy_node",
-                    name=f"ddil_proxy_{name}",
+                    executable="occupancy_grid_vxch_node",
+                    name=f"vxch_encoder_{name}",
                     output="screen",
                     parameters=[{
-                        **ddil_params_for(i),
-                        "relay_topics": [
-                            f"/{name}/global_map /{name}/team_map_ddil"
-                            " nav_msgs/msg/OccupancyGrid reliable"
-                        ],
-                    }],
-                )
-            )
-
-    # ── VXCH mode ──────────────────────────────────────────────────────────────
-    else:
-        # Encoder runs once at the base station: /map → /vxch/map/band_0..N + manifest.
-        actions.append(
-            Node(
-                package="voxelcodec_ros",
-                executable="occupancy_grid_vxch_node",
-                name="occupancy_grid_vxch_encoder",
-                output="screen",
-                parameters=[{
-                    "input_topic": "/map",
-                    "output_base_topic": vxch_base,
-                    "haar_levels": haar_levels,
-                    "tile_size_m": tile_size_m,
-                    "compression": compression,
-                    "varint_encoding": varint_encoding,
-                    "schedule_mode": schedule_mode,
-                    "use_sim_time": use_sim_time,
-                }],
-            )
-        )
-
-        # One proxy + decoder per robot — each robot's downlink is independent.
-        # The manifest travels through the same token bucket as the bands so it
-        # counts against the bandwidth budget; it uses RELIABLE QoS so late-joining
-        # decoders still receive it on the next encoder cycle.
-        for i, name in enumerate(robot_names):
-            robot_ddil_base = f"/vxch/map_ddil_{name}"
-            relay_topics = [
-                f"{vxch_base}/band_{k} {robot_ddil_base}/band_{k}"
-                " voxelcodec_msgs/msg/VoxelChannel"
-                for k in range(total_bands)
-            ]
-            relay_topics.append(
-                f"{vxch_base}/manifest {robot_ddil_base}/manifest"
-                " voxelcodec_msgs/msg/VoxelManifest reliable"
-            )
-            actions.append(
-                Node(
-                    package="voxelcodec_ros",
-                    executable="ddil_proxy_node",
-                    name=f"ddil_proxy_{name}",
-                    output="screen",
-                    parameters=[{
-                        **ddil_params_for(i),
-                        "relay_topics": relay_topics,
-                    }],
-                )
-            )
-            actions.append(
-                Node(
-                    package="voxelcodec_ros",
-                    executable="vxch_occupancy_grid_node",
-                    name=f"vxch_decoder_{name}",
-                    output="screen",
-                    parameters=[{
-                        "input_base_topic": robot_ddil_base,
-                        "output_topic": f"/{name}/team_map_ddil",
+                        "input_topic": f"/{name}/map",
+                        "output_base_topic": f"/{name}/vxch/map",
                         "haar_levels": haar_levels,
-                        "publish_rate_hz": 1.0,
+                        "tile_size_m": tile_size_m,
+                        "compression": compression,
+                        "varint_encoding": varint_encoding,
+                        "schedule_mode": schedule_mode,
                         "use_sim_time": use_sim_time,
                     }],
                 )
             )
+
+    # ── Per-robot, per-peer DDIL relay + local fusion ───────────────────────────
+    # Every robot X pulls each peer Y's map directly over its own independent
+    # (X, Y) downlink -- no shared/centralized fusion node in between, matching
+    # hw_namespaced_stack.launch.py exactly (which runs the equivalent of this
+    # loop once per physical robot, on that robot's own compute). Here all robots
+    # run in one process, so the loop just does it N times instead of N robots
+    # each doing it once.
+    for i, name in enumerate(robot_names):
+        peer_indices = [p for p in range(num_robots) if p != i]
+        for peer_index in peer_indices:
+            peer_name = robot_names[peer_index]
+            robot_ddil_base = f"/{name}/incoming/{peer_name}"
+
+            if is_vxch:
+                relay_topics = [
+                    f"/{peer_name}/vxch/map/band_{k} {robot_ddil_base}/band_{k}"
+                    " voxelcodec_msgs/msg/VoxelChannel"
+                    for k in range(total_bands)
+                ]
+                relay_topics.append(
+                    f"/{peer_name}/vxch/map/manifest {robot_ddil_base}/manifest"
+                    " voxelcodec_msgs/msg/VoxelManifest reliable"
+                )
+                actions.append(
+                    Node(
+                        package="voxelcodec_ros",
+                        executable="ddil_proxy_node",
+                        name=f"ddil_proxy_{name}_from_{peer_name}",
+                        output="screen",
+                        parameters=[{
+                            **ddil_params_for(i, peer_index),
+                            "relay_topics": relay_topics,
+                        }],
+                    )
+                )
+                actions.append(
+                    Node(
+                        package="voxelcodec_ros",
+                        executable="vxch_occupancy_grid_node",
+                        name=f"vxch_decoder_{name}_from_{peer_name}",
+                        output="screen",
+                        parameters=[{
+                            "input_base_topic": robot_ddil_base,
+                            "output_topic": f"{robot_ddil_base}/map",
+                            "haar_levels": haar_levels,
+                            "publish_rate_hz": 1.0,
+                            "use_sim_time": use_sim_time,
+                        }],
+                    )
+                )
+            else:
+                actions.append(
+                    Node(
+                        package="voxelcodec_ros",
+                        executable="ddil_proxy_node",
+                        name=f"ddil_proxy_{name}_from_{peer_name}",
+                        output="screen",
+                        parameters=[{
+                            **ddil_params_for(i, peer_index),
+                            "relay_topics": [
+                                f"/{peer_name}/map {robot_ddil_base}/map"
+                                " nav_msgs/msg/OccupancyGrid reliable"
+                            ],
+                        }],
+                    )
+                )
+
+        # Local fusion of every peer's (DDIL'd) map into this robot's own team view.
+        # Placed at peer_index's spawn offset so a peer's map lands in the right
+        # place in this robot's "map" frame regardless of which robot is doing the
+        # fusing -- same team_map_fusion.py node hw_namespaced_stack.launch.py uses
+        # for its own per-robot role.
+        peer_names = [robot_names[p] for p in peer_indices]
+        peer_offsets = [robot_poses[p] for p in peer_indices]
+        actions.append(
+            Node(
+                package="bme_ros2_navigation",
+                executable="team_map_fusion.py",
+                name=f"team_map_fusion_{name}",
+                output="screen",
+                parameters=[{
+                    "robot_names": peer_names,
+                    "offsets_x": [pose[0] for pose in peer_offsets],
+                    "offsets_y": [pose[1] for pose in peer_offsets],
+                    "offsets_yaw": [pose[3] for pose in peer_offsets],
+                    "global_frame": "map",
+                    "publish_rate_hz": 1.0,
+                    "map_topic_template": f"/{name}/incoming/{{name}}/map",
+                    "output_topic": f"/{name}/team_map_ddil",
+                    "output_metadata_topic": f"/{name}/team_map_ddil_metadata",
+                    "publish_per_robot_maps": False,
+                    "use_sim_time": use_sim_time,
+                }],
+            )
+        )
 
     return actions
 

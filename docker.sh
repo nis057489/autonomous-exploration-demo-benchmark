@@ -96,7 +96,7 @@ run_docker() {
 
   # Forward experiment parameters into the container.
   # Use -e VAR=value (not bare -e VAR) so sourced-but-unexported variables are forwarded.
-  for _var in MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS RANDOM_SEED ROBOT_STARTUP_DELAY_S SPAWN_PRESET; do
+  for _var in MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS RANDOM_SEED ROBOT_STARTUP_DELAY_S SPAWN_PRESET RECORD_METRICS; do
     if [[ -n "${!_var:-}" ]]; then
       docker_args+=(-e "${_var}=${!_var}")
     fi
@@ -151,6 +151,11 @@ run_docker() {
 
   if [[ -d "${PROJECT_ROOT}/results" ]]; then
     docker_args+=(-v "${PROJECT_ROOT}/results:/opt/benchmark_ws/results")
+  fi
+
+  if [[ "${RECORD_METRICS:-false}" == true ]]; then
+    mkdir -p "${PROJECT_ROOT}/experiment_runs"
+    docker_args+=(-v "${PROJECT_ROOT}/experiment_runs:/opt/benchmark_ws/experiment_runs")
   fi
 
   echo "Starting benchmark in Docker (image=${DOCKER_IMAGE}, world=${WORLD}, robot=${ROBOT:-mogi_bot}, num_robots=${NUM_ROBOTS:-1}, map_transport=${MAP_TRANSPORT:-baseline}, bandwidth_kbps=${BANDWIDTH_KBPS:-0}, loss_pct=${LOSS_PCT:-0.0}, delay_ms=${DELAY_MS:-0})..."
