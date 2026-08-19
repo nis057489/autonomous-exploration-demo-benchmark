@@ -47,73 +47,25 @@ inline void haar_forward_level(std::vector<std::int64_t> & coeffs, std::size_t s
   }
 }
 
-// Write a uvarint (unsigned LEB128) to out. Factored out of
-// zigzag_varint_encode below since sparse_rle_encode also needs raw
-// (non-zigzag) uvarints for gap-lengths and its nonzero-count header.
-inline void write_uvarint(std::vector<std::uint8_t> & out, std::uint64_t u)
-{
-  while (u >= 0x80U) {
-    out.push_back(static_cast<std::uint8_t>((u & 0x7FU) | 0x80U));
-    u >>= 7U;
-  }
-  out.push_back(static_cast<std::uint8_t>(u));
-}
-
-// Zigzag-encode a single coefficient (negative → odd, non-negative → even).
-inline std::uint64_t zigzag_encode(std::int64_t v)
-{
-  return (v >= 0)
-    ? static_cast<std::uint64_t>(v) * 2
-    : static_cast<std::uint64_t>(-(v + 1)) * 2 + 1;
-}
-
-// Zigzag-varint encode a coefficient array: one varint per coefficient, in
-// order, zeros included. Mirrors zig_zag_decode + read_uvarint in codec.cpp.
+// Zigzag-varint encode a coefficient array.
+// Mirrors zig_zag_decode + read_uvarint in codec.cpp.
 inline std::vector<std::uint8_t> zigzag_varint_encode(const std::vector<std::int64_t> & coeffs)
 {
   std::vector<std::uint8_t> out;
   out.reserve(coeffs.size() * 2);
   for (const std::int64_t v : coeffs) {
-    write_uvarint(out, zigzag_encode(v));
+    // Zigzag encode: negative → odd, non-negative → even
+    const std::uint64_t zz = (v >= 0)
+      ? static_cast<std::uint64_t>(v) * 2
+      : static_cast<std::uint64_t>(-(v + 1)) * 2 + 1;
+    // Varint encode
+    std::uint64_t u = zz;
+    while (u >= 0x80U) {
+      out.push_back(static_cast<std::uint8_t>((u & 0x7FU) | 0x80U));
+      u >>= 7U;
+    }
+    out.push_back(static_cast<std::uint8_t>(u));
   }
-  return out;
-}
-
-// Lossless sparse run-length coefficient encode. Rather than interleaving
-// (gap, value) pairs -- which would still mix two differently-distributed
-// byte streams together, giving a general-purpose compressor's entropy
-// stage a blended, less-modelable distribution -- this separates "how
-// many zeros" from "what's the next nonzero value" into two homogeneous
-// streams, concatenated (not interleaved):
-//   [uvarint nonzero_count]
-//   [nonzero_count uvarints: gap since the previous nonzero (or start),
-//    for each nonzero coefficient in order]
-//   [nonzero_count zigzag-varints: the nonzero values themselves, reusing
-//    zigzag_varint_encode's per-value encoding]
-// count (== coeffs.size()) isn't stored -- the decoder already receives
-// it externally, same as zigzag_varint_decode/fixed_width_decode's
-// existing signatures. All-zero input -> a single 1-byte
-// (nonzero_count=0) header, gaps/values streams both empty.
-inline std::vector<std::uint8_t> sparse_rle_encode(const std::vector<std::int64_t> & coeffs)
-{
-  std::vector<std::uint8_t> gaps;
-  std::vector<std::uint8_t> values;
-  std::uint64_t nonzero_count = 0;
-  std::size_t last_nonzero_end = 0;  // one past the last nonzero position, or 0 at start
-
-  for (std::size_t i = 0; i < coeffs.size(); ++i) {
-    if (coeffs[i] == 0) {continue;}
-    write_uvarint(gaps, static_cast<std::uint64_t>(i - last_nonzero_end));
-    write_uvarint(values, zigzag_encode(coeffs[i]));
-    ++nonzero_count;
-    last_nonzero_end = i + 1;
-  }
-
-  std::vector<std::uint8_t> out;
-  out.reserve(1 + gaps.size() + values.size());
-  write_uvarint(out, nonzero_count);
-  out.insert(out.end(), gaps.begin(), gaps.end());
-  out.insert(out.end(), values.begin(), values.end());
   return out;
 }
 
@@ -209,7 +161,7 @@ inline std::vector<EncodedChannel> make_haar_bands(
   std::size_t height,
   int levels,
   const std::string & compression,
-  const std::string & coeff_encoding = kHaarEncodingVarint)
+  bool use_varint = true)
 {
   if (levels < 1) {
     throw std::runtime_error("haar levels must be >= 1");
@@ -221,7 +173,6 @@ inline std::vector<EncodedChannel> make_haar_bands(
   if (values.size() != N) {
     throw std::runtime_error("make_haar_bands: values size does not match width*height");
   }
-  validate_haar_encoding(coeff_encoding);
 
   std::vector<std::int64_t> grid(values.begin(), values.end());
   const auto dims = compute_haar_level_dims(width, height, levels);
@@ -244,46 +195,9 @@ inline std::vector<EncodedChannel> make_haar_bands(
 
   for (int k = 0; k < total_bands; ++k) {
     const auto & coeffs = band_coeffs[static_cast<std::size_t>(k)];
-
-    std::string chosen_encoding;
-    std::vector<std::uint8_t> raw_payload;
-    std::vector<std::uint8_t> payload;
-
-    if (coeff_encoding == kHaarEncodingAuto) {
-      // Try all 3 concrete schemes, keep whichever *compresses* smallest --
-      // that's the number that actually matters, and compression ratio can
-      // differ by scheme even when raw sizes are close. kHaarEncodingKey is
-      // always written as the concrete winner below; "auto" never appears
-      // there, so the decoder never needs to know it was requested.
-      const std::string encodings[3] = {
-        kHaarEncodingVarint, kHaarEncodingFixedWidth, kHaarEncodingSparseRle};
-      bool have_candidate = false;
-      for (const auto & candidate_encoding : encodings) {
-        std::vector<std::uint8_t> candidate_raw =
-          (candidate_encoding == kHaarEncodingVarint) ? zigzag_varint_encode(coeffs) :
-          (candidate_encoding == kHaarEncodingFixedWidth) ? fixed_width_encode(coeffs) :
-          sparse_rle_encode(coeffs);
-        std::vector<std::uint8_t> candidate_payload = compress_payload(compression, candidate_raw);
-        if (!have_candidate || candidate_payload.size() < payload.size()) {
-          have_candidate = true;
-          chosen_encoding = candidate_encoding;
-          raw_payload = std::move(candidate_raw);
-          payload = std::move(candidate_payload);
-        }
-      }
-    } else if (coeff_encoding == kHaarEncodingVarint) {
-      chosen_encoding = kHaarEncodingVarint;
-      raw_payload = zigzag_varint_encode(coeffs);
-      payload = compress_payload(compression, raw_payload);
-    } else if (coeff_encoding == kHaarEncodingFixedWidth) {
-      chosen_encoding = kHaarEncodingFixedWidth;
-      raw_payload = fixed_width_encode(coeffs);
-      payload = compress_payload(compression, raw_payload);
-    } else {
-      chosen_encoding = kHaarEncodingSparseRle;
-      raw_payload = sparse_rle_encode(coeffs);
-      payload = compress_payload(compression, raw_payload);
-    }
+    std::vector<std::uint8_t> raw_payload =
+      use_varint ? zigzag_varint_encode(coeffs) : fixed_width_encode(coeffs);
+    std::vector<std::uint8_t> payload = compress_payload(compression, raw_payload);
 
     ChannelDescriptor desc;
     desc.name = "band_" + std::to_string(k);
@@ -300,7 +214,7 @@ inline std::vector<EncodedChannel> make_haar_bands(
     desc.metadata[kHaarGridHeightKey] = std::to_string(height);
     desc.metadata["haar_band_index"] = std::to_string(k);
     desc.metadata["haar_total_bands"] = std::to_string(total_bands);
-    desc.metadata[kHaarEncodingKey] = chosen_encoding;
+    desc.metadata[kHaarVarintKey] = use_varint ? "1" : "0";
 
     EncodedChannel ec;
     ec.descriptor = std::move(desc);

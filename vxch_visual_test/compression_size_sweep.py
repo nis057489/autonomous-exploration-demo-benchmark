@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Sweep synthetic occupancy grid size x vxch's compression/coefficient-encoding
-ablation matrix (see experiment.conf's COMPRESSION / COEFF_ENCODING) through the
-real codec via ./build/vxch_cli, and plot how encoded band-stream size scales with
+"""Sweep synthetic occupancy grid size x vxch's compression/varint ablation
+matrix (see experiment.conf's COMPRESSION / VARINT_ENCODING) through the real
+codec via ./build/vxch_cli, and plot how encoded band-stream size scales with
 map size under each configuration.
 
 Needs matplotlib + numpy, which live in the jazzy_env distrobox (see
@@ -34,35 +34,21 @@ DEFAULT_SIZES = [
     (160, 120), (240, 180), (320, 240), (480, 360), (640, 480),
 ]
 
-# Ablation matrix: (label, compression, encoding). Order fixed so color
+# Ablation matrix: (label, compression, varint). Order fixed so color
 # assignment below is stable regardless of which configs happen to run.
-# encoding is vxch_cli's --encoding value -- see kHaarEncoding* in
-# voxelcodec_ros/types.hpp: "varint" (default), "fixed_width", "sparse_rle"
-# (separate gap-length/magnitude streams -- wins on sparse/mostly-flat
-# bands, can lose on dense ones), "auto" (try all 3 per band, keep
-# whichever compresses smallest -- never worse than the best single mode).
 CONFIGS = [
-    ("zstd + varint (default)", "zstd", "varint"),
-    ("zstd + fixed-width", "zstd", "fixed_width"),
-    ("zstd + sparse-RLE", "zstd", "sparse_rle"),
-    ("zstd + auto", "zstd", "auto"),
-    ("none + varint", "none", "varint"),
-    ("none + fixed-width", "none", "fixed_width"),
-    ("none + sparse-RLE", "none", "sparse_rle"),
-    ("none + auto", "none", "auto"),
+    ("zstd + varint (default)", "zstd", True),
+    ("zstd + fixed-width", "zstd", False),
+    ("none + varint", "none", True),
+    ("none + fixed-width", "none", False),
 ]
 
-# All 8 slots of the dataviz skill's validated categorical palette
-# (references/palette.md), in fixed order -- the full 8 passes every
-# adjacent-pair CVD/contrast gate in both modes for a line chart (this
-# script's chart form); only all-pairs contexts (scatter, small multiples)
-# need the 3-slot cap. The raw-bytes reference line uses the palette's
-# muted "text-secondary" ink instead of a categorical hue, since it's a
-# baseline for scale, not a series identity.
-SERIES_COLORS = [
-    "#2a78d6", "#eb6834", "#1baf7a", "#eda100",
-    "#e87ba4", "#008300", "#4a3aa7", "#e34948",
-]
+# First four slots of the dataviz skill's validated categorical palette
+# (references/palette.md), in fixed order -- passes the adjacent-pair CVD/
+# contrast gates for a line chart. The raw-bytes reference line uses the
+# palette's muted "text-secondary" ink instead of a categorical hue, since
+# it's a baseline for scale, not a series identity.
+SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
 RAW_REFERENCE_COLOR = "#767568"
 
 
@@ -86,12 +72,12 @@ def sweep(sizes, levels, tile_size_cells, seed, workdir):
         run_cli("gen-map", "--out", map_path, "--width", width, "--height", height, "--seed", seed)
         cells = width * height
 
-        for label, compression, encoding in CONFIGS:
-            session_path = os.path.join(workdir, f"session_{width}x{height}_{compression}_{encoding}.vxch")
+        for label, compression, use_varint in CONFIGS:
+            session_path = os.path.join(workdir, f"session_{width}x{height}_{compression}_{use_varint}.vxch")
             result = run_cli(
                 "encode", "--map", map_path, "--out", session_path,
                 "--levels", levels, "--tile-size-cells", tile_size_cells,
-                "--compression", compression, "--encoding", encoding,
+                "--compression", compression, "--varint", "true" if use_varint else "false",
             )
             results[label]["cells"].append(cells)
             results[label]["raw_bytes"].append(result["raw_bytes"])

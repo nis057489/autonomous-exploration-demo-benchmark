@@ -41,24 +41,10 @@ namespace voxelcodec_ros
   // wvmp point columns) -- see decode_haar_wavelet_channel/decode_haar_progressive.
   inline constexpr char kHaarGridWidthKey[] = "haar_grid_width";
   inline constexpr char kHaarGridHeightKey[] = "haar_grid_height";
-  // Which scheme this band's coefficients were packed with -- see
-  // make_haar_bands's coeff_encoding parameter. Always set by
-  // make_haar_bands (to one of the 3 concrete values below, even when
-  // "auto" was requested), so a consumer can rely on it being present.
-  inline constexpr char kHaarEncodingKey[] = "haar_encoding";
-  // zigzag-varint packed (zigzag_varint_encode) -- one varint per
-  // coefficient, in order, zero included.
-  inline constexpr char kHaarEncodingVarint[] = "varint";
-  // fixed-width int32 LE (fixed_width_encode) -- 4 bytes/coefficient
-  // always, no data-dependent variation.
-  inline constexpr char kHaarEncodingFixedWidth[] = "fixed_width";
-  // sparse run-length (sparse_rle_encode) -- gap-lengths and nonzero
-  // magnitudes as two separate homogeneous streams, concatenated.
-  inline constexpr char kHaarEncodingSparseRle[] = "sparse_rle";
-  // Valid only as make_haar_bands's *input* parameter -- never written to
-  // kHaarEncodingKey. Requests that make_haar_bands try all 3 concrete
-  // schemes per band and keep whichever compresses smallest.
-  inline constexpr char kHaarEncodingAuto[] = "auto";
+  // "1" = coefficients were zigzag-varint packed (zigzag_varint_encode); "0" =
+  // fixed-width int32 LE (fixed_width_encode) -- see make_haar_bands's use_varint
+  // parameter. Always set by make_haar_bands, so a consumer can rely on it being present.
+  inline constexpr char kHaarVarintKey[] = "haar_varint";
 
   using Metadata = std::unordered_map<std::string, std::string>;
   using ScalarBuffer = std::variant<

@@ -56,9 +56,8 @@ inline std::vector<std::int64_t> zigzag_varint_decode(
   return out;
 }
 
-// Mirrors fixed_width_encode in haar_forward.hpp -- one of 3 ablation-mode
-// counterparts to zigzag_varint_decode above, selected per band via the
-// descriptor's kHaarEncodingKey.
+// Mirrors fixed_width_encode in haar_forward.hpp -- the ablation-mode counterpart to
+// zigzag_varint_decode above, selected per band via the descriptor's kHaarVarintKey.
 inline std::vector<std::int64_t> fixed_width_decode(
   const std::vector<std::uint8_t> & raw, std::size_t count)
 {
@@ -67,46 +66,6 @@ inline std::vector<std::int64_t> fixed_width_decode(
     std::int32_t v;
     std::memcpy(&v, &raw[i * 4], 4);
     out[i] = v;
-  }
-  return out;
-}
-
-// Mirrors sparse_rle_encode in haar_forward.hpp -- reads the
-// [nonzero_count][gaps...][values...] format described there and
-// reconstructs the full (zero-filled) coefficient array.
-inline std::vector<std::int64_t> sparse_rle_decode(
-  const std::vector<std::uint8_t> & raw, std::size_t count)
-{
-  std::vector<std::int64_t> out(count, 0);
-  std::size_t offset = 0;
-
-  auto read_next_uvarint = [&]() -> std::uint64_t {
-    std::uint64_t value = 0;
-    int shift = 0;
-    while (offset < raw.size()) {
-      const std::uint8_t byte = raw[offset++];
-      value |= static_cast<std::uint64_t>(byte & 0x7FU) << shift;
-      if ((byte & 0x80U) == 0) {break;}
-      shift += 7;
-      if (shift >= 64) {throw std::runtime_error("varint overflow");}
-    }
-    return value;
-  };
-
-  const std::uint64_t nonzero_count = read_next_uvarint();
-  std::vector<std::uint64_t> gaps(nonzero_count);
-  for (std::uint64_t i = 0; i < nonzero_count; ++i) {
-    gaps[i] = read_next_uvarint();
-  }
-  std::size_t pos = 0;
-  for (std::uint64_t i = 0; i < nonzero_count; ++i) {
-    pos += static_cast<std::size_t>(gaps[i]);
-    if (pos >= count) {break;}  // defensive: malformed/truncated input
-    const std::uint64_t zz = read_next_uvarint();
-    out[pos] = (zz & 1U)
-      ? -static_cast<std::int64_t>((zz >> 1U) + 1U)
-      : static_cast<std::int64_t>(zz >> 1U);
-    ++pos;
   }
   return out;
 }
@@ -262,11 +221,10 @@ public:
       }
 
       const auto raw = decompress_payload(descriptor, compressed_payload);
-      const std::string & encoding = descriptor.metadata.at(kHaarEncodingKey);
-      tile.band_coeffs[idx] =
-        (encoding == kHaarEncodingVarint) ? zigzag_varint_decode(raw, descriptor.element_count) :
-        (encoding == kHaarEncodingFixedWidth) ? fixed_width_decode(raw, descriptor.element_count) :
-        sparse_rle_decode(raw, descriptor.element_count);
+      const bool use_varint = descriptor.metadata.at(kHaarVarintKey) == "1";
+      tile.band_coeffs[idx] = use_varint ?
+        zigzag_varint_decode(raw, descriptor.element_count) :
+        fixed_width_decode(raw, descriptor.element_count);
       tile.received[idx] = true;
       return std::nullopt;
     } catch (const std::exception & e) {

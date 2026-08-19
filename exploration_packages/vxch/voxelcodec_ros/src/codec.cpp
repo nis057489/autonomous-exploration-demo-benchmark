@@ -131,6 +131,47 @@ namespace voxelcodec_ros
       return descriptor;
     }
 
+    json manifest_to_json(const Manifest &manifest)
+    {
+      json channels = json::array();
+      for (const auto &descriptor : manifest.channels)
+      {
+        channels.push_back(descriptor_to_json(descriptor));
+      }
+
+      json item = json{{"format", manifest.format},
+                       {"version", manifest.version},
+                       {"voxel_count", manifest.voxel_count},
+                       {"channels", std::move(channels)}};
+      if (!manifest.metadata.empty())
+      {
+        item["metadata"] = metadata_to_json(manifest.metadata);
+      }
+      return item;
+    }
+
+    Manifest manifest_from_json(const json &item)
+    {
+      Manifest manifest;
+      manifest.format = item.at("format").get<std::string>();
+      manifest.version = item.at("version").get<std::uint16_t>();
+      manifest.voxel_count = item.at("voxel_count").get<std::uint32_t>();
+      manifest.channels.clear();
+      for (const auto &channel : item.at("channels"))
+      {
+        manifest.channels.push_back(descriptor_from_json(channel));
+      }
+      if (item.contains("metadata"))
+      {
+        manifest.metadata = metadata_from_json(item.at("metadata"));
+      }
+      else
+      {
+        manifest.metadata.clear();
+      }
+      return manifest;
+    }
+
     void store_u16(std::vector<std::uint8_t> &buffer, std::size_t offset, std::uint16_t value)
     {
       buffer[offset] = static_cast<std::uint8_t>(value & 0xffU);
@@ -836,61 +877,6 @@ namespace voxelcodec_ros
     }
   }
 
-  void validate_haar_encoding(const std::string &coeff_encoding)
-  {
-    if (coeff_encoding != kHaarEncodingVarint && coeff_encoding != kHaarEncodingFixedWidth &&
-        coeff_encoding != kHaarEncodingSparseRle && coeff_encoding != kHaarEncodingAuto)
-    {
-      throw std::runtime_error("unsupported haar coefficient encoding: " + coeff_encoding);
-    }
-  }
-
-  // Exposed via codec.hpp (unlike descriptor_to_json/metadata_to_json etc.,
-  // which stay TU-local in the anonymous namespace above) so ros_messages.cpp
-  // can reuse the same manifest<->JSON shape for the compressed live-wire
-  // VoxelManifest as encode_archive/read_archive already use for the
-  // file-based archive format below.
-  json manifest_to_json(const Manifest &manifest)
-  {
-    json channels = json::array();
-    for (const auto &descriptor : manifest.channels)
-    {
-      channels.push_back(descriptor_to_json(descriptor));
-    }
-
-    json item = json{{"format", manifest.format},
-                     {"version", manifest.version},
-                     {"voxel_count", manifest.voxel_count},
-                     {"channels", std::move(channels)}};
-    if (!manifest.metadata.empty())
-    {
-      item["metadata"] = metadata_to_json(manifest.metadata);
-    }
-    return item;
-  }
-
-  Manifest manifest_from_json(const json &item)
-  {
-    Manifest manifest;
-    manifest.format = item.at("format").get<std::string>();
-    manifest.version = item.at("version").get<std::uint16_t>();
-    manifest.voxel_count = item.at("voxel_count").get<std::uint32_t>();
-    manifest.channels.clear();
-    for (const auto &channel : item.at("channels"))
-    {
-      manifest.channels.push_back(descriptor_from_json(channel));
-    }
-    if (item.contains("metadata"))
-    {
-      manifest.metadata = metadata_from_json(item.at("metadata"));
-    }
-    else
-    {
-      manifest.metadata.clear();
-    }
-    return manifest;
-  }
-
   std::vector<std::uint8_t> compress_payload(
       const std::string &compression,
       const std::vector<std::uint8_t> &raw_payload)
@@ -903,7 +889,7 @@ namespace voxelcodec_ros
 
     std::vector<std::uint8_t> compressed(ZSTD_compressBound(raw_payload.size()));
     const auto result = ZSTD_compress(
-        compressed.data(), compressed.size(), raw_payload.data(), raw_payload.size(), 22);
+        compressed.data(), compressed.size(), raw_payload.data(), raw_payload.size(), 9);
     if (ZSTD_isError(result))
     {
       throw std::runtime_error(ZSTD_getErrorName(result));
@@ -912,39 +898,31 @@ namespace voxelcodec_ros
     return compressed;
   }
 
-  std::vector<std::uint8_t> decompress_bytes(
-      const std::string &compression,
-      std::uint64_t uncompressed_size,
+  std::vector<std::uint8_t> decompress_payload(
+      const ChannelDescriptor &descriptor,
       const std::vector<std::uint8_t> &compressed_payload)
   {
-    if (compression == kCompressionNone)
+    if (descriptor.compression == kCompressionNone)
     {
       return compressed_payload;
     }
-    if (compression != kCompressionZstd)
+    if (descriptor.compression != kCompressionZstd)
     {
-      throw std::runtime_error("unsupported compression: " + compression);
+      throw std::runtime_error("unsupported compression: " + descriptor.compression);
     }
 
-    std::vector<std::uint8_t> raw(uncompressed_size);
+    std::vector<std::uint8_t> raw(descriptor.uncompressed_size);
     const auto result = ZSTD_decompress(
         raw.data(), raw.size(), compressed_payload.data(), compressed_payload.size());
     if (ZSTD_isError(result))
     {
       throw std::runtime_error(ZSTD_getErrorName(result));
     }
-    if (result != uncompressed_size)
+    if (result != descriptor.uncompressed_size)
     {
       throw std::runtime_error("decompressed payload size mismatch");
     }
     return raw;
-  }
-
-  std::vector<std::uint8_t> decompress_payload(
-      const ChannelDescriptor &descriptor,
-      const std::vector<std::uint8_t> &compressed_payload)
-  {
-    return decompress_bytes(descriptor.compression, descriptor.uncompressed_size, compressed_payload);
   }
 
   std::vector<std::uint8_t> encode_archive(

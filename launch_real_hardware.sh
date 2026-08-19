@@ -21,7 +21,7 @@
 #
 # Experiment parameters are read from experiment.conf (project root) or env vars:
 #   MAP_TRANSPORT, BANDWIDTH_KBPS, LOSS_PCT, DELAY_MS, HAAR_LEVELS, COMPRESSION,
-#   COEFF_ENCODING, TILE_SIZE_M, SCHEDULE_MODE, RECORD_METRICS
+#   VARINT_ENCODING, TILE_SIZE_M, SCHEDULE_MODE, RECORD_METRICS
 #
 # What this script does NOT do (run these yourself, on the robot or on another terminal):
 #   - RViz (open it manually, or pass rviz:=true to the launch file)
@@ -45,7 +45,7 @@ LOSS_PCT="${LOSS_PCT:-0.0}"
 DELAY_MS="${DELAY_MS:-0}"
 HAAR_LEVELS="${HAAR_LEVELS:-4}"
 COMPRESSION="${COMPRESSION:-zstd}"
-COEFF_ENCODING="${COEFF_ENCODING:-varint}"
+VARINT_ENCODING="${VARINT_ENCODING:-true}"
 TILE_SIZE_M="${TILE_SIZE_M:-2.0}"
 SCHEDULE_MODE="${SCHEDULE_MODE:-smart}"
 RANDOM_SEED="${RANDOM_SEED:--1}"
@@ -429,7 +429,7 @@ if [[ -n "${ROBOT_ID}" ]]; then
     delay_ms:="${DELAY_MS}" \
     haar_levels:="${HAAR_LEVELS}" \
     compression:="${COMPRESSION}" \
-    coeff_encoding:="${COEFF_ENCODING}" \
+    varint_encoding:="${VARINT_ENCODING}" \
     tile_size_m:="${TILE_SIZE_M}" \
     schedule_mode:="${SCHEDULE_MODE}"
   exit $?
@@ -512,7 +512,7 @@ if (( NUM_ROBOTS > 1 )); then
     delay_ms:="${DELAY_MS}" \
     haar_levels:="${HAAR_LEVELS}" \
     compression:="${COMPRESSION}" \
-    coeff_encoding:="${COEFF_ENCODING}" \
+    varint_encoding:="${VARINT_ENCODING}" \
     tile_size_m:="${TILE_SIZE_M}" \
     schedule_mode:="${SCHEDULE_MODE}" \
     rng_seed:="${RANDOM_SEED}" \

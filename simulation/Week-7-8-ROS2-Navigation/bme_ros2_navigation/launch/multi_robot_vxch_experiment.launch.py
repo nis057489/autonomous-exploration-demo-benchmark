@@ -57,7 +57,7 @@ def _create_all_actions(context):
     map_transport = LaunchConfiguration("map_transport").perform(context)
     haar_levels = int(LaunchConfiguration("haar_levels").perform(context))
     compression = LaunchConfiguration("compression").perform(context)
-    coeff_encoding = LaunchConfiguration("coeff_encoding").perform(context)
+    varint_encoding = _bool_value(LaunchConfiguration("varint_encoding").perform(context))
     tile_size_m = float(LaunchConfiguration("tile_size_m").perform(context))
     schedule_mode = LaunchConfiguration("schedule_mode").perform(context)
     bandwidth_kbps = float(LaunchConfiguration("bandwidth_kbps").perform(context))
@@ -183,7 +183,7 @@ def _create_all_actions(context):
                     "haar_levels": haar_levels,
                     "tile_size_m": tile_size_m,
                     "compression": compression,
-                    "coeff_encoding": coeff_encoding,
+                    "varint_encoding": varint_encoding,
                     "schedule_mode": schedule_mode,
                     "use_sim_time": use_sim_time,
                 }],
@@ -254,15 +254,13 @@ def generate_launch_description():
                             "bandwidth win is the wavelet/tiling encoding itself vs. "
                             "compression on top"),
             DeclareLaunchArgument(
-                "coeff_encoding", default_value="varint",
-                description="vxch only. How each band's Haar coefficients get packed "
-                            "before compression -- 'varint' (default, zigzag-varint), "
-                            "'fixed_width' (int32 LE), 'sparse_rle' (separate gap-length/"
-                            "magnitude streams), or 'auto' (try all 3 per band, keep "
-                            "whichever compresses smallest). Independent of compression -- "
-                            "with compression=none this isolates packing's own bandwidth "
-                            "contribution, since compression=none alone still leaves the "
-                            "chosen packing in place"),
+                "varint_encoding", default_value="true",
+                description="vxch only. true (default) zigzag-varint packs each band's "
+                            "Haar coefficients before compression; false packs them as "
+                            "fixed-width int32 instead. Independent of compression -- with "
+                            "compression=none this isolates varint packing's own bandwidth "
+                            "contribution, since compression=none alone still leaves "
+                            "varint packing in place"),
             DeclareLaunchArgument(
                 "tile_size_m", default_value="2.0",
                 description="Encode the map as independent tile_size_m x tile_size_m Haar "

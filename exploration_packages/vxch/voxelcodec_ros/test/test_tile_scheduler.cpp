@@ -57,7 +57,7 @@ TEST(TileScheduler, ComputeTileGeomClampsAtGridEdge)
 
 TEST(TileScheduler, IngestGridRejectsSizeMismatch)
 {
-  TileScheduler scheduler(4.0, 2, "none", "varint", "smart");
+  TileScheduler scheduler(4.0, 2, "none", true, "smart");
   const std::vector<std::int8_t> values(15, 0);  // 4x4 grid needs 16
   EXPECT_THROW(scheduler.ingest_grid(values, 4, 4, 1.0), std::runtime_error);
 }
@@ -65,7 +65,7 @@ TEST(TileScheduler, IngestGridRejectsSizeMismatch)
 TEST(TileScheduler, IngestGridFirstCallQueuesChangedBands)
 {
   // tile_size_m=4, resolution=1 -> tile_size_cells=4; a 4x4 grid is exactly one tile.
-  TileScheduler scheduler(4.0, 2, "none", "varint", "smart");
+  TileScheduler scheduler(4.0, 2, "none", true, "smart");
   const auto result = scheduler.ingest_grid(make_grid(4, 4), 4, 4, 1.0);
   EXPECT_GT(result.total_changed, 0U);
   EXPECT_EQ(result.queued_tiles, 1U);
@@ -75,7 +75,7 @@ TEST(TileScheduler, IngestGridFirstCallQueuesChangedBands)
 
 TEST(TileScheduler, SmartModeSkipsUnchangedContentOnReingest)
 {
-  TileScheduler scheduler(4.0, 2, "none", "varint", "smart");
+  TileScheduler scheduler(4.0, 2, "none", true, "smart");
   const auto grid = make_grid(4, 4);
   const auto first = scheduler.ingest_grid(grid, 4, 4, 1.0);
   ASSERT_GT(first.total_changed, 0U);
@@ -93,7 +93,7 @@ TEST(TileScheduler, SmartModeSkipsUnchangedContentOnReingest)
 
 TEST(TileScheduler, SimpleModeAlwaysRequeuesEverything)
 {
-  TileScheduler scheduler(4.0, 2, "none", "varint", "simple");
+  TileScheduler scheduler(4.0, 2, "none", true, "simple");
   const auto grid = make_grid(4, 4);
   const auto first = scheduler.ingest_grid(grid, 4, 4, 1.0);
   scheduler.take_pending_bands(100, -1);
@@ -106,7 +106,7 @@ TEST(TileScheduler, SimpleModeAlwaysRequeuesEverything)
 TEST(TileScheduler, TilesAreFingerprintedIndependently)
 {
   // 8x4 grid, tile_size_cells=4 -> two side-by-side tiles: (0,0) and (0,1).
-  TileScheduler scheduler(4.0, 1, "none", "varint", "smart");
+  TileScheduler scheduler(4.0, 1, "none", true, "smart");
   auto grid = make_grid(8, 4);
   scheduler.ingest_grid(grid, 8, 4, 1.0);
   scheduler.take_pending_bands(100, -1);  // drain both tiles fully
@@ -129,7 +129,7 @@ TEST(TileScheduler, TilesAreFingerprintedIndependently)
 
 TEST(TileScheduler, ResolutionChangeResetsPendingState)
 {
-  TileScheduler scheduler(4.0, 2, "none", "varint", "smart");
+  TileScheduler scheduler(4.0, 2, "none", true, "smart");
   scheduler.ingest_grid(make_grid(4, 4), 4, 4, 1.0);
   ASSERT_TRUE(scheduler.has_pending());
   EXPECT_EQ(scheduler.tile_size_cells(), 4);
@@ -143,7 +143,7 @@ TEST(TileScheduler, ResolutionChangeResetsPendingState)
 
 TEST(TileScheduler, TakePendingBandsOnEmptySchedulerReturnsEmpty)
 {
-  TileScheduler scheduler(4.0, 2, "none", "varint", "smart");
+  TileScheduler scheduler(4.0, 2, "none", true, "smart");
   const auto scheduled = scheduler.take_pending_bands(1, -1);
   EXPECT_TRUE(scheduled.empty());
 }
@@ -151,7 +151,7 @@ TEST(TileScheduler, TakePendingBandsOnEmptySchedulerReturnsEmpty)
 TEST(TileScheduler, TakePendingBandsRespectsMaxBandsPerUpdate)
 {
   // levels=2 -> 3 bands per tile; cap at 1 band per call.
-  TileScheduler scheduler(4.0, 2, "none", "varint", "smart");
+  TileScheduler scheduler(4.0, 2, "none", true, "smart");
   scheduler.ingest_grid(make_grid(4, 4), 4, 4, 1.0);
 
   const auto first_take = scheduler.take_pending_bands(1, -1);
@@ -170,7 +170,7 @@ TEST(TileScheduler, TakePendingBandsRespectsMaxBandsPerUpdate)
 TEST(TileScheduler, TakePendingBandsRespectsMaxTilesPerUpdate)
 {
   // 12x4 grid, tile_size_cells=4 -> three tiles side by side.
-  TileScheduler scheduler(4.0, 1, "none", "varint", "smart");
+  TileScheduler scheduler(4.0, 1, "none", true, "smart");
   scheduler.ingest_grid(make_grid(12, 4), 12, 4, 1.0);
   ASSERT_EQ(scheduler.queued_tile_count(), 3U);
 
@@ -185,7 +185,7 @@ TEST(TileScheduler, TakePendingBandsRespectsMaxTilesPerUpdate)
 TEST(TileScheduler, SmartModePrefersNeverSentBandOverRecentlySentOne)
 {
   // levels=2 -> bands 0,1,2 all pending after the first ingest.
-  TileScheduler scheduler(4.0, 2, "none", "varint", "smart");
+  TileScheduler scheduler(4.0, 2, "none", true, "smart");
   auto grid = make_grid(4, 4);
   scheduler.ingest_grid(grid, 4, 4, 1.0);
 
@@ -205,7 +205,7 @@ TEST(TileScheduler, SmartModePrefersNeverSentBandOverRecentlySentOne)
 
 TEST(TileScheduler, SimpleModeIgnoresSendRecencyAndStaysCoarsestFirst)
 {
-  TileScheduler scheduler(4.0, 2, "none", "varint", "simple");
+  TileScheduler scheduler(4.0, 2, "none", true, "simple");
   auto grid = make_grid(4, 4);
   scheduler.ingest_grid(grid, 4, 4, 1.0);
 
@@ -227,7 +227,7 @@ TEST(TileScheduler, IngestGridRecordsPerTileEncodingErrorsWithoutThrowing)
   // levels must be >= 1") -- TileScheduler doesn't validate haar_levels
   // itself (the Node wrapper does, before construction), so this is the only
   // way to exercise the catch-and-continue path from the public API.
-  TileScheduler scheduler(4.0, 0, "none", "varint", "smart");
+  TileScheduler scheduler(4.0, 0, "none", true, "smart");
   const auto result = scheduler.ingest_grid(make_grid(4, 4), 4, 4, 1.0);
   EXPECT_EQ(result.total_changed, 0U);
   ASSERT_EQ(result.tile_errors.size(), 1U);
@@ -237,7 +237,7 @@ TEST(TileScheduler, IngestGridRecordsPerTileEncodingErrorsWithoutThrowing)
 
 TEST(TileScheduler, IngestGridZeroSizeGridIsANoOp)
 {
-  TileScheduler scheduler(4.0, 2, "none", "varint", "smart");
+  TileScheduler scheduler(4.0, 2, "none", true, "smart");
   const auto result = scheduler.ingest_grid({}, 0, 0, 1.0);
   EXPECT_EQ(result.total_changed, 0U);
   EXPECT_FALSE(scheduler.has_pending());
