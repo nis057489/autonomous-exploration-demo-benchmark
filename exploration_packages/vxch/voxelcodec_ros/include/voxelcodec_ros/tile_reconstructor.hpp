@@ -151,40 +151,32 @@ public:
     const std::string oy = get_meta("origin_y");
     const double new_origin_y = std::stod(oy.empty() ? "0" : oy);
 
-    // tile_row/tile_col are pure array-index offsets (see TileScheduler::
-    // compute_tile_geom) -- NOT world-coordinate addressing. grid_width/grid_height
-    // growing (routine as SLAM explores new area -- happens every few seconds in
-    // practice) does NOT change what world location an existing tile's data belongs
-    // to, so it must not invalidate accumulated tile state; reconstruct() already
-    // bounds-checks tile placement against the current grid_width/height on every
-    // call.
+    // tile_row/tile_col are now world-anchored (see TileScheduler::
+    // compute_axis_tile_spans): a tile's key is which cell of a fixed
+    // world-cell lattice it falls in, not an array-local offset. That makes a
+    // tile's identity, and reconstruct()'s placement of it, independent of
+    // this array's own origin/width/height -- so NEITHER grid_width/height
+    // growing NOR an origin shift invalidates any already-decoded tile
+    // anymore; reconstruct() re-derives each tile's current placement (which
+    // can differ call to call as origin moves) from geometry_.origin_x/y and
+    // the tile's world-anchored key every time it runs.
     //
-    // A tile-partition-shape change (tile_size_cells itself changing) genuinely
-    // invalidates every existing tile_row/tile_col key's meaning -- always clear.
-    // An origin shift also reindexes what array position (0,0) means in the world,
-    // but slam_toolbox recomputes/republishes origin routinely -- not just on rare
-    // real boundary extensions -- so treating every shift as "clear everything" was
-    // itself a bug: since a "smart"-mode sender never resends a tile whose content
-    // hasn't actually changed, a peer's whole accumulated map could go permanently
-    // missing over an origin nudge unrelated to that tile at all. When the shift is
-    // an exact whole number of tiles (the common case -- slam_toolbox grows the
-    // grid in whole cells, and tile boundaries are a fixed multiple of the cell
-    // grid), remap existing tile keys by that offset instead of discarding them.
-    // Only fall back to a full clear when the shift can't be expressed as a clean
-    // tile-key remap (a fractional-tile shift, which would require splitting a
-    // tile's content across two new tile bins -- not attempted here) or the tile
-    // partition itself changed.
-    const bool tile_size_changed =
-      new_tile_size_cells != 0 && new_tile_size_cells != geometry_.tile_size_cells;
-    const bool origin_changed =
-      new_origin_x != geometry_.origin_x || new_origin_y != geometry_.origin_y;
-
-    if (tile_size_changed) {
+    // Before world-anchoring, ANY origin change unconditionally cleared the
+    // entire cache -- and slam_toolbox recomputes/republishes origin
+    // routinely (not just on rare boundary extensions, often by less than one
+    // cell, pure float noise relative to the actual array), so that cleared
+    // far more often than any genuine reindexing ever occurred. Combined with
+    // "smart" mode never resending a tile whose content hasn't changed, a
+    // peer's whole accumulated map could and did go missing over origin
+    // nudges unrelated to any specific tile's content. See
+    // project_ddil_bandqueue_starvation_fix / the tile-reconstructor-reset-fix
+    // memory for the investigation trail.
+    //
+    // Only a tile-partition-shape change (tile_size_cells itself changing --
+    // a real resolution rescale) genuinely invalidates every existing key's
+    // meaning; that still clears.
+    if (new_tile_size_cells != 0 && new_tile_size_cells != geometry_.tile_size_cells) {
       tiles_.clear();
-    } else if (origin_changed) {
-      if (!try_remap_tiles_for_origin_shift(new_origin_x, new_origin_y)) {
-        tiles_.clear();
-      }
     }
     geometry_.grid_width = new_width;
     geometry_.grid_height = new_height;
@@ -272,6 +264,18 @@ public:
       static_cast<std::size_t>(geometry_.grid_height), -1);
     bool any_tile_rendered = false;
 
+    // World-cell coordinate that THIS array's own local index 0 currently sits
+    // at, along each axis -- see TileScheduler::compute_axis_tile_spans for the
+    // matching encoder-side computation. Every tile's world-anchored key gets
+    // converted back to a local offset in this specific reconstruction via this
+    // same reference, so a tile encoded under one origin still lands in the
+    // right place when reconstructed under a later (or earlier-known) one.
+    const double resolution_d = static_cast<double>(geometry_.grid_resolution);
+    const long long origin_cell_x =
+      resolution_d > 0.0 ? std::llround(geometry_.origin_x / resolution_d) : 0;
+    const long long origin_cell_y =
+      resolution_d > 0.0 ? std::llround(geometry_.origin_y / resolution_d) : 0;
+
     for (const auto & [key, tile] : tiles_) {
       if (tile.width <= 0 || tile.height <= 0) {continue;}
 
@@ -299,23 +303,34 @@ public:
       const std::size_t w_prime = recon.width;
       const std::size_t h_prime = recon.height;
 
-      const std::size_t row0 = static_cast<std::size_t>(key.first) *
-        static_cast<std::size_t>(geometry_.tile_size_cells);
-      const std::size_t col0 = static_cast<std::size_t>(key.second) *
-        static_cast<std::size_t>(geometry_.tile_size_cells);
+      // This tile's world-cell coordinate (key * lattice quantum) minus this
+      // array's own origin (in cells) gives its LOCAL offset in the grid
+      // being built right now -- can be negative (tile sits before this
+      // array's own left/top edge) or run past grid_width/height (sits past
+      // its right/bottom edge). Both are normal: it just means none (or only
+      // part) of this tile is within what this array currently covers, not
+      // an error -- e.g. a peer's array hasn't grown far enough yet to
+      // include a tile this receiver already decoded from an earlier,
+      // larger-extent manifest.
+      const long long row0 = static_cast<long long>(key.first) *
+        static_cast<long long>(geometry_.tile_size_cells) - origin_cell_y;
+      const long long col0 = static_cast<long long>(key.second) *
+        static_cast<long long>(geometry_.tile_size_cells) - origin_cell_x;
 
       // 2D nearest-neighbour upsample if we only have a coarse reconstruction
       // of this tile -- a real (blurry but spatially faithful) downsampled
       // patch, pasted at this tile's place in the full-resolution output grid.
       for (std::size_t r = 0; r < th; ++r) {
         const std::size_t r_src = (w_prime == tw && h_prime == th) ? r : (r * h_prime / th);
-        const std::size_t dst_row = row0 + r;
-        if (dst_row >= geometry_.grid_height) {break;}
+        const long long dst_row = row0 + static_cast<long long>(r);
+        if (dst_row < 0) {continue;}
+        if (dst_row >= static_cast<long long>(geometry_.grid_height)) {break;}
         for (std::size_t c = 0; c < tw; ++c) {
           const std::size_t c_src = (w_prime == tw && h_prime == th) ? c : (c * w_prime / tw);
-          const std::size_t dst_col = col0 + c;
-          if (dst_col >= geometry_.grid_width) {continue;}
-          grid_data[dst_row * geometry_.grid_width + dst_col] =
+          const long long dst_col = col0 + static_cast<long long>(c);
+          if (dst_col < 0 || dst_col >= static_cast<long long>(geometry_.grid_width)) {continue;}
+          grid_data[static_cast<std::size_t>(dst_row) * geometry_.grid_width +
+            static_cast<std::size_t>(dst_col)] =
             unshift_from_uint32(recon.values[r_src * w_prime + c_src]);
         }
       }
@@ -339,59 +354,6 @@ public:
   const GridGeometry & geometry() const {return geometry_;}
 
 private:
-  // Attempts to shift every entry in tiles_ by the tile-grid offset implied by
-  // an origin move from (geometry_.origin_x, geometry_.origin_y) to
-  // (new_origin_x, new_origin_y), using the OLD geometry_ (resolution,
-  // tile_size_cells) still in effect at call time -- must run before those
-  // fields get overwritten by the rest of ingest_manifest(). Returns false
-  // (tiles_ left untouched) if the shift isn't a whole number of tiles along
-  // both axes, so the caller can fall back to clearing; a tile that shifts
-  // to a negative index is dropped individually rather than failing the
-  // whole remap (defensive only -- grids are only ever observed to grow, so
-  // this shouldn't trigger in practice, same caveat as tiles_'s own comment).
-  bool try_remap_tiles_for_origin_shift(double new_origin_x, double new_origin_y)
-  {
-    const double resolution = static_cast<double>(geometry_.grid_resolution);
-    if (geometry_.tile_size_cells <= 0 || resolution <= 0.0) {
-      return false;
-    }
-
-    // Extending the grid backward (more negative origin) means existing
-    // content's array index has to move forward to keep pointing at the same
-    // world cell -- see the world_x = origin_x + index * resolution identity.
-    const double dx_cells = (geometry_.origin_x - new_origin_x) / resolution;
-    const double dy_cells = (geometry_.origin_y - new_origin_y) / resolution;
-
-    const auto to_tile_shift = [&](double cells, int & out_tiles) -> bool {
-        const double rounded = std::round(cells);
-        if (std::abs(cells - rounded) > 1e-6) {return false;}
-        const auto cell_shift = static_cast<long long>(rounded);
-        if (cell_shift % geometry_.tile_size_cells != 0) {return false;}
-        out_tiles = static_cast<int>(cell_shift / geometry_.tile_size_cells);
-        return true;
-      };
-
-    int tile_shift_row = 0;
-    int tile_shift_col = 0;
-    if (!to_tile_shift(dy_cells, tile_shift_row) || !to_tile_shift(dx_cells, tile_shift_col)) {
-      return false;
-    }
-    if (tile_shift_row == 0 && tile_shift_col == 0) {
-      return true;  // shift rounds to zero whole tiles -- nothing to remap
-    }
-
-    std::map<TileKey, TileBandState> remapped;
-    for (auto & [key, tile] : tiles_) {
-      const TileKey new_key{key.first + tile_shift_row, key.second + tile_shift_col};
-      if (new_key.first < 0 || new_key.second < 0) {
-        continue;
-      }
-      remapped.emplace(new_key, std::move(tile));
-    }
-    tiles_ = std::move(remapped);
-    return true;
-  }
-
   int haar_levels_;
   GridGeometry geometry_;
   // Not actively pruned if the grid ever shrinks below a tile's offset --

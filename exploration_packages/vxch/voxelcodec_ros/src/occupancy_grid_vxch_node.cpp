@@ -185,7 +185,8 @@ private:
     }
 
     const auto result = scheduler_->ingest_grid(
-      msg->data, grid_w, grid_h, static_cast<double>(msg->info.resolution));
+      msg->data, grid_w, grid_h, static_cast<double>(msg->info.resolution),
+      msg->info.origin.position.x, msg->info.origin.position.y);
     for (const auto & error : result.tile_errors) {
       RCLCPP_ERROR(get_logger(), "make_haar_bands failed for %s", error.c_str());
     }

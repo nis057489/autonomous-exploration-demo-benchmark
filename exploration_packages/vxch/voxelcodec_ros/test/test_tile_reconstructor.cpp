@@ -258,11 +258,17 @@ TEST(TileReconstructor, ManifestWidthHeightGrowthPreservesAccumulatedTiles)
   EXPECT_EQ(grid->data[4 * 8 + 0], -1);  // row 4, col 0
 }
 
-TEST(TileReconstructor, ManifestOriginChangeClearsAccumulatedTiles)
+TEST(TileReconstructor, SubCellOriginJitterShiftsPlacementByAtMostOneCellInsteadOfClearing)
 {
-  // An actual origin shift reindexes what world location array position
-  // (0,0) corresponds to -- existing tile_row/tile_col keys no longer mean
-  // the same place, so accumulated tile state must still be dropped.
+  // slam_toolbox republishes origin at full float precision and it visibly
+  // jitters by a fraction of a cell even when nothing about the array's real
+  // indexing changed (real-bag evidence: cellsx deltas like -0.045, -0.117,
+  // -0.184 in a recorded run -- see project_ddil_bandqueue_starvation_fix
+  // memory). World-anchored placement rounds each axis' origin/resolution to
+  // the nearest whole cell once (TileReconstructor::reconstruct's
+  // origin_cell_x/y), so a sub-cell origin change can shift a tile's
+  // rendered position by at most one cell -- it must never discard the tile
+  // outright the way the old exact-origin-equality clear used to.
   constexpr int levels = 2;
   TileReconstructor reconstructor(levels);
   reconstructor.ingest_manifest(
@@ -274,19 +280,34 @@ TEST(TileReconstructor, ManifestOriginChangeClearsAccumulatedTiles)
   }
   ASSERT_TRUE(reconstructor.reconstruct().has_value());
 
-  // Same grid dimensions and tile_size_cells -- only origin moved.
+  // Same dimensions and tile_size_cells -- origin nudges by half a cell.
   reconstructor.ingest_manifest(
     manifest_metadata(4, 4, 4, 1.0, "map", 0.5, 0.0), Stamp{2, 0});
-  EXPECT_FALSE(reconstructor.reconstruct().has_value());
+
+  const auto grid = reconstructor.reconstruct();
+  ASSERT_TRUE(grid.has_value()) << "tile must survive a sub-cell origin nudge";
+  // 0.5 cells rounds (away from zero) to a 1-cell origin move: output column
+  // c now shows the original tile's column c+1.
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 3; ++c) {
+      EXPECT_EQ(
+        grid->data[static_cast<std::size_t>(r * 4 + c)],
+        occupancy[static_cast<std::size_t>(r * 4 + (c + 1))]) << "r=" << r << " c=" << c;
+    }
+    // The vacated last column has nothing placed into it.
+    EXPECT_EQ(grid->data[static_cast<std::size_t>(r * 4 + 3)], -1) << "r=" << r;
+  }
 }
 
-TEST(TileReconstructor, ManifestOriginShiftByWholeTilesRemapsInsteadOfClearing)
+TEST(TileReconstructor, ManifestOriginShiftRecomputesTilePlacementInsteadOfClearing)
 {
   // Grid extended backward by exactly one tile-width in X -- slam_toolbox's
   // routine case, not a rare edge case. Previously ANY origin change cleared
   // the whole cache; a "smart"-mode sender never resends a tile whose content
   // hasn't changed, so that tile would just vanish from this receiver's view
-  // permanently. It should instead remap to its new position and survive.
+  // permanently. World-anchored tiling needs no special-casing here at all --
+  // the tile's key never changes, reconstruct() just re-derives where it
+  // belongs from the current origin every time it runs.
   constexpr int levels = 2;
   TileReconstructor reconstructor(levels);
   reconstructor.ingest_manifest(

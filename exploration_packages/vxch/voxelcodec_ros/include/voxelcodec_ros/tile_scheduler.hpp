@@ -34,26 +34,59 @@ inline std::uint32_t shift_to_uint32(std::int8_t v)
 }
 
 // (tile_row, tile_col) in the tile grid, row = along height, col = along width.
+// World-anchored (see compute_axis_tile_spans below), so these are stable
+// positions in a fixed world-cell lattice, NOT array-local indices -- they can
+// legitimately be negative, and the same key always refers to the same patch
+// of the world regardless of how any one robot's array origin happens to sit.
 using TileKey = std::pair<int, int>;
 
-// Tiles per axis and the cell extent of tile (row, col), clamped to the grid
-// edge (the last row/col of tiles is <= tile_size_cells when W or H isn't an
-// exact multiple of it).
-struct TileGeom
+// Floor division (rounds toward negative infinity), unlike C++'s truncating
+// `/` -- needed because world-cell coordinates and tile indices can be
+// negative once tiling is anchored to a fixed world lattice instead of each
+// array's own local index 0. b must be > 0.
+inline long long floor_div(long long a, long long b)
 {
-  int row0, col0;      // top-left cell offset in the full grid
-  int width, height;   // this tile's actual cell extent (<= tile_size_cells)
+  const long long q = a / b;
+  const long long r = a % b;
+  return (r != 0 && ((r < 0) != (b < 0))) ? q - 1 : q;
+}
+
+// One axis' worth of (world-anchored tile index, local start, length) spans
+// covering local indices [0, extent) of an array whose local index 0 sits at
+// world-cell coordinate origin_cell (both in units of the grid's resolution).
+// Tile boundaries fall wherever the world-tile lattice -- multiples of
+// tile_size_cells, counted from world cell 0, independent of any one array's
+// own origin -- crosses this axis, so the first and/or last span can be
+// shorter than tile_size_cells when origin_cell isn't itself tile-aligned
+// (the common case: array origins move continuously as SLAM refines them,
+// they don't snap to tile boundaries). This is what makes a given tile's
+// identity (its TileKey) survive an origin shift: the same world region
+// always floor-divides to the same tile_index, regardless of where local
+// index 0 currently sits.
+struct AxisTileSpan
+{
+  int tile_index;
+  int local_start;
+  int length;
 };
 
-inline TileGeom compute_tile_geom(
-  int tile_row, int tile_col, int tile_size_cells, int grid_w, int grid_h)
+inline std::vector<AxisTileSpan> compute_axis_tile_spans(
+  long long origin_cell, int extent, int tile_size_cells)
 {
-  TileGeom g;
-  g.row0 = tile_row * tile_size_cells;
-  g.col0 = tile_col * tile_size_cells;
-  g.width = std::min(tile_size_cells, grid_w - g.col0);
-  g.height = std::min(tile_size_cells, grid_h - g.row0);
-  return g;
+  std::vector<AxisTileSpan> spans;
+  if (extent <= 0 || tile_size_cells <= 0) {
+    return spans;
+  }
+  int local = 0;
+  while (local < extent) {
+    const long long world_cell = origin_cell + local;
+    const long long tile_index = floor_div(world_cell, tile_size_cells);
+    const long long tile_world_end = (tile_index + 1) * static_cast<long long>(tile_size_cells);
+    const long long local_end = std::min<long long>(extent, tile_world_end - origin_cell);
+    spans.push_back({static_cast<int>(tile_index), local, static_cast<int>(local_end - local)});
+    local = static_cast<int>(local_end);
+  }
+  return spans;
 }
 
 // Splits an occupancy grid into tile_size_m x tile_size_m tiles, each with
@@ -90,9 +123,15 @@ public:
   // fingerprints each band to skip re-queuing unchanged content (unless
   // schedule_mode is "simple", which always re-queues everything), and
   // enqueues changed bands for take_pending_bands(). grid_values.size() must
-  // equal grid_w*grid_h.
+  // equal grid_w*grid_h. origin_x/origin_y (default 0,0 -- exactly reproduces
+  // pre-world-anchoring behavior for callers that don't have/need a real
+  // origin, e.g. existing tests) anchor the tiling to a fixed world-cell
+  // lattice instead of this array's own local index 0 -- see
+  // compute_axis_tile_spans for why that's what makes a tile's identity
+  // survive the array's origin moving out from under it between calls.
   IngestResult ingest_grid(
-    const std::vector<std::int8_t> & grid_values, int grid_w, int grid_h, double resolution)
+    const std::vector<std::int8_t> & grid_values, int grid_w, int grid_h, double resolution,
+    double origin_x = 0.0, double origin_y = 0.0)
   {
     IngestResult result;
     if (grid_w <= 0 || grid_h <= 0) {
@@ -111,7 +150,10 @@ public:
     if (new_tile_size_cells != tile_size_cells_) {
       // Tile partition changed shape -- old per-tile fingerprints/backlog no longer
       // correspond to the same physical tiles, so start clean rather than mixing
-      // old-partition and new-partition state.
+      // old-partition and new-partition state. Origin changes need no such reset:
+      // tile identity is world-anchored (TileKey comment above), so the same real
+      // patch of the world keeps the same key and comparable fingerprint no matter
+      // how the array's own origin moves between calls.
       tile_size_cells_ = new_tile_size_cells;
       last_band_fingerprint_.clear();
       pending_by_tile_.clear();
@@ -125,30 +167,37 @@ public:
       values[i] = shift_to_uint32(grid_values[i]);
     }
 
-    const int tiles_x = (grid_w + tile_size_cells_ - 1) / tile_size_cells_;
-    const int tiles_y = (grid_h + tile_size_cells_ - 1) / tile_size_cells_;
+    // Round each axis' origin/resolution once (not per cell) to the world-cell
+    // coordinate that this array's local index 0 currently sits at.
+    const long long origin_cell_x = std::llround(origin_x / resolution);
+    const long long origin_cell_y = std::llround(origin_y / resolution);
+    const auto col_spans = compute_axis_tile_spans(origin_cell_x, grid_w, tile_size_cells_);
+    const auto row_spans = compute_axis_tile_spans(origin_cell_y, grid_h, tile_size_cells_);
 
-    for (int trow = 0; trow < tiles_y; ++trow) {
-      for (int tcol = 0; tcol < tiles_x; ++tcol) {
-        const TileGeom geom = compute_tile_geom(trow, tcol, tile_size_cells_, grid_w, grid_h);
-        if (geom.width <= 0 || geom.height <= 0) {continue;}
+    for (const auto & row_span : row_spans) {
+      for (const auto & col_span : col_spans) {
+        const int trow = row_span.tile_index;
+        const int tcol = col_span.tile_index;
+        const int width = col_span.length;
+        const int height = row_span.length;
+        if (width <= 0 || height <= 0) {continue;}
 
         std::vector<std::uint32_t> tile_values(
-          static_cast<std::size_t>(geom.width) * static_cast<std::size_t>(geom.height));
-        for (int r = 0; r < geom.height; ++r) {
+          static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+        for (int r = 0; r < height; ++r) {
           const std::size_t src_off =
-            static_cast<std::size_t>(geom.row0 + r) * static_cast<std::size_t>(grid_w) +
-            static_cast<std::size_t>(geom.col0);
-          const std::size_t dst_off = static_cast<std::size_t>(r) * static_cast<std::size_t>(geom.width);
-          std::copy_n(values.begin() + static_cast<std::ptrdiff_t>(src_off), geom.width,
+            static_cast<std::size_t>(row_span.local_start + r) * static_cast<std::size_t>(grid_w) +
+            static_cast<std::size_t>(col_span.local_start);
+          const std::size_t dst_off = static_cast<std::size_t>(r) * static_cast<std::size_t>(width);
+          std::copy_n(values.begin() + static_cast<std::ptrdiff_t>(src_off), width,
             tile_values.begin() + static_cast<std::ptrdiff_t>(dst_off));
         }
 
         std::vector<EncodedChannel> bands;
         try {
           bands = make_haar_bands(
-            tile_values, static_cast<std::size_t>(geom.width),
-            static_cast<std::size_t>(geom.height), haar_levels_, compression_,
+            tile_values, static_cast<std::size_t>(width),
+            static_cast<std::size_t>(height), haar_levels_, compression_,
             varint_encoding_);
         } catch (const std::exception & e) {
           result.tile_errors.push_back(
@@ -167,8 +216,8 @@ public:
           auto & band = bands[k];
           band.descriptor.metadata["tile_row"] = std::to_string(trow);
           band.descriptor.metadata["tile_col"] = std::to_string(tcol);
-          band.descriptor.metadata["tile_width"] = std::to_string(geom.width);
-          band.descriptor.metadata["tile_height"] = std::to_string(geom.height);
+          band.descriptor.metadata["tile_width"] = std::to_string(width);
+          band.descriptor.metadata["tile_height"] = std::to_string(height);
           band.descriptor.metadata["tile_size_cells"] = std::to_string(tile_size_cells_);
 
           const auto & payload = band.payload;

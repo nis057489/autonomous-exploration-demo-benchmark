@@ -36,23 +36,79 @@ TEST(TileScheduler, ShiftToUint32)
   EXPECT_EQ(voxelcodec_ros::shift_to_uint32(100), 101U);
 }
 
-TEST(TileScheduler, ComputeTileGeomFullTile)
+TEST(TileScheduler, FloorDivRoundsTowardNegativeInfinity)
 {
-  const auto geom = voxelcodec_ros::compute_tile_geom(0, 0, 4, 8, 8);
-  EXPECT_EQ(geom.row0, 0);
-  EXPECT_EQ(geom.col0, 0);
-  EXPECT_EQ(geom.width, 4);
-  EXPECT_EQ(geom.height, 4);
+  EXPECT_EQ(voxelcodec_ros::floor_div(7, 4), 1);
+  EXPECT_EQ(voxelcodec_ros::floor_div(-1, 4), -1);
+  EXPECT_EQ(voxelcodec_ros::floor_div(-4, 4), -1);
+  EXPECT_EQ(voxelcodec_ros::floor_div(-5, 4), -2);
+  EXPECT_EQ(voxelcodec_ros::floor_div(0, 4), 0);
 }
 
-TEST(TileScheduler, ComputeTileGeomClampsAtGridEdge)
+TEST(TileScheduler, ComputeAxisTileSpansOriginAlignedFullTile)
 {
-  // A 10-cell-wide grid with tile_size_cells=4: tile column 2 starts at x=8,
-  // but only 2 columns remain before the grid edge.
-  const auto geom = voxelcodec_ros::compute_tile_geom(0, 2, 4, 10, 10);
-  EXPECT_EQ(geom.col0, 8);
-  EXPECT_EQ(geom.width, 2);
-  EXPECT_EQ(geom.height, 4);
+  // origin_cell=0, extent=8, tile_size_cells=4 -> local index 0 sits exactly
+  // on a world-tile boundary, so this is the pre-world-anchoring case: two
+  // full 4-wide spans, tile indices 0 and 1.
+  const auto spans = voxelcodec_ros::compute_axis_tile_spans(0, 8, 4);
+  ASSERT_EQ(spans.size(), 2U);
+  EXPECT_EQ(spans[0].tile_index, 0);
+  EXPECT_EQ(spans[0].local_start, 0);
+  EXPECT_EQ(spans[0].length, 4);
+  EXPECT_EQ(spans[1].tile_index, 1);
+  EXPECT_EQ(spans[1].local_start, 4);
+  EXPECT_EQ(spans[1].length, 4);
+}
+
+TEST(TileScheduler, ComputeAxisTileSpansClampsAtExtentEdge)
+{
+  // A 10-cell extent with tile_size_cells=4: last span is clipped to 2 cells,
+  // same clipping shape as the old compute_tile_geom's grid-edge behavior.
+  const auto spans = voxelcodec_ros::compute_axis_tile_spans(0, 10, 4);
+  ASSERT_EQ(spans.size(), 3U);
+  EXPECT_EQ(spans[2].tile_index, 2);
+  EXPECT_EQ(spans[2].local_start, 8);
+  EXPECT_EQ(spans[2].length, 2);
+}
+
+TEST(TileScheduler, ComputeAxisTileSpansNonAlignedOriginClipsFirstAndLastSpan)
+{
+  // origin_cell=2 -> local index 0 sits 2 cells into world tile 0 (which
+  // spans world cells [0,4)), so the array's own first 2 local cells are a
+  // partial tile, then a full tile, then whatever's left.
+  const auto spans = voxelcodec_ros::compute_axis_tile_spans(2, 10, 4);
+  ASSERT_EQ(spans.size(), 3U);
+  EXPECT_EQ(spans[0].tile_index, 0);
+  EXPECT_EQ(spans[0].local_start, 0);
+  EXPECT_EQ(spans[0].length, 2);  // world cells [2,4) -- clipped at the tile's own start
+  EXPECT_EQ(spans[1].tile_index, 1);
+  EXPECT_EQ(spans[1].local_start, 2);
+  EXPECT_EQ(spans[1].length, 4);  // world cells [4,8) -- full tile
+  EXPECT_EQ(spans[2].tile_index, 2);
+  EXPECT_EQ(spans[2].local_start, 6);
+  EXPECT_EQ(spans[2].length, 4);  // world cells [8,12), array only has 4 more cells
+}
+
+TEST(TileScheduler, ComputeAxisTileSpansNegativeOriginCellProducesNegativeTileIndices)
+{
+  // origin_cell=-3, tile_size_cells=4 -> local 0 is world cell -3, which
+  // floor-divides into tile -1 (covering world cells [-4,0)) -- local cells
+  // 0,1,2 are world cells -3,-2,-1 (3 cells left in that tile), then local 3
+  // is world cell 0, the start of tile 0.
+  const auto spans = voxelcodec_ros::compute_axis_tile_spans(-3, 6, 4);
+  ASSERT_EQ(spans.size(), 2U);
+  EXPECT_EQ(spans[0].tile_index, -1);
+  EXPECT_EQ(spans[0].local_start, 0);
+  EXPECT_EQ(spans[0].length, 3);  // world cells [-3,0)
+  EXPECT_EQ(spans[1].tile_index, 0);
+  EXPECT_EQ(spans[1].local_start, 3);
+  EXPECT_EQ(spans[1].length, 3);  // world cells [0,3), extent runs out at local 6
+}
+
+TEST(TileScheduler, ComputeAxisTileSpansZeroExtentOrTileSizeIsEmpty)
+{
+  EXPECT_TRUE(voxelcodec_ros::compute_axis_tile_spans(0, 0, 4).empty());
+  EXPECT_TRUE(voxelcodec_ros::compute_axis_tile_spans(0, 8, 0).empty());
 }
 
 TEST(TileScheduler, IngestGridRejectsSizeMismatch)
@@ -139,6 +195,62 @@ TEST(TileScheduler, ResolutionChangeResetsPendingState)
   // not carried over as if it still applied to the new partition.
   scheduler.ingest_grid(make_grid(4, 4), 4, 4, 0.5);
   EXPECT_EQ(scheduler.tile_size_cells(), 8);
+}
+
+TEST(TileScheduler, GridGrowthWithOriginShiftKeepsUnchangedTileFingerprintStable)
+{
+  // Simulates a real SLAM grid-growth event: the array extends backward in
+  // -X by exactly one tile-width, so origin_x moves from 0.0 to -4.0 and
+  // grid_w grows from 4 to 8 -- the SAME physical content that used to sit
+  // at local columns [0,4) now sits at local columns [4,8). Before world-
+  // anchored tiling, this was a real bug on the ENCODER side too, not just
+  // the receiver: under pure local-array indexing, the relocated content
+  // would land under a "new" tile key with no prior fingerprint (first-time
+  // full resend of data the receiver already has) while the genuinely-new
+  // columns landed under the OLD tile 0's key (spuriously flagged "changed"
+  // relative to a fingerprint that was never really for this content). World
+  // anchoring fixes both: only the genuinely new tile gets queued.
+  TileScheduler scheduler(4.0, 2, "none", true, "smart");
+  const auto tile_content = make_grid(4, 4);
+  const auto first = scheduler.ingest_grid(tile_content, 4, 4, /*resolution=*/1.0, 0.0, 0.0);
+  ASSERT_GT(first.total_changed, 0U);
+  scheduler.take_pending_bands(100, -1);  // drain fully
+
+  std::vector<std::int8_t> grown(8 * 4, -1);  // new columns [0,4) unknown
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      grown[static_cast<std::size_t>(r * 8 + (c + 4))] =
+        tile_content[static_cast<std::size_t>(r * 4 + c)];
+    }
+  }
+  const auto second = scheduler.ingest_grid(grown, 8, 4, 1.0, -4.0, 0.0);
+  // Only the genuinely new (unknown-filled) tile should be queued -- the
+  // relocated original content must be recognized as unchanged.
+  EXPECT_EQ(second.queued_tiles, 1U);
+
+  const auto scheduled = scheduler.take_pending_bands(1000, -1);
+  for (const auto & item : scheduled) {
+    EXPECT_EQ(item.tile, (TileKey{0, -1})) << "unexpected tile got re-queued";
+  }
+}
+
+TEST(TileScheduler, NonTileAlignedOriginProducesNegativeAndClippedTileKeys)
+{
+  // origin_x=-2.0 at resolution 1.0 (tile_size_cells=4) means local column 0
+  // sits at world cell -2 -- inside world tile -1 (covering world cells
+  // [-4,0)), not tile 0. An 8-wide grid then spans world tiles -1, 0, and
+  // (partially) 1.
+  TileScheduler scheduler(4.0, 1, "none", true, "smart");
+  const auto result = scheduler.ingest_grid(make_grid(8, 4), 8, 4, 1.0, -2.0, 0.0);
+  EXPECT_EQ(result.queued_tiles, 3U);
+
+  const auto scheduled = scheduler.take_pending_bands(1000, -1);
+  std::set<TileKey> tiles_seen;
+  for (const auto & item : scheduled) {tiles_seen.insert(item.tile);}
+  ASSERT_EQ(tiles_seen.size(), 3U);
+  EXPECT_TRUE(tiles_seen.count(TileKey{0, -1}));
+  EXPECT_TRUE(tiles_seen.count(TileKey{0, 0}));
+  EXPECT_TRUE(tiles_seen.count(TileKey{0, 1}));
 }
 
 TEST(TileScheduler, TakePendingBandsOnEmptySchedulerReturnsEmpty)
