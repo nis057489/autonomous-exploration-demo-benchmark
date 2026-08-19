@@ -21,6 +21,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import LifecycleNode, Node, PushROSNamespace
 from launch_ros.events.lifecycle import ChangeState
+from launch_ros.parameter_descriptions import ParameterValue
 from lifecycle_msgs.msg import Transition
 
 
@@ -145,7 +146,14 @@ def _slam_params(base_path, output_dir, namespace, use_sim_time):
     params["map_frame"] = f"{namespace}/map"
     params["base_frame"] = f"{namespace}/base_footprint"
     params["scan_topic"] = f"/{namespace}/scan"
-    params["transform_publish_period"] = 0.0
+    # 0.0 does NOT mean "publish as fast as possible" -- slam_toolbox's own reference
+    # config is explicit that 0 means the periodic map->odom broadcast thread never
+    # starts at all ("if 0 never publishes odometry"). That left map->odom
+    # permanently unbroadcast: slam_toolbox still built /{namespace}/map correctly
+    # (scan-matching is a separate code path from tf broadcasting), but "map" and
+    # "{namespace}/odom" were two disconnected TF trees the whole time -- see
+    # nav2's "Tf has two or more unconnected trees" errors.
+    params["transform_publish_period"] = 0.02
     return params
 
 
@@ -621,16 +629,11 @@ def _create_multi_robot_actions(context):
                     output="screen",
                     parameters=[{"use_sim_time": use_sim_time}],
                 ),
-                _static_map_transform(
-                    namespace,
-                    f"{namespace}_map_to_odom",
-                    f"{namespace}/odom",
-                    robot_x,
-                    robot_y,
-                    0.0,
-                    robot_yaw,
-                    use_sim_time,
-                ),
+                # Only bridge shared "map" -> "{namespace}/map"; slam_toolbox already
+                # publishes "{namespace}/map" -> "{namespace}/odom" continuously
+                # (map_frame/odom_frame in slam_toolbox_mapping.yaml), so a second,
+                # separate "map" -> "{namespace}/odom" static transform here would give
+                # "{namespace}/odom" two competing parents in the TF tree.
                 _static_map_transform(
                     namespace,
                     f"{namespace}_map_to_slam_map",
@@ -649,7 +652,7 @@ def _create_multi_robot_actions(context):
                     output="screen",
                     parameters=[
                         {
-                            "robot_description": robot_description,
+                            "robot_description": ParameterValue(robot_description, value_type=str),
                             "frame_prefix": f"{namespace}/",
                             "use_sim_time": use_sim_time,
                         }

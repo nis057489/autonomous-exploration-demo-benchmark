@@ -28,7 +28,10 @@
         
         <!-- Other parameters (optional) -->
         <odom_topic>$(arg odom_topic)</odom_topic>                  <!-- Odometry topic -->
-        <tf_topic>tf</tf_topic>
+        <!-- No tf_topic: robot_localization's EKF (publish_tf: true) is the sole
+             publisher of odom -> base_footprint, fused from this odom topic + IMU.
+             Also publishing raw wheel-odom tf here would race the EKF's tf for the
+             same edge, flickering the robot's apparent pose between the two. -->
         <frame_id>$(arg frame_prefix)odom</frame_id>
         <child_frame_id>$(arg frame_prefix)base_footprint</child_frame_id>
         <odom_publish_frequency>30</odom_publish_frequency> <!-- from <update_rate>-->
