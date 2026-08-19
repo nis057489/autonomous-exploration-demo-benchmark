@@ -38,6 +38,11 @@ RECORD_METRICS="${RECORD_METRICS:-false}"
 # of software-simulated impairment. Requires the container to have been started
 # with CAP_NET_ADMIN (docker.sh adds this automatically when IMPAIRMENT_MODE=tc).
 IMPAIRMENT_MODE="${IMPAIRMENT_MODE:-sim}"
+# tc mode only: seconds to let ROS2/DDS discovery settle across the netns
+# boundary (unshaped) before tc netem is actually applied. Discovery involves
+# multiple SPDP announce/response round-trips; applying tight bandwidth/loss/
+# delay limits before it completes can prevent it from ever completing.
+IMPAIRMENT_DELAY_S="${IMPAIRMENT_DELAY_S:-10}"
 
 if [[ "${IMPAIRMENT_MODE}" != "sim" && "${IMPAIRMENT_MODE}" != "tc" ]]; then
   echo "IMPAIRMENT_MODE must be 'sim' or 'tc' (got '${IMPAIRMENT_MODE}')." >&2
@@ -235,6 +240,7 @@ cleanup() {
   [[ -n "${STACK_PID:-}" ]] && kill "${STACK_PID}" 2>/dev/null || true
   [[ -n "${BAG_PID:-}" ]] && kill "${BAG_PID}" 2>/dev/null || true
   [[ -n "${BAG_PID:-}" ]] && wait "${BAG_PID}" 2>/dev/null || true
+  [[ -n "${IMPAIRMENT_DELAY_PID:-}" ]] && kill "${IMPAIRMENT_DELAY_PID}" 2>/dev/null || true
   if [[ "${IMPAIRMENT_MODE}" == "tc" && "${NUM_ROBOTS}" -gt 1 ]]; then
     "${DDIL_NETNS_SCRIPT}" down "${NUM_ROBOTS}" 2>/dev/null || true
   fi
@@ -297,8 +303,8 @@ fi
 
 if (( NUM_ROBOTS > 1 )); then
   if [[ "${IMPAIRMENT_MODE}" == "tc" ]]; then
-    echo "Setting up per-robot netns + tc netem links (bandwidth_kbps=${BANDWIDTH_KBPS}, loss_pct=${LOSS_PCT}, delay_ms=${DELAY_MS})..."
-    "${DDIL_NETNS_SCRIPT}" up "${NUM_ROBOTS}" "${BANDWIDTH_KBPS}" "${LOSS_PCT}" "${DELAY_MS}"
+    echo "Setting up per-robot netns links (unshaped)..."
+    "${DDIL_NETNS_SCRIPT}" up "${NUM_ROBOTS}"
   fi
 
   ros2 launch bme_ros2_navigation multi_robot_vxch_experiment.launch.py \
@@ -320,7 +326,16 @@ if (( NUM_ROBOTS > 1 )); then
     spawn_positions_json:="${SPAWN_POSITIONS_JSON}" &
   STACK_PID=$!
 
-  echo "multi_robot_vxch_experiment.launch.py started (pid=${STACK_PID}, world=${WORLD}, robot=${ROBOT}, num_robots=${NUM_ROBOTS}, map_transport=${MAP_TRANSPORT}, impairment_mode=${IMPAIRMENT_MODE}, bandwidth_kbps=${BANDWIDTH_KBPS}, loss_pct=${LOSS_PCT}, delay_ms=${DELAY_MS}, rng_seed=${RANDOM_SEED})."
+  if [[ "${IMPAIRMENT_MODE}" == "tc" ]]; then
+    (
+      sleep "${IMPAIRMENT_DELAY_S}"
+      echo "Applying tc netem shaping after ${IMPAIRMENT_DELAY_S}s delay (bandwidth_kbps=${BANDWIDTH_KBPS}, loss_pct=${LOSS_PCT}, delay_ms=${DELAY_MS})..."
+      "${DDIL_NETNS_SCRIPT}" update "${NUM_ROBOTS}" "${BANDWIDTH_KBPS}" "${LOSS_PCT}" "${DELAY_MS}"
+    ) &
+    IMPAIRMENT_DELAY_PID=$!
+  fi
+
+  echo "multi_robot_vxch_experiment.launch.py started (pid=${STACK_PID}, world=${WORLD}, robot=${ROBOT}, num_robots=${NUM_ROBOTS}, map_transport=${MAP_TRANSPORT}, impairment_mode=${IMPAIRMENT_MODE}, bandwidth_kbps=${BANDWIDTH_KBPS}, loss_pct=${LOSS_PCT}, delay_ms=${DELAY_MS}, impairment_delay_s=${IMPAIRMENT_DELAY_S}, rng_seed=${RANDOM_SEED})."
   echo "All processes are running. Press Ctrl+C to stop all."
   wait
   exit $?

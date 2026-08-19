@@ -96,18 +96,21 @@ run_docker() {
 
   # Forward experiment parameters into the container.
   # Use -e VAR=value (not bare -e VAR) so sourced-but-unexported variables are forwarded.
-  for _var in MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS RANDOM_SEED ROBOT_STARTUP_DELAY_S SPAWN_PRESET RECORD_METRICS IMPAIRMENT_MODE; do
+  for _var in MAP_TRANSPORT BANDWIDTH_KBPS LOSS_PCT DELAY_MS HAAR_LEVELS RANDOM_SEED ROBOT_STARTUP_DELAY_S SPAWN_PRESET RECORD_METRICS IMPAIRMENT_MODE IMPAIRMENT_DELAY_S; do
     if [[ -n "${!_var:-}" ]]; then
       docker_args+=(-e "${_var}=${!_var}")
     fi
   done
   unset _var
 
-  # tc-based impairment needs real netns/veth/qdisc manipulation, which requires
-  # CAP_NET_ADMIN -- only granted when actually asked for, since it's otherwise
-  # an unnecessary capability to hand the container.
+  # tc-based impairment needs real netns/veth/qdisc manipulation: `ip netns add`
+  # itself calls mount(2) (to bind-mount the new namespace under /run/netns and
+  # make that shared), which needs CAP_SYS_ADMIN, not just CAP_NET_ADMIN -- and
+  # the default Docker AppArmor profile blocks mount syscalls even with that
+  # capability granted, so it also needs disabling. Only applied when actually
+  # asked for, since it's otherwise an unnecessarily broad grant.
   if [[ "${IMPAIRMENT_MODE:-sim}" == "tc" ]]; then
-    docker_args+=(--cap-add=NET_ADMIN)
+    docker_args+=(--cap-add=NET_ADMIN --cap-add=SYS_ADMIN --security-opt apparmor=unconfined)
   fi
 
   if [[ -n "${DISPLAY:-}" ]]; then

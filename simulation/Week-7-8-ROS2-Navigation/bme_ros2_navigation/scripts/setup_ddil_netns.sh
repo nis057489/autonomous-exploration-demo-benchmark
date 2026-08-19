@@ -22,9 +22,14 @@
 # throttle a robot's own onboard buses either, only the link between robots.
 #
 # Usage:
-#   setup_ddil_netns.sh up <num_robots> <bandwidth_kbps> <loss_pct> <delay_ms>
+#   setup_ddil_netns.sh up <num_robots>
 #   setup_ddil_netns.sh down <num_robots>
 #   setup_ddil_netns.sh update <num_robots> <bandwidth_kbps> <loss_pct> <delay_ms>
+#
+# `up` always creates links unshaped -- run `update` (typically after a delay,
+# via launch.sh's IMPAIRMENT_DELAY_S) once ROS2/DDS discovery across the netns
+# boundary has had time to settle, since applying tight bandwidth/loss/delay
+# limits before discovery completes can prevent it from ever completing.
 #
 # Requires CAP_NET_ADMIN (docker run --cap-add=NET_ADMIN) and iproute2 (`ip`, `tc`).
 
@@ -77,7 +82,11 @@ apply_tc() {
 }
 
 up() {
-  local num_robots="$1" bandwidth_kbps="$2" loss_pct="$3" delay_ms="$4"
+  # Always creates links unshaped (no tc qdisc applied yet), regardless of the
+  # target bandwidth/loss/delay -- letting ROS2/DDS discovery establish over an
+  # unimpaired link first. Call `update` (optionally after a delay) once
+  # discovery has had time to settle to actually apply the requested shaping.
+  local num_robots="$1"
 
   if ! ip link show "${BRIDGE}" >/dev/null 2>&1; then
     ip link add name "${BRIDGE}" type bridge
@@ -109,10 +118,7 @@ up() {
     ip netns exec "${ns}" ip link set lo up
     ip netns exec "${ns}" ip route add default via "${BRIDGE_IP}"
 
-    apply_tc "${veth_main}" "" "${bandwidth_kbps}" "${loss_pct}" "${delay_ms}"
-    apply_tc "${veth_ns}" "${ns}" "${bandwidth_kbps}" "${loss_pct}" "${delay_ms}"
-
-    echo "[setup_ddil_netns] ${ns} up: ${ip_addr}/24 <-> ${BRIDGE_IP} (${bandwidth_kbps}kbps, ${loss_pct}% loss, ${delay_ms}ms delay)"
+    echo "[setup_ddil_netns] ${ns} up (unshaped): ${ip_addr}/24 <-> ${BRIDGE_IP}"
   done
 }
 
@@ -145,7 +151,7 @@ update() {
 cmd="${1:-}"
 case "${cmd}" in
   up)
-    up "${2:?num_robots required}" "${3:-0}" "${4:-0.0}" "${5:-0}"
+    up "${2:?num_robots required}"
     ;;
   down)
     down "${2:?num_robots required}"
