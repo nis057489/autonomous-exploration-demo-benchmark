@@ -11,9 +11,11 @@
 // those don't require a live Node or rclcpp::init to use, just like
 // ros_messages.cpp's struct<->msg conversions.
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -214,14 +216,47 @@ struct QueuedMessage
   EpochRole epoch_role{EpochRole::kNone};
 };
 
-// Priority queue with latest-wins deduplication for band messages.
-// Internally a sorted std::map<(priority, insertion_seq), QueuedMessage>.
-// Dedup map tracks which insertion_seq holds the live entry for each dedup_key.
+// Priority queue with latest-wins deduplication for band messages, and wait-time
+// aging so a sustained stream of fresh low-index (coarse) arrivals can't starve
+// out higher-index (fine detail) messages indefinitely.
+//
+// A pure strict-priority ordering (pop always returns the lowest band_priority
+// queued, full stop) looks right in isolation, but under real bandwidth pressure
+// it's a bug: if content anywhere in the map keeps nudging some tile's band_0,
+// every fresh band_0 arrival jumps the (insertion_seq-ordered) queue ahead of
+// whatever higher-index band has been sitting there waiting -- and there is no
+// mechanism that ever lets the waiting one catch up. Observed for real: one bag
+// capture recorded 6925 band messages sent over a whole run, every single one
+// band_0, zero of band_1..5 ever delivered -- not a fluke, a guaranteed outcome
+// of unbounded strict priority whenever coarse content keeps regenerating faster
+// than the link drains the queue.
+//
+// Aging fixes this by improving a message's *effective* priority the longer it
+// waits: every aging_interval_ms of wait time knocks 1 off its band_priority,
+// floored at 0 (a band can catch up to band_0's priority but never leapfrog the
+// manifest, which is exempt from aging -- see effective_priority below). This
+// bounds worst-case wait instead of allowing indefinite starvation, at the cost
+// of pop() being O(n) in queue depth (an explicit scan, since the effective
+// order changes continuously with wall-clock time and can't be precomputed into
+// a static sorted key at push time). Fine at this scale: queue depth is bounded
+// by distinct (tile, band) slots currently dirty, not by message rate.
 class BandQueue
 {
 public:
-  bool empty() const {return ordered_.empty();}
-  std::size_t size() const {return ordered_.size();}
+  // aging_interval_ms: see class comment. 250ms default means a tile's finest
+  // band (haar_levels=5 -> band index 5) needs ~1.25s of waiting to fully catch
+  // up to a never-before-waited band_0 -- long enough that a genuinely transient
+  // burst of coarse traffic still gets to go first, short enough that starvation
+  // is bounded to about a second on top of whatever the token bucket already
+  // imposes, not "for the rest of the run."
+  explicit BandQueue(double aging_interval_ms = 250.0)
+  : aging_interval_ms_(aging_interval_ms)
+  {}
+
+  bool empty() const {return entries_.empty();}
+  std::size_t size() const {return entries_.size();}
+
+  void set_aging_interval_ms(double aging_interval_ms) {aging_interval_ms_ = aging_interval_ms;}
 
   // Returns true if this push replaced an already-queued entry (dedup fired).
   bool push(QueuedMessage msg)
@@ -229,39 +264,74 @@ public:
     if (!msg.dedup_key.empty()) {
       auto it = dedup_index_.find(msg.dedup_key);
       if (it != dedup_index_.end()) {
-        // Replace payload of existing entry in-place (same priority slot).
-        it->second->second.serialized = msg.serialized;
+        // Replace payload of existing entry in-place (same priority slot) --
+        // deliberately NOT resetting enqueued_at: the receiver still doesn't have
+        // any version of this slot, so its wait-time (and thus its aging credit)
+        // has to keep accruing from the original enqueue, or a slot whose content
+        // keeps getting refreshed before its turn comes up would dodge aging
+        // forever, reintroducing the exact starvation this class exists to avoid.
+        it->second->msg.serialized = std::move(msg.serialized);
         return true;
       }
     }
 
-    const uint64_t seq = next_seq_++;
-    auto [ins, _] = ordered_.emplace(
-      std::make_pair(msg.band_priority, seq),
-      std::move(msg));
-
-    if (!ins->second.dedup_key.empty()) {
-      dedup_index_[ins->second.dedup_key] = ins;
+    entries_.push_back(Entry{std::move(msg), std::chrono::steady_clock::now()});
+    auto it = std::prev(entries_.end());
+    if (!it->msg.dedup_key.empty()) {
+      dedup_index_[it->msg.dedup_key] = it;
     }
     return false;
   }
 
   QueuedMessage pop()
   {
-    auto it = ordered_.begin();
-    QueuedMessage msg = std::move(it->second);
+    const auto now = std::chrono::steady_clock::now();
+    auto best = entries_.begin();
+    double best_priority = effective_priority(*best, now);
+    for (auto it = std::next(entries_.begin()); it != entries_.end(); ++it) {
+      const double priority = effective_priority(*it, now);
+      if (priority < best_priority) {
+        best_priority = priority;
+        best = it;
+      }
+    }
+
+    QueuedMessage msg = std::move(best->msg);
     if (!msg.dedup_key.empty()) {
       dedup_index_.erase(msg.dedup_key);
     }
-    ordered_.erase(it);
+    entries_.erase(best);
     return msg;
   }
 
 private:
-  using Key = std::pair<int, uint64_t>;
-  std::map<Key, QueuedMessage> ordered_;
-  std::map<std::string, std::map<Key, QueuedMessage>::iterator> dedup_index_;
-  uint64_t next_seq_{0};
+  struct Entry
+  {
+    QueuedMessage msg;
+    std::chrono::steady_clock::time_point enqueued_at;
+  };
+
+  double effective_priority(const Entry & entry, std::chrono::steady_clock::time_point now) const
+  {
+    // Manifest (band_priority -1) and any non-band traffic through this same
+    // relay (band_priority INT_MAX) sit at fixed priority tiers that aging must
+    // never touch: the manifest has to stay ahead of every band regardless of
+    // how long bands have been waiting (the decoder can't parse coefficients
+    // without it), and non-band traffic has no coarse/fine notion to age toward.
+    if (entry.msg.band_priority < 0 ||
+      entry.msg.band_priority == std::numeric_limits<int>::max())
+    {
+      return static_cast<double>(entry.msg.band_priority);
+    }
+    const double wait_ms =
+      std::chrono::duration<double, std::milli>(now - entry.enqueued_at).count();
+    const double aged = static_cast<double>(entry.msg.band_priority) - wait_ms / aging_interval_ms_;
+    return std::max(aged, 0.0);
+  }
+
+  std::list<Entry> entries_;
+  std::map<std::string, std::list<Entry>::iterator> dedup_index_;
+  double aging_interval_ms_;
 };
 
 }  // namespace voxelcodec_ros

@@ -45,6 +45,18 @@ public:
     bandwidth_kbps_ = declare_parameter<double>("bandwidth_kbps", 0.0);
     loss_pct_ = declare_parameter<double>("loss_pct", 0.0);
     delay_ms_ = declare_parameter<double>("delay_ms", 0.0);
+    // See BandQueue's class comment in ddil_proxy_logic.hpp: without aging, a
+    // sustained stream of fresh band_0 (coarse) traffic anywhere in the map can
+    // starve every tile's higher-index (fine detail) bands indefinitely once the
+    // link is actually bandwidth-constrained -- confirmed in a real run where
+    // 6925/6925 band messages sent were band_0. This is the knob for how many ms
+    // of wait time a queued band needs before its effective priority improves by
+    // one step.
+    priority_aging_ms_ = declare_parameter<double>("priority_aging_ms", 250.0);
+    {
+      std::lock_guard<std::mutex> lock(queue_mutex_);
+      queue_.set_aging_interval_ms(priority_aging_ms_);
+    }
     const int64_t rng_seed = declare_parameter<int64_t>("rng_seed", -1);
     rng_.seed(rng_seed >= 0 ? static_cast<uint32_t>(rng_seed) : std::random_device{}());
     const auto relay_entries =
@@ -331,6 +343,13 @@ private:
       } else if (p.get_name() == "delay_ms") {
         delay_ms_ = p.as_double();
         RCLCPP_INFO(get_logger(), "delay_ms updated to %.0f", delay_ms_);
+      } else if (p.get_name() == "priority_aging_ms") {
+        priority_aging_ms_ = p.as_double();
+        {
+          std::lock_guard<std::mutex> lock(queue_mutex_);
+          queue_.set_aging_interval_ms(priority_aging_ms_);
+        }
+        RCLCPP_INFO(get_logger(), "priority_aging_ms updated to %.0f", priority_aging_ms_);
       }
     }
     rcl_interfaces::msg::SetParametersResult result;
@@ -341,6 +360,7 @@ private:
   double bandwidth_kbps_;
   double loss_pct_;
   double delay_ms_;
+  double priority_aging_ms_;
 
   std::shared_ptr<TokenBucket> token_bucket_;
   std::vector<std::shared_ptr<rclcpp::GenericPublisher>> publishers_;

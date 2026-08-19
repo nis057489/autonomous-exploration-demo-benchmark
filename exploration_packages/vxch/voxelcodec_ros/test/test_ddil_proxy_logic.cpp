@@ -3,6 +3,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include <rclcpp/serialization.hpp>
 #include <rclcpp/serialized_message.hpp>
@@ -213,4 +214,69 @@ TEST(DdilProxyLogic, BandQueueEmptyDedupKeyNeverDedups)
   EXPECT_FALSE(queue.push(a));
   EXPECT_FALSE(queue.push(b));
   EXPECT_EQ(queue.size(), 2U);
+}
+
+TEST(DdilProxyLogic, BandQueueAgingLetsAWaitingFineBandEventuallyWinOverFreshCoarseOnes)
+{
+  // 20ms aging interval so the test doesn't need to sleep for real seconds:
+  // a band_5 entry needs 5 * 20ms = 100ms of wait to fully catch up to a
+  // never-waited band_0.
+  voxelcodec_ros::BandQueue queue(/*aging_interval_ms=*/20.0);
+
+  voxelcodec_ros::QueuedMessage fine;
+  fine.band_priority = 5;
+  fine.dedup_key = "tile_0_0:band_5";
+  ASSERT_FALSE(queue.push(fine));
+
+  // Let it age past the catch-up threshold before any coarse traffic arrives.
+  std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+  // A never-before-waited band_0 arrives from some other, currently-active tile --
+  // under the old strict-priority BandQueue this would unconditionally win.
+  voxelcodec_ros::QueuedMessage coarse;
+  coarse.band_priority = 0;
+  coarse.dedup_key = "tile_3_3:band_0";
+  ASSERT_FALSE(queue.push(coarse));
+
+  // The long-waiting fine band has aged down to priority 0 too, and it was
+  // queued first, so FIFO among ties hands it out ahead of the fresh coarse one.
+  EXPECT_EQ(queue.pop().dedup_key, "tile_0_0:band_5");
+  EXPECT_EQ(queue.pop().dedup_key, "tile_3_3:band_0");
+}
+
+TEST(DdilProxyLogic, BandQueueSustainedFreshCoarseArrivalsCannotStarveAWaitingFineBand)
+{
+  // This is the scenario observed in a real bag capture: 6925/6925 band
+  // messages sent over a whole run were band_0, zero of band_1..5 ever got
+  // through, because a continuously-regenerating band_0 always won the strict
+  // priority race. With aging, even a never-ending stream of fresh band_0
+  // arrivals eventually loses to a band that's been waiting long enough.
+  voxelcodec_ros::BandQueue queue(/*aging_interval_ms=*/20.0);
+
+  voxelcodec_ros::QueuedMessage fine;
+  fine.band_priority = 5;
+  fine.dedup_key = "tile_0_0:band_5";
+  ASSERT_FALSE(queue.push(fine));
+
+  bool fine_band_won = false;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  int coarse_seq = 0;
+  while (std::chrono::steady_clock::now() < deadline) {
+    voxelcodec_ros::QueuedMessage coarse;
+    coarse.band_priority = 0;
+    coarse.dedup_key = "tile_3_3:band_0_" + std::to_string(coarse_seq++);
+    queue.push(coarse);
+
+    const auto popped = queue.pop();
+    if (popped.dedup_key == "tile_0_0:band_5") {
+      fine_band_won = true;
+      break;
+    }
+    // Simulate the fresh coarse arrival winning again -- still, band_5 keeps
+    // accruing wait time in the queue for the next iteration's comparison.
+  }
+
+  EXPECT_TRUE(fine_band_won) <<
+    "band_5 never won against a sustained stream of fresh band_0 arrivals -- "
+    "this is the starvation bug aging is supposed to bound.";
 }
