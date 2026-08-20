@@ -294,6 +294,14 @@ if [[ "${RECORD_METRICS}" == true ]]; then
           BAG_TOPICS+=("/${name}/incoming/${peer}/manifest")
         done
       fi
+      if [[ "${MAP_TRANSPORT}" == "zstd" ]]; then
+        BAG_TOPICS+=("/${name}/zstd/map")
+        for ((j = 1; j <= NUM_ROBOTS; j++)); do
+          (( j == i )) && continue
+          peer="robot${j}"
+          BAG_TOPICS+=("/${name}/incoming/${peer}/zstd_map")
+        done
+      fi
     done
   else
     BAG_TOPICS+=(

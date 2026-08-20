@@ -293,6 +293,23 @@ def _team_map_share_actions(
                 }],
             )
         )
+    elif map_transport == "zstd":
+        # Same as baseline's raw-OccupancyGrid relay, but zstd-compressed
+        # before publishing -- see multi_robot_vxch_experiment.launch.py's
+        # is_zstd comment.
+        actions.append(
+            Node(
+                package="voxelcodec_ros",
+                executable="occupancy_grid_zstd_compress_node",
+                name=f"zstd_encoder_{namespace}",
+                output="screen",
+                parameters=[{
+                    "input_topic": f"/{namespace}/map",
+                    "output_topic": f"/{namespace}/zstd/map",
+                    "use_sim_time": False,
+                }],
+            )
+        )
 
     for i, peer in enumerate(peers):
         peer_name = peer["name"]
@@ -344,6 +361,41 @@ def _team_map_share_actions(
                         "output_topic": f"{robot_ddil_base}/map",
                         "haar_levels": haar_levels,
                         "publish_rate_hz": 1.0,
+                        "use_sim_time": False,
+                    }],
+                )
+            )
+        elif map_transport == "zstd":
+            robot_ddil_base = f"/{namespace}/incoming/{peer_name}"
+            actions.append(
+                Node(
+                    package="voxelcodec_ros",
+                    executable="ddil_proxy_node",
+                    name=f"ddil_proxy_{namespace}_from_{peer_name}",
+                    output="screen",
+                    additional_env=peer_env,
+                    parameters=[{
+                        "bandwidth_kbps": bandwidth_kbps,
+                        "loss_pct": loss_pct,
+                        "delay_ms": delay_ms,
+                        "rng_seed": seed,
+                        "relay_topics": [
+                            f"/{peer_name}/zstd/map {robot_ddil_base}/zstd_map"
+                            " std_msgs/msg/UInt8MultiArray reliable"
+                        ],
+                        "use_sim_time": False,
+                    }],
+                )
+            )
+            actions.append(
+                Node(
+                    package="voxelcodec_ros",
+                    executable="occupancy_grid_zstd_decompress_node",
+                    name=f"zstd_decoder_{namespace}_from_{peer_name}",
+                    output="screen",
+                    parameters=[{
+                        "input_topic": f"{robot_ddil_base}/zstd_map",
+                        "output_topic": f"{robot_ddil_base}/map",
                         "use_sim_time": False,
                     }],
                 )
@@ -692,7 +744,7 @@ def generate_launch_description():
             description="Comma-separated name@ip@x@y@yaw for every other robot in the "
                         "team, for distributed map sharing. Empty = no map sharing."),
         DeclareLaunchArgument("map_transport", default_value="baseline",
-                              description="'baseline' or 'vxch' -- how peer maps are relayed"),
+                              description="'baseline', 'vxch', or 'zstd' -- how peer maps are relayed"),
         DeclareLaunchArgument("bandwidth_kbps", default_value="0"),
         DeclareLaunchArgument("loss_pct", default_value="0.0"),
         DeclareLaunchArgument("delay_ms", default_value="0"),

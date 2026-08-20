@@ -95,6 +95,30 @@ ament_target_dependencies(vxch_occupancy_grid_node
 )
 install(TARGETS vxch_occupancy_grid_node RUNTIME DESTINATION lib/${PROJECT_NAME})
 
+add_executable(occupancy_grid_zstd_compress_node
+  src/occupancy_grid_zstd_compress_node.cpp
+)
+target_compile_features(occupancy_grid_zstd_compress_node PUBLIC cxx_std_17)
+target_link_libraries(occupancy_grid_zstd_compress_node PkgConfig::ZSTD)
+ament_target_dependencies(occupancy_grid_zstd_compress_node
+  nav_msgs
+  rclcpp
+  std_msgs
+)
+install(TARGETS occupancy_grid_zstd_compress_node RUNTIME DESTINATION lib/${PROJECT_NAME})
+
+add_executable(occupancy_grid_zstd_decompress_node
+  src/occupancy_grid_zstd_decompress_node.cpp
+)
+target_compile_features(occupancy_grid_zstd_decompress_node PUBLIC cxx_std_17)
+target_link_libraries(occupancy_grid_zstd_decompress_node PkgConfig::ZSTD)
+ament_target_dependencies(occupancy_grid_zstd_decompress_node
+  nav_msgs
+  rclcpp
+  std_msgs
+)
+install(TARGETS occupancy_grid_zstd_decompress_node RUNTIME DESTINATION lib/${PROJECT_NAME})
+
 add_executable(ddil_proxy_node
   src/ddil_proxy_node.cpp
 )

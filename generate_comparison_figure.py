@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-"""Produce a scientific comparison figure for a baseline run vs. a vxch run:
-how much data was exchanged between robots to share the map, and how much of
-the map got explored, for each condition.
+"""Produce a scientific comparison figure across map-sharing conditions --
+baseline, vxch (Wavestream), and/or zstd -- pass any 2 or all 3: how much
+data was exchanged between robots to share the map, and how much of the map
+got explored, for each condition given.
 
 Reads each robot's recorded rosbag2 (mcap) directly:
   - received bandwidth: bytes on every /<robot>/incoming/<peer>/... topic
-    (baseline: .../map; vxch: .../band_*+manifest) -- what this robot
-    actually received from its peers after DDIL throttling, per
-    RECORD_METRICS's doc in experiment.conf, not the free-running node-log
-    counters.
+    (baseline: .../map; vxch: .../band_*+manifest; zstd: .../zstd_map) --
+    what this robot actually received from its peers after DDIL throttling,
+    per RECORD_METRICS's doc in experiment.conf, not the free-running
+    node-log counters.
   - sent bandwidth: bytes this robot itself published for peers to pull --
     baseline: /<robot>/map (peers' ddil_proxy instances pull straight from
     it); vxch: /<robot>/vxch/map/band_*+manifest (the encoder's own output,
-    pre-DDIL-relay-fanout). Received and sent are read from disjoint topics,
-    so a robot that explores little but has active peers can easily receive
-    more than it sends -- that's not a contradiction, it's DDIL relaying its
-    peers' progress to it regardless of its own.
+    pre-DDIL-relay-fanout); zstd: /<robot>/zstd/map (the compressor's own
+    output, same pre-fanout point). Received and sent are read from disjoint
+    topics, so a robot that explores little but has active peers can easily
+    receive more than it sends -- that's not a contradiction, it's DDIL
+    relaying its peers' progress to it regardless of its own.
   - communicated map coverage: /<robot>/nav_map (nav_msgs/OccupancyGrid),
     decoded per message into (seconds since bag start, known-cell area in
     m^2). nav_map is each robot's post-fusion team map -- it includes cells
@@ -38,7 +40,9 @@ Usage:
   ./generate_comparison_figure.py \\
       --baseline robot1=<bag_dir> robot2=<bag_dir> \\
       --vxch     robot1=<bag_dir> robot2=<bag_dir> \\
+      --zstd     robot1=<bag_dir> robot2=<bag_dir> \\
       --out figures/compare.png
+  (any 2 of --baseline/--vxch/--zstd also works, e.g. just --baseline --zstd)
 """
 import argparse
 import re
@@ -58,13 +62,12 @@ from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
 from rclpy.serialization import deserialize_message
 from nav_msgs.msg import OccupancyGrid
 
-COLOR_BASELINE = "#eb6834"
-COLOR_WAVESTREAM = "#2a78d6"
 TEXT_PRIMARY = "#1a1a1a"
 TEXT_SECONDARY = "#52514e"
 GRID_COLOR = "#cccccc"
-CONDITIONS = ("baseline", "vxch")  # internal keys -- match run-dir/CLI naming, unrelated to display
-DISPLAY_NAMES = {"baseline": "Baseline", "vxch": "Wavestream"}
+ALL_CONDITIONS = ("baseline", "vxch", "zstd")  # internal keys -- match run-dir/CLI naming, unrelated to display
+DISPLAY_NAMES = {"baseline": "Baseline", "vxch": "Wavestream", "zstd": "Zstd"}
+CONDITION_COLORS = {"baseline": "#eb6834", "vxch": "#2a78d6", "zstd": "#3fa15c"}
 LINESTYLES = ("-", "--", ":", "-.")
 
 
@@ -129,6 +132,7 @@ def read_bag(robot, bag_dir, condition):
 
     incoming_re = re.compile(rf"^/{re.escape(robot)}/incoming/")
     vxch_own_re = re.compile(rf"^/{re.escape(robot)}/vxch/map/")
+    zstd_own_topic = f"/{robot}/zstd/map"
     nav_map_topic = f"/{robot}/nav_map"
     local_map_topic = f"/{robot}/map"
 
@@ -158,6 +162,8 @@ def read_bag(robot, bag_dir, condition):
                 sent_bytes += len(data)
         elif condition == "vxch" and vxch_own_re.match(topic):
             sent_bytes += len(data)
+        elif condition == "zstd" and topic == zstd_own_topic:
+            sent_bytes += len(data)
 
     del reader
     if scratch_dir is not None:
@@ -178,24 +184,25 @@ def style_ax(ax):
     ax.set_axisbelow(True)
 
 
-def plot_bandwidth(ax, results, byte_index, title, ylabel):
+def plot_bandwidth(ax, results, conditions, byte_index, title, ylabel):
     """byte_index selects which per-robot byte count to plot out of the
     (received_bytes, sent_bytes, coverage, local_coverage) tuple in results
     -- 0 for received (what peers sent this robot), 1 for sent (what this
-    robot itself published for peers to pull)."""
+    robot itself published for peers to pull). conditions fixes the
+    left-to-right bar order; results may hold any subset/superset of it."""
     robots = sorted({r for cond in results.values() for r in cond})
-    x = np.arange(len(CONDITIONS))
+    x = np.arange(len(conditions))
     heights_by_robot = {
-        robot: np.array([results[c].get(robot, (0, 0, [], []))[byte_index] / 1024 for c in CONDITIONS])
+        robot: np.array([results[c].get(robot, (0, 0, [], []))[byte_index] / 1024 for c in conditions])
         for robot in robots
     }
-    totals = np.sum(list(heights_by_robot.values()), axis=0) if robots else np.zeros(len(CONDITIONS))
+    totals = np.sum(list(heights_by_robot.values()), axis=0) if robots else np.zeros(len(conditions))
 
-    bottoms = np.zeros(len(CONDITIONS))
+    bottoms = np.zeros(len(conditions))
     for robot in robots:
         heights_kb = heights_by_robot[robot]
         ax.bar(x, heights_kb, bottom=bottoms, width=0.45,
-               color=[COLOR_BASELINE, COLOR_WAVESTREAM], edgecolor="white", linewidth=2,
+               color=[CONDITION_COLORS[c] for c in conditions], edgecolor="white", linewidth=2,
                zorder=3)
         # Label each brick with the robot it belongs to, directly on the
         # segment -- skip slivers too thin for the label to fit legibly.
@@ -210,38 +217,39 @@ def plot_bandwidth(ax, results, byte_index, title, ylabel):
                     textcoords="offset points", ha="center", va="bottom",
                     fontsize=11, fontweight="bold", color=TEXT_PRIMARY)
 
-    if totals[0] > 0 and totals[1] > 0 and totals[0] != totals[1]:
-        bigger, smaller = max(totals), min(totals)
-        winner = DISPLAY_NAMES["vxch"] if totals[1] < totals[0] else DISPLAY_NAMES["baseline"]
-        ax.text(0.5, 0.99, f"{bigger / smaller:.1f}× less data ({winner})",
-                transform=ax.transAxes, ha="center", va="top",
-                fontsize=10.5, color=TEXT_SECONDARY, style="italic")
+    nonzero = [(c, t) for c, t in zip(conditions, totals) if t > 0]
+    if len(nonzero) >= 2:
+        (_, biggest_val) = max(nonzero, key=lambda ct: ct[1])
+        (winner, smallest_val) = min(nonzero, key=lambda ct: ct[1])
+        if biggest_val != smallest_val:
+            ax.text(0.5, 0.99, f"{biggest_val / smallest_val:.1f}× less data ({DISPLAY_NAMES[winner]})",
+                    transform=ax.transAxes, ha="center", va="top",
+                    fontsize=10.5, color=TEXT_SECONDARY, style="italic")
 
     ax.set_ylim(0, max(totals) * 1.25 if max(totals) > 0 else 1)
 
     ax.set_xticks(x)
-    ax.set_xticklabels([DISPLAY_NAMES[c] for c in CONDITIONS], fontsize=11, color=TEXT_PRIMARY, fontweight="bold")
+    ax.set_xticklabels([DISPLAY_NAMES[c] for c in conditions], fontsize=11, color=TEXT_PRIMARY, fontweight="bold")
     ax.set_ylabel(ylabel, fontsize=11, color=TEXT_SECONDARY)
     ax.set_title(title, fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
     style_ax(ax)
 
 
-def plot_coverage(ax, results, series_index, title, ylabel):
+def plot_coverage(ax, results, conditions, series_index, title, ylabel):
     """series_index selects which per-robot coverage series to plot out of
     the (received_bytes, sent_bytes, coverage, local_coverage) tuple in
     results -- 2 for communicated (nav_map), 3 for locally-observed (map)."""
-    colors = {"baseline": COLOR_BASELINE, "vxch": COLOR_WAVESTREAM}
     robots = sorted({r for cond in results.values() for r in cond})
     robot_style = {r: LINESTYLES[i % len(LINESTYLES)] for i, r in enumerate(robots)}
 
-    for cond in CONDITIONS:
+    for cond in conditions:
         for robot, entry in sorted(results[cond].items()):
             coverage = entry[series_index]
             if not coverage:
                 continue
             ts = [p[0] for p in coverage]
             areas = [p[1] for p in coverage]
-            ax.plot(ts, areas, color=colors[cond], linestyle=robot_style[robot],
+            ax.plot(ts, areas, color=CONDITION_COLORS[cond], linestyle=robot_style[robot],
                      linewidth=2, solid_capstyle="round", zorder=3)
             ax.annotate(robot, (ts[-1], areas[-1]), textcoords="offset points",
                         xytext=(6, 0), fontsize=8.5, color=TEXT_SECONDARY, va="center")
@@ -251,56 +259,63 @@ def plot_coverage(ax, results, series_index, title, ylabel):
     ax.set_title(title, fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
     style_ax(ax)
 
-    handles = [Line2D([0], [0], color=colors[c], lw=2, label=DISPLAY_NAMES[c])
-               for c in CONDITIONS if results[c]]
+    handles = [Line2D([0], [0], color=CONDITION_COLORS[c], lw=2, label=DISPLAY_NAMES[c])
+               for c in conditions if results[c]]
     if handles:
         ax.legend(handles=handles, frameon=False, fontsize=10, loc="lower right")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--baseline", nargs="+", required=True, metavar="robot=bag_dir")
-    parser.add_argument("--vxch", nargs="+", required=True, metavar="robot=bag_dir")
+    parser.add_argument("--baseline", nargs="+", metavar="robot=bag_dir")
+    parser.add_argument("--vxch", nargs="+", metavar="robot=bag_dir")
+    parser.add_argument("--zstd", nargs="+", metavar="robot=bag_dir")
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
 
-    robot_paths = {"baseline": parse_robot_paths(args.baseline), "vxch": parse_robot_paths(args.vxch)}
+    robot_paths = {}
+    for condition in ALL_CONDITIONS:
+        pairs = getattr(args, condition)
+        if pairs:
+            robot_paths[condition] = parse_robot_paths(pairs)
+    if len(robot_paths) < 2:
+        print("error: need at least 2 of --baseline/--vxch/--zstd to compare", file=sys.stderr)
+        sys.exit(1)
+    conditions = tuple(c for c in ALL_CONDITIONS if c in robot_paths)
 
-    results = {"baseline": {}, "vxch": {}}
+    results = {c: {} for c in conditions}
     for condition, robots in robot_paths.items():
         for robot, bag_dir in sorted(robots.items()):
             r = read_bag(robot, bag_dir, condition)
             if r is not None:
                 results[condition][robot] = r
 
-    for condition in CONDITIONS:
+    for condition in conditions:
         if not results[condition]:
             print(f"error: no readable bags for condition {condition!r}", file=sys.stderr)
             sys.exit(1)
 
     fig, (ax_sent, ax_received, ax_coverage, ax_local) = plt.subplots(1, 4, figsize=(25, 5.5))
-    plot_bandwidth(ax_sent, results, 1, "Map-sharing bandwidth (sent)", "Sent to peers (KB)")
-    plot_bandwidth(ax_received, results, 0, "Map-sharing bandwidth (received)", "Received from peers (KB)")
-    plot_coverage(ax_coverage, results, 2, "Communicated map coverage", "Known map area (m²)")
-    plot_coverage(ax_local, results, 3, "Locally-observed coverage (self only)", "Self-observed area (m²)")
-    fig.suptitle(f"Map sharing: {DISPLAY_NAMES['baseline']} vs. {DISPLAY_NAMES['vxch']}", fontsize=15, fontweight="bold",
+    plot_bandwidth(ax_sent, results, conditions, 1, "Map-sharing bandwidth (sent)", "Sent to peers (KB)")
+    plot_bandwidth(ax_received, results, conditions, 0, "Map-sharing bandwidth (received)", "Received from peers (KB)")
+    plot_coverage(ax_coverage, results, conditions, 2, "Communicated map coverage", "Known map area (m²)")
+    plot_coverage(ax_local, results, conditions, 3, "Locally-observed coverage (self only)", "Self-observed area (m²)")
+    fig.suptitle("Map sharing: " + " vs. ".join(DISPLAY_NAMES[c] for c in conditions), fontsize=15, fontweight="bold",
                  color=TEXT_PRIMARY, x=0.02, ha="left")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.out, dpi=200, facecolor="white")
 
-    baseline_received = sum(r for r, _, _, _ in results["baseline"].values())
-    vxch_received = sum(r for r, _, _, _ in results["vxch"].values())
-    baseline_sent = sum(s for _, s, _, _ in results["baseline"].values())
-    vxch_sent = sum(s for _, s, _, _ in results["vxch"].values())
-    print(f"{DISPLAY_NAMES['baseline']} received: {baseline_received} bytes ({baseline_received / 1024:.1f} KB), "
-          f"sent: {baseline_sent} bytes ({baseline_sent / 1024:.1f} KB)")
-    print(f"{DISPLAY_NAMES['vxch']} received:     {vxch_received} bytes ({vxch_received / 1024:.1f} KB), "
-          f"sent: {vxch_sent} bytes ({vxch_sent / 1024:.1f} KB)")
-    if baseline_received > 0 and vxch_received > 0:
-        print(f"received ratio: {max(baseline_received, vxch_received) / min(baseline_received, vxch_received):.2f}x")
-    for condition in CONDITIONS:
+    totals_received = {c: sum(r for r, _, _, _ in results[c].values()) for c in conditions}
+    totals_sent = {c: sum(s for _, s, _, _ in results[c].values()) for c in conditions}
+    for c in conditions:
+        print(f"{DISPLAY_NAMES[c]:>10} received: {totals_received[c]} bytes ({totals_received[c] / 1024:.1f} KB), "
+              f"sent: {totals_sent[c]} bytes ({totals_sent[c] / 1024:.1f} KB)")
+    nonzero_received = {c: v for c, v in totals_received.items() if v > 0}
+    if len(nonzero_received) >= 2:
+        print(f"received ratio (max/min): {max(nonzero_received.values()) / min(nonzero_received.values()):.2f}x")
+    for condition in conditions:
         for robot, (_, _, coverage, local_coverage) in sorted(results[condition].items()):
             final = coverage[-1][1] if coverage else 0.0
             final_local = local_coverage[-1][1] if local_coverage else 0.0

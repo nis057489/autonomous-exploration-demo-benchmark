@@ -30,8 +30,10 @@ FIGURES_DIR = os.path.join(PROJECT_ROOT, "figures")
 REPLAY_SCRIPT = os.path.join(PROJECT_ROOT, "replay_compare.sh")
 FIGURE_SCRIPT = os.path.join(PROJECT_ROOT, "generate_comparison_figure.py")
 
-RUN_DIR_RE = re.compile(r"^(\d{8}_\d{6})_(baseline|vxch)_(\w+)$")
+RUN_DIR_RE = re.compile(r"^(\d{8}_\d{6})_(baseline|vxch|zstd)_(\w+)$")
 SESSION_GAP_SECONDS = 90  # runs across robots within this gap = one session
+CONDITIONS = ("baseline", "vxch", "zstd")
+CONDITION_LABELS = {"baseline": "Baseline run", "vxch": "Wavestream run", "zstd": "Zstd run"}
 
 
 def in_container():
@@ -72,12 +74,12 @@ def robots_in_bag(bag_dir):
 
 
 def scan_runs():
-    """Return {"baseline": [...], "vxch": [...]} of session dicts, newest
-    first. Each session dict: {"ts": datetime, "label": str,
+    """Return {"baseline": [...], "vxch": [...], "zstd": [...]} of session
+    dicts, newest first. Each session dict: {"ts": datetime, "label": str,
     "runs": {robot: dir_name}}."""
-    entries = {"baseline": [], "vxch": []}
+    entries = {c: [] for c in CONDITIONS}
     if not os.path.isdir(RUNS_DIR):
-        return {"baseline": [], "vxch": []}
+        return {c: [] for c in CONDITIONS}
 
     for robot in sorted(os.listdir(RUNS_DIR)):
         robot_dir = os.path.join(RUNS_DIR, robot)
@@ -190,7 +192,7 @@ class ReplayGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Replay Compare")
-        self.geometry("760x560")
+        self.geometry("1080x560")
         self.proc = None
         self.fig_proc = None
 
@@ -208,22 +210,24 @@ class ReplayGUI(tk.Tk):
 
         picker_frame = ttk.Frame(self, padding=10)
         picker_frame.pack(fill="both", expand=True)
-        picker_frame.columnconfigure(0, weight=1)
-        picker_frame.columnconfigure(1, weight=1)
+        for col in range(len(CONDITIONS)):
+            picker_frame.columnconfigure(col, weight=1)
         picker_frame.rowconfigure(0, weight=1)
 
-        self.baseline_picker = RunPicker(picker_frame, "Baseline run", sessions["baseline"], all_robots)
-        self.baseline_picker.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        self.pickers = {}
+        for col, condition in enumerate(CONDITIONS):
+            padx = (0 if col == 0 else 5, 0 if col == len(CONDITIONS) - 1 else 5)
+            picker = RunPicker(picker_frame, CONDITION_LABELS[condition], sessions[condition], all_robots)
+            picker.grid(row=0, column=col, sticky="nsew", padx=padx)
+            self.pickers[condition] = picker
 
-        self.vxch_picker = RunPicker(picker_frame, "Wavestream run", sessions["vxch"], all_robots)
-        self.vxch_picker.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
-
-        if not sessions["baseline"] or not sessions["vxch"]:
+        present = [c for c in CONDITIONS if sessions[c]]
+        if len(present) < 2:
             ttk.Label(
                 picker_frame,
-                text="No runs found under experiment_runs/ for one or both conditions.",
+                text="Need runs for at least 2 conditions under experiment_runs/ to compare.",
                 foreground="red",
-            ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            ).grid(row=1, column=0, columnspan=len(CONDITIONS), sticky="w", pady=(6, 0))
 
         controls = ttk.Frame(self, padding=(10, 0, 10, 10))
         controls.pack(fill="x")
@@ -267,15 +271,25 @@ class ReplayGUI(tk.Tk):
         self.log.see("end")
         self.log.configure(state="disabled")
 
+    def _selected_sessions(self):
+        """{condition: session} for every condition with a picker selection
+        (a condition with no runs at all has an empty picker, so
+        selected_session() returns None for it and it's simply omitted)."""
+        selected = {}
+        for condition, picker in self.pickers.items():
+            session = picker.selected_session()
+            if session is not None:
+                selected[condition] = session
+        return selected
+
     def launch(self):
         if self.proc is not None:
             messagebox.showinfo("Already running", "A replay is already running. Stop it first.")
             return
 
-        baseline_session = self.baseline_picker.selected_session()
-        vxch_session = self.vxch_picker.selected_session()
-        if not baseline_session or not vxch_session:
-            messagebox.showerror("No selection", "Select a baseline run and a Wavestream run first.")
+        selected = self._selected_sessions()
+        if len(selected) < 2:
+            messagebox.showerror("No selection", "Select runs for at least 2 conditions first.")
             return
 
         rate = self.rate_var.get().strip() or "8"
@@ -285,24 +299,26 @@ class ReplayGUI(tk.Tk):
             messagebox.showerror("Invalid rate", f"'{rate}' is not a number.")
             return
 
-        baseline_override = ",".join(f"{robot}:{name}" for robot, name in baseline_session["runs"].items())
-        vxch_override = ",".join(f"{robot}:{name}" for robot, name in vxch_session["runs"].items())
-
         env = os.environ.copy()
-        env["BASELINE_RUN_OVERRIDE"] = baseline_override
-        env["VXCH_RUN_OVERRIDE"] = vxch_override
+        env_args = []
+        for condition, session in selected.items():
+            override = ",".join(f"{robot}:{name}" for robot, name in session["runs"].items())
+            var_name = f"{condition.upper()}_RUN_OVERRIDE"
+            env[var_name] = override
+            env_args.append(f"{var_name}={override}")
+        # Tell replay_compare.sh which conditions to actually show -- without
+        # this it defaults to baseline+vxch regardless of what's selected here.
+        conditions_arg = ",".join(selected.keys())
+        env["REPLAY_CONDITIONS"] = conditions_arg
+        env_args.append(f"REPLAY_CONDITIONS={conditions_arg}")
 
         if in_container():
-            cmd = [
-                "distrobox-host-exec", "env",
-                f"BASELINE_RUN_OVERRIDE={baseline_override}",
-                f"VXCH_RUN_OVERRIDE={vxch_override}",
-                REPLAY_SCRIPT, rate,
-            ]
+            cmd = ["distrobox-host-exec", "env", *env_args, REPLAY_SCRIPT, rate]
         else:
             cmd = [REPLAY_SCRIPT, rate]
 
-        self.append_log(f"$ baseline={baseline_session['label']} wavestream={vxch_session['label']} rate={rate}\n")
+        labels = ", ".join(f"{c}={s['label']}" for c, s in selected.items())
+        self.append_log(f"$ {labels} rate={rate}\n")
         self.status_var.set("Launching...")
         self.launch_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
@@ -342,17 +358,16 @@ class ReplayGUI(tk.Tk):
 
     def generate_figure(self):
         """Produce the bandwidth/coverage comparison figure for whichever
-        baseline and vxch sessions are currently selected in the pickers
-        (defaults to the latest of each, since each RunPicker preselects
-        row 0 and sessions are sorted newest first)."""
+        sessions are currently selected in the pickers (any 2 or all 3
+        conditions; defaults to the latest of each, since each RunPicker
+        preselects row 0 and sessions are sorted newest first)."""
         if self.fig_proc is not None:
             messagebox.showinfo("Already running", "A figure is already being generated.")
             return
 
-        baseline_session = self.baseline_picker.selected_session()
-        vxch_session = self.vxch_picker.selected_session()
-        if not baseline_session or not vxch_session:
-            messagebox.showerror("No selection", "Select a baseline run and a Wavestream run first.")
+        selected = self._selected_sessions()
+        if len(selected) < 2:
+            messagebox.showerror("No selection", "Select runs for at least 2 conditions first.")
             return
 
         def bag_args(session):
@@ -369,7 +384,9 @@ class ReplayGUI(tk.Tk):
             return args
 
         os.makedirs(FIGURES_DIR, exist_ok=True)
-        out_name = f"compare_{baseline_session['ts'].strftime('%Y%m%d_%H%M%S')}_vs_{vxch_session['ts'].strftime('%Y%m%d_%H%M%S')}.png"
+        out_name = "compare_" + "_vs_".join(
+            f"{c}-{s['ts'].strftime('%Y%m%d_%H%M%S')}" for c, s in selected.items()
+        ) + ".png"
         out_path = os.path.join(FIGURES_DIR, out_name)
 
         # Always "python3" (never sys.executable): this command runs inside
@@ -377,10 +394,10 @@ class ReplayGUI(tk.Tk):
         # directly if replay_gui.py itself is already in-container, or via
         # the distrobox wrapper below otherwise -- sys.executable would be
         # the *host* interpreter in that second case, which lacks rosbag2_py.
-        py_cmd = (
-            ["python3", FIGURE_SCRIPT, "--baseline"] + bag_args(baseline_session)
-            + ["--vxch"] + bag_args(vxch_session) + ["--out", out_path]
-        )
+        py_cmd = ["python3", FIGURE_SCRIPT]
+        for condition, session in selected.items():
+            py_cmd += [f"--{condition}"] + bag_args(session)
+        py_cmd += ["--out", out_path]
 
         if in_container():
             cmd = py_cmd
@@ -391,7 +408,8 @@ class ReplayGUI(tk.Tk):
             quoted = " ".join(shlex.quote(part) for part in py_cmd)
             cmd = ["distrobox", "enter", "jazzy_env", "--", "bash", "-lc", quoted]
 
-        self.append_log(f"$ generate figure: baseline={baseline_session['label']} wavestream={vxch_session['label']}\n")
+        labels = ", ".join(f"{c}={s['label']}" for c, s in selected.items())
+        self.append_log(f"$ generate figure: {labels}\n")
         self.figure_btn.configure(state="disabled")
 
         threading.Thread(target=self._run_figure_process, args=(cmd, out_path), daemon=True).start()

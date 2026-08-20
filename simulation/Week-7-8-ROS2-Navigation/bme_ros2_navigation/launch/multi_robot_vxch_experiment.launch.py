@@ -127,8 +127,10 @@ def _create_all_actions(context):
     spacing = LaunchConfiguration("spacing").perform(context)
     rviz = LaunchConfiguration("rviz").perform(context)
 
-    if map_transport not in ("baseline", "vxch"):
-        raise ValueError(f"map_transport must be 'baseline' or 'vxch', got '{map_transport}'")
+    if map_transport not in ("baseline", "vxch", "zstd"):
+        raise ValueError(
+            f"map_transport must be 'baseline', 'vxch', or 'zstd', got '{map_transport}'"
+        )
 
     impairment_mode = LaunchConfiguration("impairment_mode").perform(context)
     if impairment_mode not in ("sim", "tc"):
@@ -136,6 +138,11 @@ def _create_all_actions(context):
     is_tc = impairment_mode == "tc"
 
     is_vxch = map_transport == "vxch"
+    # zstd: same relayed OccupancyGrid as baseline, but the serialized message
+    # is zstd-compressed before publishing and decompressed on the receiving
+    # end -- isolates what generic compression alone buys vs. baseline, with
+    # no wavelet/tiling/scheduling from vxch involved.
+    is_zstd = map_transport == "zstd"
 
     robot_names = [f"robot{i + 1}" for i in range(num_robots)]
 
@@ -327,6 +334,24 @@ def _create_all_actions(context):
                     # integration test, not a bit-exact physical-layer model.
                 )
             )
+    elif is_zstd:
+        # Same reasoning as the vxch encoder above for staying out of the
+        # robot's own netns: this node's /{name}/map subscription must not
+        # cross the same shaped link its own compressed output competes for.
+        for i, name in enumerate(robot_names):
+            actions.append(
+                Node(
+                    package="voxelcodec_ros",
+                    executable="occupancy_grid_zstd_compress_node",
+                    name=f"zstd_encoder_{name}",
+                    output="screen",
+                    parameters=[{
+                        "input_topic": f"/{name}/map",
+                        "output_topic": f"/{name}/zstd/map",
+                        "use_sim_time": use_sim_time,
+                    }],
+                )
+            )
     elif is_tc:
         # Baseline mode has no encode step, just a rename to /{name}/map_uplink
         # so ddil_proxy below has a stable topic name to pull regardless of
@@ -423,6 +448,36 @@ def _create_all_actions(context):
                     }],
                 )
             )
+        elif is_zstd:
+            actions.append(
+                Node(
+                    package="voxelcodec_ros",
+                    executable="ddil_proxy_node",
+                    name=f"ddil_proxy_{name}_from_{peer_name}",
+                    output="screen",
+                    parameters=[{
+                        **ddil_params_for(i, peer_index),
+                        "relay_topics": [
+                            f"/{peer_name}/zstd/map {robot_ddil_base}/zstd_map"
+                            " std_msgs/msg/UInt8MultiArray reliable"
+                        ],
+                    }],
+                    **_netns_kwargs(i, [MAIN_NETNS_IP]),
+                )
+            )
+            actions.append(
+                Node(
+                    package="voxelcodec_ros",
+                    executable="occupancy_grid_zstd_decompress_node",
+                    name=f"zstd_decoder_{name}_from_{peer_name}",
+                    output="screen",
+                    parameters=[{
+                        "input_topic": f"{robot_ddil_base}/zstd_map",
+                        "output_topic": f"{robot_ddil_base}/map",
+                        "use_sim_time": use_sim_time,
+                    }],
+                )
+            )
         else:
             # In tc mode, pull from the peer's map_uplink relay (a stable name
             # regardless of mode) rather than /{peer}/map directly -- both now
@@ -490,7 +545,7 @@ def generate_launch_description():
             # ── Experiment args ────────────────────────────────────────────
             DeclareLaunchArgument(
                 "map_transport", default_value="baseline",
-                description="'baseline' or 'vxch'"),
+                description="'baseline', 'vxch', or 'zstd'"),
             DeclareLaunchArgument(
                 "impairment_mode", default_value="sim",
                 description="'sim' (default) = ddil_proxy_node's in-process token-bucket/"

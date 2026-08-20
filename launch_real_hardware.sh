@@ -374,6 +374,15 @@ if [[ -n "${ROBOT_ID}" ]]; then
         done
         BAG_TOPICS+=("/${ROBOT_ID}/incoming/${peer_name}/manifest")
       done
+    elif [[ "${MAP_TRANSPORT}" == "zstd" ]]; then
+      # zstd map transport: same relay shape as baseline, but this robot's
+      # own compressed output lives on /zstd/map and what it received from
+      # each peer (post-DDIL, still compressed) on
+      # /incoming/<peer>/zstd_map -- bag both for direct bandwidth totals.
+      BAG_TOPICS+=("/${ROBOT_ID}/zstd/map")
+      for peer_name in "${PEER_NAMES[@]}"; do
+        BAG_TOPICS+=("/${ROBOT_ID}/incoming/${peer_name}/zstd_map")
+      done
     else
       # Baseline map transport: relays raw nav_msgs/OccupancyGrid instead of
       # encoded bands (see hw_namespaced_stack.launch.py's per-peer relay
