@@ -50,6 +50,20 @@ public:
     rng_(0)  // seeded below after parameter declaration
   {
     bandwidth_kbps_ = declare_parameter<double>("bandwidth_kbps", 0.0);
+    // In tc mode, bandwidth_kbps above is deliberately 0 (real tc netem does
+    // the shaping; the software token bucket staying unthrottled avoids
+    // double-impairing on top of it) -- but that left the UI's "Capacity"
+    // label reading "Unlimited" for a link that's very much not, since it had
+    // no way to tell "genuinely unconfigured" apart from "shaped externally."
+    // This is display-only: it feeds publish_stats()'s reported
+    // bandwidth_kbps but never touches token_bucket_ below, so it can't
+    // reintroduce the double-throttling bandwidth_kbps=0 exists to avoid.
+    // Defaults to bandwidth_kbps itself so non-tc callers (who never set
+    // this) see identical behavior to before.
+    display_bandwidth_kbps_ = declare_parameter<double>("display_bandwidth_kbps", -1.0);
+    if (display_bandwidth_kbps_ < 0.0) {
+      display_bandwidth_kbps_ = bandwidth_kbps_;
+    }
     loss_pct_ = declare_parameter<double>("loss_pct", 0.0);
     delay_ms_ = declare_parameter<double>("delay_ms", 0.0);
     // See BandQueue's class comment in ddil_proxy_logic.hpp: without aging, a
@@ -295,6 +309,21 @@ private:
       // is the correct place for this decision.
       const std::size_t nbytes = item.serialized->size();
 
+      // queue_.pop() above already removed this item from the queue, but it won't
+      // count as "sent" until publish() below actually happens -- and
+      // token_bucket_->consume() next is exactly where a throttled link spends
+      // most of its time blocked. Without tracking it here, an item mid-consume()
+      // is invisible to both pending_by_band() (already popped) and sent_bytes
+      // (not yet published), so the UI's "wants to send" reads 0 for a
+      // continuously-sending link even while its running total climbs -- it's
+      // only ever seeing genuinely idle moments between publishes, not what's
+      // actually in flight.
+      if (item.band_priority >= 0 && item.band_priority != std::numeric_limits<int>::max()) {
+        std::lock_guard<std::mutex> lock(worker_stats_mutex_);
+        in_flight_band_ = item.band_priority;
+        in_flight_bytes_ = nbytes;
+      }
+
       // Token bucket: blocks until enough tokens available
       token_bucket_->consume(nbytes);
 
@@ -324,6 +353,8 @@ private:
           auto & bc = band_counters_[item.band_priority];
           bc.sent_bytes += nbytes;
           bc.sent_count += 1;
+          in_flight_band_ = -1;
+          in_flight_bytes_ = 0;
         }
         last_sent_band_priority_ = item.band_priority;
         last_sent_time_ = now_steady;
@@ -390,6 +421,15 @@ private:
       const auto now_steady = std::chrono::steady_clock::now();
       std::lock_guard<std::mutex> lock(worker_stats_mutex_);
       sent_counters_copy = band_counters_;
+      // Fold the in-flight item (already popped, not yet published -- see
+      // worker_loop()) back into "pending" so a continuously-throttled link
+      // doesn't read as 0 just because nothing happens to be sitting in the
+      // queue at this exact instant.
+      if (in_flight_band_ >= 0) {
+        auto & entry = pending[in_flight_band_];
+        entry.first += 1;
+        entry.second += in_flight_bytes_;
+      }
 
       while (!recent_sends_.empty() &&
         std::chrono::duration<double>(now_steady - recent_sends_.front().first).count() >
@@ -429,7 +469,7 @@ private:
     voxelcodec_msgs::msg::DdilStats msg;
     msg.header.stamp = now();
     msg.link_name = get_name();
-    msg.bandwidth_kbps = bandwidth_kbps_;
+    msg.bandwidth_kbps = display_bandwidth_kbps_;
     msg.send_rate_bps = send_rate_bps;
     msg.msgs_received = msgs_received_.load(std::memory_order_relaxed);
     msg.msgs_dropped = msgs_dropped_.load(std::memory_order_relaxed);
@@ -499,6 +539,7 @@ private:
   }
 
   double bandwidth_kbps_;
+  double display_bandwidth_kbps_;
   double loss_pct_;
   double delay_ms_;
   double priority_aging_ms_;
@@ -548,6 +589,11 @@ private:
   std::deque<std::pair<std::chrono::steady_clock::time_point, std::size_t>> recent_sends_;
   int last_sent_band_priority_{std::numeric_limits<int>::min()};
   std::chrono::steady_clock::time_point last_sent_time_{};
+  // The item currently between queue_.pop() and publish() -- already off the
+  // queue (so pending_by_band() can't see it) but not yet counted as sent.
+  // -1 means nothing in flight right now.
+  int in_flight_band_{-1};
+  std::size_t in_flight_bytes_{0};
   std::mutex worker_stats_mutex_;
   static constexpr double kRateWindowSec = 2.0;
 };

@@ -199,7 +199,12 @@ def _create_all_actions(context):
         if is_tc:
             # Real tc netem on the netns links is doing the shaping; the
             # software token bucket/loss/delay would double-impair on top of it.
+            # display_bandwidth_kbps is UI-only (see ddil_proxy_node.cpp) --
+            # reports the real configured tc rate on the NetworkStatsPanel
+            # ("Capacity") without feeding the token bucket, so the panel
+            # doesn't read "Unlimited" for a link that's actually shaped.
             return {"bandwidth_kbps": 0.0, "loss_pct": 0.0, "delay_ms": 0.0,
+                    "display_bandwidth_kbps": bandwidth_kbps,
                     "use_sim_time": use_sim_time, "rng_seed": seed}
         return {**ddil_params_base, "rng_seed": seed}
 
