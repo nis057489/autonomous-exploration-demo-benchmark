@@ -13,44 +13,51 @@
 // separate seam to plug its own embedding into instead of occupancy's
 // assumptions leaking into code meant to work for any channel.
 //
-// unknown sits at the numeric MIDPOINT of the embedded range, not adjacent
-// to free. Under the previous mapping (v+1: unknown=0, free=1, occupied=101),
-// a cell resolving unknown->free was a magnitude-1 step while unknown->
-// occupied was magnitude-101 and free->occupied was magnitude-100 -- so any
-// signal built on coefficient/value magnitude (e.g. a rate-distortion send
-// priority derived from Haar coefficient energy) would treat newly-
-// discovered free space, exactly what frontier exploration produces most
-// of, as ~100x less informative than an occupied-state flip, for no reason
-// tied to actual uncertainty reduction. Placing unknown equidistant from
-// both known extremes fixes that: unknown->free and unknown->occupied now
-// produce comparably large steps (101 and 99).
+// unknown sits adjacent to free (0 -> 1), at the LOW end of the range, not
+// at the midpoint. An earlier version of this mapping placed unknown at the
+// numeric midpoint between free and occupied specifically to fix a
+// different problem -- the wavelet DETAIL bands treating a newly-resolved
+// unknown->free cell as far less informative (magnitude-1 step) than an
+// unknown->occupied or free->occupied one (magnitude ~100-101) -- but that
+// same embedded value also feeds band_0, the coarsest band, which is a
+// literal per-tile AVERAGE. Once unknown sat at the midpoint, any tile with
+// substantial unexplored territory averaged toward "medium," which decodes
+// back to a medium occupancy percentage: a tile that was 100% unexplored
+// could decode, at coarse/partial-band fidelity, to as much as 87% "occupied"
+// -- phantom obstacles across ground nobody has ever seen. Confirmed against
+// a real generated map (whole-map coarse average moved from ~6.6% to ~21%
+// occupied purely from this remapping, with individual unexplored cells
+// reading as high as 87%).
 //
-// Known values are doubled (0,2,...,200) to open the one odd slot (101)
-// unknown needs, so the mapping stays an exact bijection over all 102 legal
-// OccupancyGrid values -- lossless, same guarantee the mapping it replaces
-// made.
+// Any nonzero gap between unknown and free necessarily leaks into that
+// average whenever a tile mixes unknown and free cells (the common case,
+// especially near a frontier) -- there's no shared linear embedding that's
+// simultaneously "unknown reads as equidistant from both known states" for
+// the detail bands and "unknown doesn't bias the coarse average" for band_0.
+// Since band_0 is what a teammate actually sees first and the coarse
+// reconstruction has to be trustworthy on its own, correctness of that
+// average wins: unknown stays adjacent to free, same relative placement as
+// the original v+1 mapping this header replaced. The detail-band
+// under-weighting of newly-discovered free space this reintroduces is a
+// real but much lower-severity issue (it affects send *priority*, not what
+// the map claims is there) -- fixing it, if ever needed, requires a rate-
+// distortion signal computed separately from the transmitted/reconstructed
+// value, not another remapping of this shared embedding.
 namespace voxelcodec_ros
 {
 
 inline std::uint32_t occupancy_to_embedded(std::int8_t v)
 {
-  if (v == -1) {
-    return 101U;
-  }
-  return static_cast<std::uint32_t>(v) * 2U;
+  return static_cast<std::uint32_t>(static_cast<int>(v) + 1);
 }
 
-// Inverse of occupancy_to_embedded. Values outside the legitimate
-// {0,2,...,200} ∪ {101} range (e.g. from a corrupted/foreign payload) clamp
-// into OccupancyGrid's valid [-1,100] range rather than wrapping or
-// producing garbage -- same defensive behavior the mapping it replaces had.
+// Inverse of occupancy_to_embedded. Values outside the legitimate [0,101]
+// range (e.g. from a corrupted/foreign payload) clamp into OccupancyGrid's
+// valid [-1,100] range rather than wrapping or producing garbage.
 inline std::int8_t embedded_to_occupancy(std::uint32_t e)
 {
-  if (e == 101U) {
-    return -1;
-  }
-  const int known = static_cast<int>(e / 2U);
-  return static_cast<std::int8_t>(std::max(0, std::min(100, known)));
+  const int shifted = static_cast<int>(e) - 1;
+  return static_cast<std::int8_t>(std::max(-1, std::min(100, shifted)));
 }
 
 }  // namespace voxelcodec_ros

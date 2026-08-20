@@ -40,23 +40,24 @@ TEST(TileScheduler, OccupancyEmbeddingIsABijectionOverAllLegalValues)
   }
 }
 
-TEST(TileScheduler, OccupancyEmbeddingPlacesUnknownAtTheMidpointNotAdjacentToFree)
+TEST(TileScheduler, OccupancyEmbeddingKeepsUnknownAdjacentToFreeSoCoarseAveragingStaysSafe)
 {
-  // Unknown must sit roughly equidistant from both known extremes, unlike
-  // the old v+1 mapping (unknown=0, free=1, occupied=101), where
-  // unknown->free was a magnitude-1 step and unknown->occupied was
-  // magnitude-101 -- a ~100x mismatch that made a coefficient-energy-based
-  // priority score treat newly-discovered free space as far less
-  // informative than an occupied-state flip, for no principled reason.
+  // Regression guard: unknown must sit numerically CLOSE to free, not near
+  // the midpoint between free and occupied. band_0 (the coarsest Haar band,
+  // arrives first, dominates partial/low-fidelity reconstruction) is a
+  // literal per-tile average of these embedded values -- placing unknown at
+  // the midpoint once made a 100%-unexplored tile's coarse reconstruction
+  // read as up to 87% "occupied" (verified against a real generated map),
+  // because any unknown/free mix in a tile leaks straight into that
+  // average. Unknown->free must stay a much smaller step than free->
+  // occupied so unexplored territory keeps reading as low/unknown at coarse
+  // fidelity instead of as a phantom obstacle.
   const auto unknown = voxelcodec_ros::occupancy_to_embedded(-1);
   const auto free = voxelcodec_ros::occupancy_to_embedded(0);
   const auto occupied = voxelcodec_ros::occupancy_to_embedded(100);
-  const auto dist_to_free = unknown > free ? unknown - free : free - unknown;
-  const auto dist_to_occupied = unknown > occupied ? unknown - occupied : occupied - unknown;
-  EXPECT_LE(
-    dist_to_free > dist_to_occupied ? dist_to_free - dist_to_occupied :
-    dist_to_occupied - dist_to_free,
-    2U);
+  const auto dist_unknown_to_free = free > unknown ? free - unknown : unknown - free;
+  const auto dist_free_to_occupied = occupied - free;
+  EXPECT_LT(dist_unknown_to_free * 10, dist_free_to_occupied);
 }
 
 TEST(TileScheduler, FloorDivRoundsTowardNegativeInfinity)

@@ -34,25 +34,20 @@ namespace
 // codec.hpp/haar_forward.hpp/types.hpp (see codec/VENDORED.md) because this
 // file already hand-duplicates the int8<->uint32 mapping rather than
 // including tile_scheduler.hpp/tile_reconstructor.hpp, so it's kept in sync
-// by hand like the rest of this vendored copy. Unknown sits at the embedded
-// range's midpoint (101) rather than adjacent to free, so unknown->free and
-// unknown->occupied produce comparably large steps -- see the real header
-// for the full rationale.
+// by hand like the rest of this vendored copy. Unknown stays adjacent to
+// free (not at the embedded range's midpoint) -- band_0 is a per-tile
+// average, and placing unknown further away lets an unexplored tile's
+// coarse reconstruction drift toward "medium occupied" -- see the real
+// header for the full rationale.
 std::uint32_t shift_to_uint32(std::int8_t v)
 {
-  if (v == -1) {
-    return 101U;
-  }
-  return static_cast<std::uint32_t>(v) * 2U;
+  return static_cast<std::uint32_t>(static_cast<int>(v) + 1);
 }
 
 std::int8_t unshift_from_uint32(std::uint32_t v)
 {
-  if (v == 101U) {
-    return -1;
-  }
-  const int known = static_cast<int>(v / 2U);
-  return static_cast<std::int8_t>(std::max(0, std::min(100, known)));
+  const int shifted = static_cast<int>(v) - 1;
+  return static_cast<std::int8_t>(std::max(-1, std::min(100, shifted)));
 }
 
 // Mirrors zigzag_varint_encode in voxelcodec_ros/haar_forward.hpp -- same

@@ -74,7 +74,7 @@ inline std::vector<std::uint8_t> zigzag_varint_encode(const std::vector<std::int
 // from variable-length packing itself vs. the zstd compression layered on
 // top of it (compression=none alone still leaves varint packing in place).
 // Haar lifting keeps coefficient magnitude close to the embedded-occupancy
-// input range (0..200, see occupancy_embedding.hpp) regardless of levels --
+// input range (0..101, see occupancy_embedding.hpp) regardless of levels --
 // it never explodes the way, say, a naive unbounded transform could -- so
 // int32 has ample headroom;
 // this doesn't defend against a pathological input that would overflow it,

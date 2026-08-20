@@ -68,16 +68,16 @@ std::vector<std::int8_t> make_occupancy(int w, int h, int seed = 0)
 
 TEST(TileReconstructor, EmbeddedToOccupancyRoundTripsOccupancyToEmbeddedRange)
 {
-  EXPECT_EQ(voxelcodec_ros::embedded_to_occupancy(101), -1);
-  EXPECT_EQ(voxelcodec_ros::embedded_to_occupancy(0), 0);
-  EXPECT_EQ(voxelcodec_ros::embedded_to_occupancy(200), 100);
+  EXPECT_EQ(voxelcodec_ros::embedded_to_occupancy(0), -1);
+  EXPECT_EQ(voxelcodec_ros::embedded_to_occupancy(1), 0);
+  EXPECT_EQ(voxelcodec_ros::embedded_to_occupancy(101), 100);
 }
 
 TEST(TileReconstructor, EmbeddedToOccupancyClampsOutOfRangeValues)
 {
-  // Values beyond the encoder's legitimate {0,2,...,200} ∪ {101} range (e.g.
-  // from a corrupted/foreign payload) must still clamp into OccupancyGrid's
-  // valid [-1,100] range rather than wrapping or producing garbage.
+  // Values beyond the encoder's legitimate [0,101] range (e.g. from a
+  // corrupted/foreign payload) must still clamp into OccupancyGrid's valid
+  // [-1,100] range rather than wrapping or producing garbage.
   EXPECT_EQ(voxelcodec_ros::embedded_to_occupancy(5000), 100);
 }
 
@@ -176,6 +176,31 @@ TEST(TileReconstructor, PartialBandsProduceUpsampledCoarseReconstruction)
   EXPECT_EQ(grid->width, 4U);
   EXPECT_EQ(grid->height, 4U);
   EXPECT_EQ(grid->data.size(), 16U);
+}
+
+TEST(TileReconstructor, PartialReconstructionOfAnAllUnknownTileStaysLowNotMediumOccupied)
+{
+  // Regression guard for the occupancy_embedding.hpp bug where unknown was
+  // briefly placed at the numeric midpoint between free and occupied:
+  // band_0 (the only band available here) is a literal per-tile average of
+  // the embedded values, so a 100%-unexplored tile must still decode close
+  // to "unknown/low" at coarse fidelity, not drift toward a medium/high
+  // occupancy reading that looks like a phantom obstacle.
+  constexpr int levels = 2;
+  TileReconstructor reconstructor(levels);
+  reconstructor.ingest_manifest(manifest_metadata(4, 4, 4), Stamp{});
+
+  const std::vector<std::int8_t> all_unknown(16, -1);
+  const auto bands = encode_tile(all_unknown, 4, 4, levels, 0, 0, 4);
+  const auto error = reconstructor.ingest_band(0, bands[0].descriptor, bands[0].payload);
+  EXPECT_FALSE(error.has_value());
+
+  const auto grid = reconstructor.reconstruct();
+  ASSERT_TRUE(grid.has_value());
+  for (const std::int8_t v : grid->data) {
+    EXPECT_LE(v, 10) << "an unexplored tile's coarse reconstruction must not read as "
+                         "meaningfully occupied";
+  }
 }
 
 TEST(TileReconstructor, NonContiguousBandsStopAtFirstGap)
