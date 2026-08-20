@@ -70,9 +70,33 @@ fi
 declare -a BASELINE_BAGS=()
 declare -a VXCH_BAGS=()
 
+# Simulator runs (launch.sh) are written flat as
+# experiment_runs/<timestamp>_<condition>_<world>/bag -- one dir per whole
+# multi-robot run, not per robot. Real-hardware runs (launch_real_hardware.sh
+# / recover_metrics.sh) nest one dir per robot:
+# experiment_runs/<robot>/<timestamp>_<condition>_<robot>. run_bag_dir below
+# resolves a robot:run_dir pair against whichever layout it's actually in,
+# mirroring replay_gui.py's run_bag_dir().
+RUN_DIR_RE='^[0-9]{8}_[0-9]{6}_(baseline|vxch)_([[:alnum:]_]+)$'
+
+run_bag_dir() {
+  local robot=$1 run_dir=$2
+  if [[ -d "${RUNS_DIR}/${run_dir}" && "${run_dir}" =~ ${RUN_DIR_RE} ]]; then
+    echo "${RUNS_DIR}/${run_dir}/bag"
+  else
+    echo "${RUNS_DIR}/${robot}/${run_dir}/bag"
+  fi
+}
+
 for robot_dir in "${RUNS_DIR}"/*/; do
   [[ -d "${robot_dir}" ]] || continue
   robot="$(basename "${robot_dir}")"
+
+  # Flat simulator run dirs land here too (RUNS_DIR/*/ globs them the same
+  # as robot dirs) -- skip them as "robots" since they're runs, not robots.
+  if [[ "${robot}" =~ ${RUN_DIR_RE} ]]; then
+    continue
+  fi
 
   if [[ -n "${BASELINE_RUN_OVERRIDES[${robot}]:-}" ]]; then
     latest_baseline="${BASELINE_RUN_OVERRIDES[${robot}]}"
@@ -85,18 +109,43 @@ for robot_dir in "${RUNS_DIR}"/*/; do
     latest_vxch="$(find "${robot_dir}" -maxdepth 1 -type d -name "*_vxch_${robot}" -printf '%f\n' 2>/dev/null | sort | tail -1)"
   fi
 
-  if [[ -n "${latest_baseline}" && -d "${robot_dir}${latest_baseline}/bag" ]]; then
-    BASELINE_BAGS+=("${robot}:${robot_dir}${latest_baseline}/bag")
+  if [[ -n "${latest_baseline}" && -d "$(run_bag_dir "${robot}" "${latest_baseline}")" ]]; then
+    BASELINE_BAGS+=("${robot}:$(run_bag_dir "${robot}" "${latest_baseline}")")
     echo "baseline / ${robot}: ${latest_baseline}"
   else
     echo "baseline / ${robot}: no run found -- skipping" >&2
   fi
 
-  if [[ -n "${latest_vxch}" && -d "${robot_dir}${latest_vxch}/bag" ]]; then
-    VXCH_BAGS+=("${robot}:${robot_dir}${latest_vxch}/bag")
+  if [[ -n "${latest_vxch}" && -d "$(run_bag_dir "${robot}" "${latest_vxch}")" ]]; then
+    VXCH_BAGS+=("${robot}:$(run_bag_dir "${robot}" "${latest_vxch}")")
     echo "vxch     / ${robot}: ${latest_vxch}"
   else
     echo "vxch     / ${robot}: no run found -- skipping" >&2
+  fi
+done
+
+# Simulator runs: pick the latest flat run per condition (unless overridden),
+# using the world name captured from the dir name as its "robot" key.
+for entry in "${RUNS_DIR}"/*/; do
+  [[ -d "${entry}" ]] || continue
+  name="$(basename "${entry}")"
+  [[ "${name}" =~ ${RUN_DIR_RE} ]] || continue
+  [[ -d "${entry}bag" ]] || continue
+  condition="${BASH_REMATCH[1]}"
+  world="${BASH_REMATCH[2]}"
+
+  if [[ "${condition}" == "baseline" ]]; then
+    if [[ -n "${BASELINE_RUN_OVERRIDES[${world}]:-}" ]]; then
+      [[ "${BASELINE_RUN_OVERRIDES[${world}]}" == "${name}" ]] || continue
+    fi
+    BASELINE_BAGS+=("${world}:${entry}bag")
+    echo "baseline / ${world}: ${name}"
+  else
+    if [[ -n "${VXCH_RUN_OVERRIDES[${world}]:-}" ]]; then
+      [[ "${VXCH_RUN_OVERRIDES[${world}]}" == "${name}" ]] || continue
+    fi
+    VXCH_BAGS+=("${world}:${entry}bag")
+    echo "vxch     / ${world}: ${name}"
   fi
 done
 

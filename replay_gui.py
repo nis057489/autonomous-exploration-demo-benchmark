@@ -38,6 +38,39 @@ def in_container():
     return os.path.exists("/run/.containerenv")
 
 
+def run_bag_dir(robot, run_dir):
+    """Path to a run's bag/ dir. Simulator runs are flat
+    (experiment_runs/<run_dir>/bag); real-hardware runs nest under a robot
+    dir (experiment_runs/<robot>/<run_dir>/bag). replay_compare.sh resolves
+    overrides the same way -- see its RUN_DIR_RE-equivalent check."""
+    flat = os.path.join(RUNS_DIR, run_dir)
+    if os.path.isdir(flat) and RUN_DIR_RE.match(run_dir):
+        return os.path.join(flat, "bag")
+    return os.path.join(RUNS_DIR, robot, run_dir, "bag")
+
+
+TOPIC_NAME_RE = re.compile(r"^\s*name:\s*/([A-Za-z0-9_]+)/", re.MULTILINE)
+
+
+def robots_in_bag(bag_dir):
+    """Robot namespaces recorded in a bag, read straight from metadata.yaml
+    (no rosbag2_py needed -- this runs on the host, outside jazzy_env).
+    Real-hardware bags hold a single robot's own topics, so this returns
+    just that robot; simulator bags hold every robot's topics together in
+    one file (all robots launch in a single process, unlike separate
+    per-robot recorders on hardware), so this returns all of them --
+    needed so generate_comparison_figure.py, which expects one bag per
+    robot, gets a robot=bag_dir pair per robot instead of one for the
+    session's synthetic "world" key."""
+    metadata = os.path.join(bag_dir, "metadata.yaml")
+    try:
+        with open(metadata) as f:
+            text = f.read()
+    except OSError:
+        return []
+    return sorted(set(TOPIC_NAME_RE.findall(text)))
+
+
 def scan_runs():
     """Return {"baseline": [...], "vxch": [...]} of session dicts, newest
     first. Each session dict: {"ts": datetime, "label": str,
@@ -50,6 +83,23 @@ def scan_runs():
         robot_dir = os.path.join(RUNS_DIR, robot)
         if not os.path.isdir(robot_dir):
             continue
+
+        # Simulator runs (launch.sh) are written flat as
+        # experiment_runs/<timestamp>_<condition>_<world>/bag, one dir per
+        # whole multi-robot run rather than per robot. Treat the world name
+        # as a single "robot" so these still form sessions below.
+        m = RUN_DIR_RE.match(robot)
+        if m and os.path.isdir(os.path.join(robot_dir, "bag")):
+            ts_str, condition, world = m.groups()
+            try:
+                ts = datetime.strptime(ts_str, "%Y%m%d_%H%M%S")
+            except ValueError:
+                continue
+            entries[condition].append((ts, world, robot))
+            continue
+
+        # Real-hardware runs (launch_real_hardware.sh / recover_metrics.sh)
+        # nest one dir per robot: experiment_runs/<robot>/<timestamp>_<condition>_<robot>.
         for name in os.listdir(robot_dir):
             m = RUN_DIR_RE.match(name)
             if not m:
@@ -145,7 +195,16 @@ class ReplayGUI(tk.Tk):
         self.fig_proc = None
 
         sessions = scan_runs()
-        all_robots = sorted(os.listdir(RUNS_DIR)) if os.path.isdir(RUNS_DIR) else []
+        # Derived from the scanned sessions rather than os.listdir(RUNS_DIR):
+        # flat simulator run dirs (experiment_runs/<ts>_<condition>_<world>)
+        # aren't robot dirs, so listing RUNS_DIR directly would misreport
+        # each sim run as its own "missing" robot.
+        all_robots = sorted({
+            robot
+            for condition_sessions in sessions.values()
+            for session in condition_sessions
+            for robot in session["runs"]
+        })
 
         picker_frame = ttk.Frame(self, padding=10)
         picker_frame.pack(fill="both", expand=True)
@@ -297,10 +356,17 @@ class ReplayGUI(tk.Tk):
             return
 
         def bag_args(session):
-            return [
-                f"{robot}={os.path.join(RUNS_DIR, robot, run_dir, 'bag')}"
-                for robot, run_dir in session["runs"].items()
-            ]
+            args = []
+            for robot, run_dir in session["runs"].items():
+                bag_dir = run_bag_dir(robot, run_dir)
+                robots = robots_in_bag(bag_dir)
+                if robot in robots:
+                    args.append(f"{robot}={bag_dir}")
+                else:
+                    # Flat sim bag: its "robot" is a synthetic world key, not
+                    # a real namespace, so expand to one arg per actual robot.
+                    args.extend(f"{r}={bag_dir}" for r in robots)
+            return args
 
         os.makedirs(FIGURES_DIR, exist_ok=True)
         out_name = f"compare_{baseline_session['ts'].strftime('%Y%m%d_%H%M%S')}_vs_{vxch_session['ts'].strftime('%Y%m%d_%H%M%S')}.png"

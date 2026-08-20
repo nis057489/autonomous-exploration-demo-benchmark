@@ -51,7 +51,6 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
 import numpy as np
 from matplotlib.lines import Line2D
 
@@ -218,11 +217,7 @@ def plot_bandwidth(ax, results, byte_index, title, ylabel):
                 transform=ax.transAxes, ha="center", va="top",
                 fontsize=10.5, color=TEXT_SECONDARY, style="italic")
 
-    if totals[0] > 0 and totals[1] > 0 and max(totals) / min(totals) > 8:
-        ax.set_yscale("log")
-        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
-    else:
-        ax.set_ylim(0, max(totals) * 1.25 if max(totals) > 0 else 1)
+    ax.set_ylim(0, max(totals) * 1.25 if max(totals) > 0 else 1)
 
     ax.set_xticks(x)
     ax.set_xticklabels([DISPLAY_NAMES[c] for c in CONDITIONS], fontsize=11, color=TEXT_PRIMARY, fontweight="bold")
