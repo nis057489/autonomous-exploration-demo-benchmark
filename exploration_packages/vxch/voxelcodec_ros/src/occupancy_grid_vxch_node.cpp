@@ -99,9 +99,14 @@ public:
     // on every SLAM map_update_interval tick. "simple" exists so a vxch-vs-baseline comparison
     // can isolate what the wavelet/tiling encoding itself buys, independent of whether vxch's
     // scheduling is also doing extra work baseline never does.
+    // "rd" = rate-distortion: same change detection as "smart", but instead of round-robin
+    // fairness across tiles, scores every pending band by estimated distortion-reduction-per-
+    // byte (Haar coefficient energy / payload size) and drains highest score first across ALL
+    // queued tiles at once, with wait-time aging so a chronically low-score band still can't
+    // starve forever -- see TileScheduler::take_pending_bands_rd.
     schedule_mode_ = declare_parameter<std::string>("schedule_mode", "smart");
-    if (schedule_mode_ != "smart" && schedule_mode_ != "simple") {
-      throw std::runtime_error("schedule_mode must be 'smart' or 'simple'");
+    if (schedule_mode_ != "smart" && schedule_mode_ != "simple" && schedule_mode_ != "rd") {
+      throw std::runtime_error("schedule_mode must be 'smart', 'simple', or 'rd'");
     }
 
     // Sending used to happen directly inside on_map(), so a robot's send *opportunities* were

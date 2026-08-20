@@ -20,17 +20,11 @@
 
 #include "voxelcodec_ros/codec.hpp"
 #include "voxelcodec_ros/ddil_stale_epoch.hpp"
+#include "voxelcodec_ros/occupancy_embedding.hpp"
 #include "voxelcodec_ros/types.hpp"
 
 namespace voxelcodec_ros
 {
-
-// Reverse the uint32 shift applied by the encoder: 0→-1, 1→0, 101→100, etc.
-inline std::int8_t unshift_from_uint32(std::uint32_t v)
-{
-  const int shifted = static_cast<int>(v) - 1;
-  return static_cast<std::int8_t>(std::max(-1, std::min(100, shifted)));
-}
 
 // Zigzag-varint decode (mirrors zigzag_varint_encode in haar_forward.hpp).
 inline std::vector<std::int64_t> zigzag_varint_decode(
@@ -331,7 +325,7 @@ public:
           if (dst_col < 0 || dst_col >= static_cast<long long>(geometry_.grid_width)) {continue;}
           grid_data[static_cast<std::size_t>(dst_row) * geometry_.grid_width +
             static_cast<std::size_t>(dst_col)] =
-            unshift_from_uint32(recon.values[r_src * w_prime + c_src]);
+            embedded_to_occupancy(recon.values[r_src * w_prime + c_src]);
         }
       }
       any_tile_rendered = true;

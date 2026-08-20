@@ -73,9 +73,10 @@ inline std::vector<std::uint8_t> zigzag_varint_encode(const std::vector<std::int
 // zigzag_varint_encode, for isolating how much of vxch's bandwidth win comes
 // from variable-length packing itself vs. the zstd compression layered on
 // top of it (compression=none alone still leaves varint packing in place).
-// Haar lifting keeps coefficient magnitude close to the shifted-occupancy
-// input range (0..101) regardless of levels -- it never explodes the way,
-// say, a naive unbounded transform could -- so int32 has ample headroom;
+// Haar lifting keeps coefficient magnitude close to the embedded-occupancy
+// input range (0..200, see occupancy_embedding.hpp) regardless of levels --
+// it never explodes the way, say, a naive unbounded transform could -- so
+// int32 has ample headroom;
 // this doesn't defend against a pathological input that would overflow it,
 // same as the rest of this codec's integer arithmetic.
 inline std::vector<std::uint8_t> fixed_width_encode(const std::vector<std::int64_t> & coeffs)
@@ -195,6 +196,16 @@ inline std::vector<EncodedChannel> make_haar_bands(
 
   for (int k = 0; k < total_bands; ++k) {
     const auto & coeffs = band_coeffs[static_cast<std::size_t>(k)];
+
+    // Σcoefficient² -- exact contribution of this band to squared
+    // reconstruction error if withheld (Parseval's theorem; Haar is
+    // orthonormal). double rather than int64 since it's only ever used as a
+    // priority score, never decoded, so there's no reason to risk overflow.
+    double l2_energy = 0.0;
+    for (const std::int64_t coeff : coeffs) {
+      l2_energy += static_cast<double>(coeff) * static_cast<double>(coeff);
+    }
+
     std::vector<std::uint8_t> raw_payload =
       use_varint ? zigzag_varint_encode(coeffs) : fixed_width_encode(coeffs);
     std::vector<std::uint8_t> payload = compress_payload(compression, raw_payload);
@@ -219,6 +230,7 @@ inline std::vector<EncodedChannel> make_haar_bands(
     EncodedChannel ec;
     ec.descriptor = std::move(desc);
     ec.payload = std::move(payload);
+    ec.l2_energy = l2_energy;
     bands.push_back(std::move(ec));
   }
 

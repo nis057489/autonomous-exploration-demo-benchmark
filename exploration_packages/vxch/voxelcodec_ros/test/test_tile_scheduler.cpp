@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "voxelcodec_ros/occupancy_embedding.hpp"
 #include "voxelcodec_ros/tile_scheduler.hpp"
 
 namespace
@@ -29,11 +30,33 @@ std::vector<std::int8_t> make_grid(int w, int h, int seed = 0)
 
 }  // namespace
 
-TEST(TileScheduler, ShiftToUint32)
+TEST(TileScheduler, OccupancyEmbeddingIsABijectionOverAllLegalValues)
 {
-  EXPECT_EQ(voxelcodec_ros::shift_to_uint32(-1), 0U);
-  EXPECT_EQ(voxelcodec_ros::shift_to_uint32(0), 1U);
-  EXPECT_EQ(voxelcodec_ros::shift_to_uint32(100), 101U);
+  std::set<std::uint32_t> seen;
+  for (int v = -1; v <= 100; ++v) {
+    const auto e = voxelcodec_ros::occupancy_to_embedded(static_cast<std::int8_t>(v));
+    EXPECT_TRUE(seen.insert(e).second) << "collision at v=" << v << " -> " << e;
+    EXPECT_EQ(voxelcodec_ros::embedded_to_occupancy(e), v) << "round-trip failed for v=" << v;
+  }
+}
+
+TEST(TileScheduler, OccupancyEmbeddingPlacesUnknownAtTheMidpointNotAdjacentToFree)
+{
+  // Unknown must sit roughly equidistant from both known extremes, unlike
+  // the old v+1 mapping (unknown=0, free=1, occupied=101), where
+  // unknown->free was a magnitude-1 step and unknown->occupied was
+  // magnitude-101 -- a ~100x mismatch that made a coefficient-energy-based
+  // priority score treat newly-discovered free space as far less
+  // informative than an occupied-state flip, for no principled reason.
+  const auto unknown = voxelcodec_ros::occupancy_to_embedded(-1);
+  const auto free = voxelcodec_ros::occupancy_to_embedded(0);
+  const auto occupied = voxelcodec_ros::occupancy_to_embedded(100);
+  const auto dist_to_free = unknown > free ? unknown - free : free - unknown;
+  const auto dist_to_occupied = unknown > occupied ? unknown - occupied : occupied - unknown;
+  EXPECT_LE(
+    dist_to_free > dist_to_occupied ? dist_to_free - dist_to_occupied :
+    dist_to_occupied - dist_to_free,
+    2U);
 }
 
 TEST(TileScheduler, FloorDivRoundsTowardNegativeInfinity)
@@ -353,4 +376,80 @@ TEST(TileScheduler, IngestGridZeroSizeGridIsANoOp)
   const auto result = scheduler.ingest_grid({}, 0, 0, 1.0);
   EXPECT_EQ(result.total_changed, 0U);
   EXPECT_FALSE(scheduler.has_pending());
+}
+
+TEST(TileScheduler, RdModePrefersHigherEnergyTileOverFifoOrder)
+{
+  // 8x4 grid, tile_size_cells=4 -> tiles (0,0) and (0,1), inserted into
+  // tile_queue_ in that order (row-major scan), so round-robin/FIFO would
+  // hand out (0,0) first. Perturb (0,0) with a tiny 1-cell delta and (0,1)
+  // with a much larger whole-column delta -- rd mode must pick (0,1) first
+  // despite it being LATER in insertion order, since only score, not queue
+  // position, decides.
+  TileScheduler scheduler(4.0, 1, "none", true, "rd");
+  auto grid = make_grid(8, 4);
+  scheduler.ingest_grid(grid, 8, 4, 1.0);
+  scheduler.take_pending_bands(1000, -1);  // drain fully
+
+  grid[0] = static_cast<std::int8_t>(grid[0] == 0 ? 1 : 0);  // tile (0,0): tiny delta
+  for (int r = 0; r < 4; ++r) {  // tile (0,1): whole column flips to the opposite extreme
+    grid[static_cast<std::size_t>(r * 8 + 4)] = 100;
+  }
+  scheduler.ingest_grid(grid, 8, 4, 1.0);
+
+  const auto scheduled = scheduler.take_pending_bands(1, 1);
+  ASSERT_EQ(scheduled.size(), 1U);
+  EXPECT_EQ(scheduled[0].tile, (TileKey{0, 1}));
+}
+
+TEST(TileScheduler, RdModeRespectsMaxBandsAndMaxTilesCaps)
+{
+  // 12x4 grid, tile_size_cells=4 -> three tiles; levels=1 -> 2 bands/tile.
+  TileScheduler scheduler(4.0, 1, "none", true, "rd");
+  scheduler.ingest_grid(make_grid(12, 4), 12, 4, 1.0);
+
+  const auto scheduled = scheduler.take_pending_bands(/*max_bands_per_update=*/1, /*max_tiles_per_update=*/2);
+  std::set<TileKey> tiles_serviced;
+  for (const auto & item : scheduled) {tiles_serviced.insert(item.tile);}
+  EXPECT_EQ(scheduled.size(), 2U);       // 1 band/tile x 2 tiles
+  EXPECT_EQ(tiles_serviced.size(), 2U);  // never more than max_tiles_per_update distinct tiles
+  EXPECT_TRUE(scheduler.has_pending());  // third tile, and each serviced tile's 2nd band, remain
+}
+
+TEST(TileScheduler, RdModeAgingLetsAWaitingLowScoreBandEventuallyWinOverFreshHighScoreOnes)
+{
+  // Same starvation shape as ddil_proxy_logic.hpp's BandQueue bug this
+  // mirrors: a "hot" tile that keeps producing fresh, higher-score content
+  // every tick must not be able to indefinitely preempt a "cold" tile's
+  // single band that's just sitting there waiting.
+  TileScheduler scheduler(4.0, 1, "none", true, "rd");
+  auto grid = make_grid(8, 4);
+  scheduler.ingest_grid(grid, 8, 4, 1.0);
+  scheduler.take_pending_bands(1000, -1);  // drain fully
+
+  // Cold tile (0,0): one whole-column delta, queued once, then left alone.
+  for (int r = 0; r < 4; ++r) {
+    grid[static_cast<std::size_t>(r * 8)] = 80;
+  }
+  scheduler.ingest_grid(grid, 8, 4, 1.0);
+
+  bool cold_tile_won = false;
+  bool toggle = false;
+  for (int tick = 0; tick < 200 && !cold_tile_won; ++tick) {
+    // Hot tile (0,1): re-perturbed to a slightly larger delta every tick, so
+    // its raw score is always somewhat higher than the cold tile's -- the
+    // only thing that can let the cold tile through is aging.
+    toggle = !toggle;
+    for (int r = 0; r < 4; ++r) {
+      grid[static_cast<std::size_t>(r * 8 + 4)] = toggle ? 100 : 0;
+    }
+    scheduler.ingest_grid(grid, 8, 4, 1.0);
+
+    const auto scheduled = scheduler.take_pending_bands(1, 1);
+    ASSERT_EQ(scheduled.size(), 1U);
+    if (scheduled[0].tile == (TileKey{0, 0})) {
+      cold_tile_won = true;
+    }
+  }
+  EXPECT_TRUE(cold_tile_won) << "aging never let the waiting low-score band win";
 }

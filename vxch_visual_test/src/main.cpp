@@ -41,6 +41,7 @@
 
 #include "voxelcodec_ros/codec.hpp"
 #include "voxelcodec_ros/haar_forward.hpp"
+#include "voxelcodec_ros/occupancy_embedding.hpp"
 #include "voxelcodec_ros/types.hpp"
 
 #include "grid_io.hpp"
@@ -52,19 +53,6 @@ using vxch_test::SyntheticGrid;
 
 namespace
 {
-
-// Same int8 <-> uint32 shift occupancy_grid_vxch_node.cpp / vxch_occupancy_grid_node.cpp
-// use, so the Haar pyramid never has to represent a negative "unknown" value.
-std::uint32_t shift_to_uint32(std::int8_t v)
-{
-  return static_cast<std::uint32_t>(static_cast<int>(v) + 1);
-}
-
-std::int8_t unshift_from_uint32(std::uint32_t v)
-{
-  const int shifted = static_cast<int>(v) - 1;
-  return static_cast<std::int8_t>(std::max(-1, std::min(100, shifted)));
-}
 
 // Mirrors zigzag_varint_encode in voxelcodec_ros/haar_forward.hpp (the
 // decode side lives in vxch_occupancy_grid_node.cpp, not the shared codec
@@ -282,7 +270,7 @@ int cmd_encode(const ArgMap & args)
       for (int r = 0; r < th; ++r) {
         for (int c = 0; c < tw; ++c) {
           const std::size_t src = static_cast<std::size_t>(row0 + r) * grid_w + (col0 + c);
-          values[static_cast<std::size_t>(r) * tw + c] = shift_to_uint32(grid.data[src]);
+          values[static_cast<std::size_t>(r) * tw + c] = occupancy_to_embedded(grid.data[src]);
         }
       }
 
@@ -499,7 +487,7 @@ int cmd_step(const ArgMap & args)
         const std::size_t dst_col = col0 + static_cast<std::size_t>(c);
         if (dst_col >= grid_width) {continue;}
         receiver_data[dst_row * grid_width + dst_col] =
-          unshift_from_uint32(recon.values[r_src * w_prime + c_src]);
+          embedded_to_occupancy(recon.values[r_src * w_prime + c_src]);
       }
     }
   }

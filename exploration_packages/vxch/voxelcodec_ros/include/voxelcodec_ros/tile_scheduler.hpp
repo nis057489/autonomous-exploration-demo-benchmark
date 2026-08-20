@@ -21,17 +21,11 @@
 #include <vector>
 
 #include "voxelcodec_ros/haar_forward.hpp"
+#include "voxelcodec_ros/occupancy_embedding.hpp"
 #include "voxelcodec_ros/types.hpp"
 
 namespace voxelcodec_ros
 {
-
-// Shift int8 occupancy value to non-negative uint32 for Haar encoding.
-// -1 (unknown) → 0, 0 (free) → 1, 100 (occupied) → 101, etc.
-inline std::uint32_t shift_to_uint32(std::int8_t v)
-{
-  return static_cast<std::uint32_t>(static_cast<int>(v) + 1);
-}
 
 // (tile_row, tile_col) in the tile grid, row = along height, col = along width.
 // World-anchored (see compute_axis_tile_spans below), so these are stable
@@ -91,9 +85,12 @@ inline std::vector<AxisTileSpan> compute_axis_tile_spans(
 
 // Splits an occupancy grid into tile_size_m x tile_size_m tiles, each with
 // its own independent Haar pyramid, fingerprints each tile's bands to detect
-// real content changes, and schedules changed bands for sending with
-// round-robin fairness across tiles (and, in "smart" mode, within a tile's
-// own bands too). See occupancy_grid_vxch_node.cpp's on_map()/
+// real content changes, and schedules changed bands for sending. "smart" and
+// "simple" use round-robin fairness across tiles (and, in "smart" mode,
+// least-recently-sent-first within a tile); "rd" instead scores every
+// pending band by estimated distortion-reduction-per-byte and drains highest
+// score first across ALL queued tiles at once -- see take_pending_bands_rd
+// for the rationale. See occupancy_grid_vxch_node.cpp's on_map()/
 // send_pending_bands() comments for the full rationale -- this class is an
 // extraction of that logic, unchanged, so the ROS Node wrapper can declare
 // parameters/publishers/logging around it instead of interleaving them.
@@ -164,7 +161,7 @@ public:
 
     std::vector<std::uint32_t> values(N);
     for (std::size_t i = 0; i < N; ++i) {
-      values[i] = shift_to_uint32(grid_values[i]);
+      values[i] = occupancy_to_embedded(grid_values[i]);
     }
 
     // Round each axis' origin/resolution once (not per cell) to the world-cell
@@ -260,6 +257,10 @@ public:
       return out;
     }
 
+    if (schedule_mode_ == "rd") {
+      return take_pending_bands_rd(max_bands_per_update, max_tiles_per_update);
+    }
+
     const int tiles_this_tick = max_tiles_per_update < 0 ?
       static_cast<int>(tile_queue_.size()) :
       std::min(max_tiles_per_update, static_cast<int>(tile_queue_.size()));
@@ -321,6 +322,102 @@ public:
   int tile_size_cells() const {return tile_size_cells_;}
 
 private:
+  // "rd" (rate-distortion) selection: unlike the round-robin path above,
+  // this scores every currently-pending (tile, band) at once and drains
+  // highest score first, so a hot tile's high-value band can outrank a
+  // quiet tile's low-value one instead of waiting a fixed turn behind it.
+  //
+  // score = l2_energy / bytes-on-the-wire. Haar is an orthonormal
+  // transform, so by Parseval's theorem a band's coefficient energy
+  // (Σcoefficient², computed in make_haar_bands while it still has the raw
+  // coefficients -- see EncodedChannel::l2_energy) is exactly that band's
+  // contribution to squared reconstruction error if it's withheld. Dividing
+  // by payload bytes turns that into "distortion reduction per byte sent,"
+  // the same bit-allocation principle JPEG2000/EZW use to decide which
+  // wavelet coefficients earn their place in a byte budget first.
+  //
+  // Pure greedy-by-score would starve a tile whose bands are always
+  // low-energy relative to whatever else is currently pending -- the same
+  // failure mode BandQueue had in ddil_proxy_logic.hpp before it grew
+  // wait-time aging (see that file's history). This reuses the same idea:
+  // a band's effective score grows with how long it's gone since its last
+  // send (via the existing last_sent_seq_/send_seq_counter_ bookkeeping
+  // "smart" mode already relies on), so an ever-losing candidate eventually
+  // outscores anything, guaranteeing it can't wait forever.
+  std::vector<ScheduledBand> take_pending_bands_rd(int max_bands_per_update, int max_tiles_per_update)
+  {
+    struct Candidate
+    {
+      TileKey tile;
+      int band_index;
+      double effective_score;
+    };
+
+    std::vector<Candidate> candidates;
+    for (const auto & key : tile_queue_) {
+      auto tile_it = pending_by_tile_.find(key);
+      if (tile_it == pending_by_tile_.end()) {
+        continue;
+      }
+      const auto & last_sent = last_sent_seq_[key];
+      for (const auto & [band_idx, channel] : tile_it->second) {
+        const double bytes = static_cast<double>(std::max<std::size_t>(1, channel.payload.size()));
+        const double raw_score = channel.l2_energy / bytes;
+
+        auto sent_it = last_sent.find(band_idx);
+        const std::uint64_t last_seq = (sent_it == last_sent.end()) ? 0 : sent_it->second;
+        const double wait = static_cast<double>(send_seq_counter_ - last_seq);
+        candidates.push_back({key, band_idx, raw_score * (1.0 + wait)});
+      }
+    }
+
+    std::sort(
+      candidates.begin(), candidates.end(),
+      [](const Candidate & a, const Candidate & b) {return a.effective_score > b.effective_score;});
+
+    std::map<TileKey, int> taken_per_tile;
+    std::set<TileKey> tiles_touched;
+    std::vector<ScheduledBand> out;
+    for (const auto & c : candidates) {
+      const bool tile_already_touched = tiles_touched.count(c.tile) > 0;
+      if (!tile_already_touched && max_tiles_per_update >= 0 &&
+        static_cast<int>(tiles_touched.size()) >= max_tiles_per_update)
+      {
+        continue;  // would exceed this tick's distinct-tile cap
+      }
+      int & taken = taken_per_tile[c.tile];
+      if (taken >= max_bands_per_update) {
+        continue;  // this tile already got its max_bands_per_update turn
+      }
+
+      auto tile_it = pending_by_tile_.find(c.tile);
+      auto band_it = tile_it->second.find(c.band_index);
+      EncodedChannel channel = std::move(band_it->second);
+      tile_it->second.erase(band_it);
+
+      last_sent_seq_[c.tile][c.band_index] = ++send_seq_counter_;
+      ++taken;
+      tiles_touched.insert(c.tile);
+      out.push_back(ScheduledBand{c.tile, c.band_index, std::move(channel)});
+    }
+
+    // Drop tiles that were fully drained; anything left (skipped by a cap
+    // above, or never a candidate) stays queued in its prior relative order.
+    std::deque<TileKey> remaining;
+    for (const auto & key : tile_queue_) {
+      auto tile_it = pending_by_tile_.find(key);
+      if (tile_it == pending_by_tile_.end() || tile_it->second.empty()) {
+        pending_by_tile_.erase(key);
+        tiles_in_queue_.erase(key);
+      } else {
+        remaining.push_back(key);
+      }
+    }
+    tile_queue_ = std::move(remaining);
+
+    return out;
+  }
+
   double tile_size_m_;
   int haar_levels_;
   std::string compression_;

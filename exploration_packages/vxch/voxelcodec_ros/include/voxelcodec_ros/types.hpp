@@ -82,6 +82,13 @@ namespace voxelcodec_ros
   {
     ChannelDescriptor descriptor;
     std::vector<std::uint8_t> payload;
+    // Sum of squared Haar coefficients for this band (set by make_haar_bands,
+    // 0 for non-Haar channels) -- by Parseval's theorem this is exactly the
+    // band's contribution to squared reconstruction error if withheld, used
+    // by TileScheduler's "rd" mode as a distortion-reduction-per-byte send
+    // priority. Sender-side-only bookkeeping: not part of the wire format,
+    // a receiver never needs it.
+    double l2_energy{0.0};
   };
 
   struct Archive

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "voxelcodec_ros/haar_forward.hpp"
+#include "voxelcodec_ros/occupancy_embedding.hpp"
 #include "voxelcodec_ros/tile_reconstructor.hpp"
 
 namespace
@@ -14,16 +15,9 @@ namespace
 using voxelcodec_ros::ChannelDescriptor;
 using voxelcodec_ros::EncodedChannel;
 using voxelcodec_ros::Metadata;
+using voxelcodec_ros::occupancy_to_embedded;
 using voxelcodec_ros::Stamp;
 using voxelcodec_ros::TileReconstructor;
-
-// Mirrors occupancy_grid_vxch_node's shift_to_uint32 (kept private to that
-// header's TileScheduler, so duplicated here for building encoder-side test
-// fixtures) -- the inverse of unshift_from_uint32 under test.
-std::uint32_t shift_to_uint32(std::int8_t v)
-{
-  return static_cast<std::uint32_t>(static_cast<int>(v) + 1);
-}
 
 Metadata manifest_metadata(
   std::uint32_t width, std::uint32_t height, int tile_size_cells, double resolution = 1.0,
@@ -48,7 +42,7 @@ std::vector<EncodedChannel> encode_tile(
   int tile_row, int tile_col, int tile_size_cells)
 {
   std::vector<std::uint32_t> values(occupancy.size());
-  for (std::size_t i = 0; i < occupancy.size(); ++i) {values[i] = shift_to_uint32(occupancy[i]);}
+  for (std::size_t i = 0; i < occupancy.size(); ++i) {values[i] = occupancy_to_embedded(occupancy[i]);}
   auto bands = voxelcodec_ros::make_haar_bands(
     values, static_cast<std::size_t>(width), static_cast<std::size_t>(height), levels, "none");
   for (auto & band : bands) {
@@ -72,19 +66,19 @@ std::vector<std::int8_t> make_occupancy(int w, int h, int seed = 0)
 
 }  // namespace
 
-TEST(TileReconstructor, UnshiftFromUint32RoundTripsShiftToUint32Range)
+TEST(TileReconstructor, EmbeddedToOccupancyRoundTripsOccupancyToEmbeddedRange)
 {
-  EXPECT_EQ(voxelcodec_ros::unshift_from_uint32(0), -1);
-  EXPECT_EQ(voxelcodec_ros::unshift_from_uint32(1), 0);
-  EXPECT_EQ(voxelcodec_ros::unshift_from_uint32(101), 100);
+  EXPECT_EQ(voxelcodec_ros::embedded_to_occupancy(101), -1);
+  EXPECT_EQ(voxelcodec_ros::embedded_to_occupancy(0), 0);
+  EXPECT_EQ(voxelcodec_ros::embedded_to_occupancy(200), 100);
 }
 
-TEST(TileReconstructor, UnshiftFromUint32ClampsOutOfRangeValues)
+TEST(TileReconstructor, EmbeddedToOccupancyClampsOutOfRangeValues)
 {
-  // Values beyond the encoder's legitimate [0,101] range (e.g. from a
-  // corrupted/foreign payload) must still clamp into OccupancyGrid's valid
-  // [-1,100] range rather than wrapping or producing garbage.
-  EXPECT_EQ(voxelcodec_ros::unshift_from_uint32(5000), 100);
+  // Values beyond the encoder's legitimate {0,2,...,200} ∪ {101} range (e.g.
+  // from a corrupted/foreign payload) must still clamp into OccupancyGrid's
+  // valid [-1,100] range rather than wrapping or producing garbage.
+  EXPECT_EQ(voxelcodec_ros::embedded_to_occupancy(5000), 100);
 }
 
 TEST(TileReconstructor, IngestManifestRejectsMissingGridDimensions)
@@ -397,7 +391,7 @@ TEST(TileReconstructor, IngestBandFixedWidthEncodingRoundTrips)
 
   const auto occupancy = make_occupancy(4, 4, /*seed=*/1);
   std::vector<std::uint32_t> values(occupancy.size());
-  for (std::size_t i = 0; i < occupancy.size(); ++i) {values[i] = shift_to_uint32(occupancy[i]);}
+  for (std::size_t i = 0; i < occupancy.size(); ++i) {values[i] = occupancy_to_embedded(occupancy[i]);}
   auto bands = voxelcodec_ros::make_haar_bands(
     values, 4, 4, levels, "none", /*use_varint=*/false);
   for (auto & band : bands) {
