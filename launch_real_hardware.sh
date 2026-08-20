@@ -287,7 +287,7 @@ fi
 # If you have a robot-specific nav params file, point NAVIGATION_PARAMS at it instead.
 NAVIGATION_PARAMS="${PROJECT_ROOT}/simulation/Week-7-8-ROS2-Navigation/bme_ros2_navigation/config/navigation_hw.yaml"
 SLAM_PARAMS="${PROJECT_ROOT}/simulation/Week-7-8-ROS2-Navigation/bme_ros2_navigation/config/slam_toolbox_mapping_hw.yaml"
-EXPLORE_CONFIG="${PROJECT_ROOT}/config/frontier_exploration_ros2/config_visit_once.yaml"
+EXPLORE_CONFIG="${PROJECT_ROOT}/config/frontier_exploration_ros2/config.yaml"
 
 TRACKER_PARAMS="${PROJECT_ROOT}/install/rviz_autonomous_exploration_benchmark/share/rviz_autonomous_exploration_benchmark/config/frontier_path_tracker.yaml"
 if [[ ! -f "${TRACKER_PARAMS}" ]]; then
@@ -489,7 +489,7 @@ cleanup_existing_nav2
 # If you have a robot-specific nav params file, point NAVIGATION_PARAMS at it instead.
 NAVIGATION_PARAMS="${PROJECT_ROOT}/simulation/Week-7-8-ROS2-Navigation/bme_ros2_navigation/config/navigation_hw.yaml"
 SLAM_PARAMS="${PROJECT_ROOT}/simulation/Week-7-8-ROS2-Navigation/bme_ros2_navigation/config/slam_toolbox_mapping_hw.yaml"
-EXPLORE_CONFIG="${PROJECT_ROOT}/config/frontier_exploration_ros2/config_visit_once.yaml"
+EXPLORE_CONFIG="${PROJECT_ROOT}/config/frontier_exploration_ros2/config.yaml"
 
 TRACKER_PARAMS="${PROJECT_ROOT}/install/rviz_autonomous_exploration_benchmark/share/rviz_autonomous_exploration_benchmark/config/frontier_path_tracker.yaml"
 if [[ ! -f "${TRACKER_PARAMS}" ]]; then
@@ -578,7 +578,7 @@ echo "frontier_path_tracker.py started (pid=${TRACKER_PID})."
 
 # ── 4) Frontier exploration ───────────────────────────────────────────────────
 
-EXPLORE_CONFIG="${PROJECT_ROOT}/config/frontier_exploration_ros2/config_visit_once.yaml"
+EXPLORE_CONFIG="${PROJECT_ROOT}/config/frontier_exploration_ros2/config.yaml"
 echo "Starting frontier_exploration_ros2 (params=${EXPLORE_CONFIG})..."
 ros2 launch frontier_exploration_ros2 frontier_explorer.launch.py \
   use_sim_time:=false \
