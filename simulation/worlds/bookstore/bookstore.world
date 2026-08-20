@@ -10,8 +10,8 @@
     <atmosphere type='adiabatic'/>
     <physics name='default_physics' default='false' type='ode'>
       <max_step_size>0.01</max_step_size>
-      <real_time_factor>1</real_time_factor>
-      <real_time_update_rate>200</real_time_update_rate>
+      <real_time_factor>0</real_time_factor>
+      <real_time_update_rate>0</real_time_update_rate>
     </physics>
     <plugin name='gz::sim::systems::Physics' filename='gz-sim-physics-system'/>
     <plugin name='gz::sim::systems::Sensors' filename='gz-sim-sensors-system'>
