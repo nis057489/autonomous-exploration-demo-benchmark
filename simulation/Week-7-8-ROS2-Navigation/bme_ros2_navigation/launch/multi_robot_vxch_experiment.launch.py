@@ -299,31 +299,34 @@ def _create_all_actions(context):
                         "schedule_mode": schedule_mode,
                         "use_sim_time": use_sim_time,
                     }],
-                    # In tc mode this runs inside the robot's own netns so its
-                    # output genuinely crosses that robot's tc-shaped veth before
-                    # any peer can reach it. Static peers list MAIN_NETNS_IP (to
-                    # discover /{name}/map's publisher, slam_toolbox, which stays
-                    # in the main netns) AND every other robot's netns IP --
-                    # discovery relying solely on each peer's own
-                    # ddil_proxy_{peer}_from_{name} initiating the SPDP handshake
-                    # was a real race: whichever robot's one-directional
-                    # announce/response didn't land in time (contention, timing)
-                    # ended up permanently undiscoverable, no matter how long
-                    # IMPAIRMENT_DELAY_S waited -- it was never really about
-                    # elapsed time, just whether a single attempt happened to
-                    # succeed. Having the encoder also announce toward every
-                    # consumer makes each pairing attempt discovery from both
-                    # directions instead of depending on one.
-                    **_netns_kwargs(
-                        i, [MAIN_NETNS_IP] + [_netns_ip(p) for p in range(num_robots) if p != i]),
+                    # Deliberately NOT netns'd, even in tc mode: this used to run
+                    # inside the robot's own netns on the theory that its own
+                    # uplink should cross that robot's tc-shaped veth too (a
+                    # "two-hop" -- source uplink + receiver downlink -- emulation
+                    # of a real wireless link). In practice that made this node's
+                    # subscription to /{name}/map (published by slam_toolbox,
+                    # which stays in the main netns) cross the SAME shaped,
+                    # bandwidth-limited link its own encoded output was competing
+                    # for -- so once real throttling kicked in, the /map
+                    # subscription's own RELIABLE QoS liveliness traffic starved
+                    # right alongside the deliberately-throttled band data, the
+                    # subscription silently died, and (being on the same
+                    # congested link) never rediscovered. That's not modeling
+                    # anything real: /map never crosses an actual wireless link
+                    # on hardware, only the *encoded* band output does, and only
+                    # ddil_proxy (below) needs to sit on the genuinely shaped
+                    # link for that. Running the encoder here in the main netns
+                    # keeps it off the shaped link entirely, at the cost of no
+                    # longer emulating the source robot's own uplink constraint --
+                    # acceptable given this is a ROS-overhead-inclusive
+                    # integration test, not a bit-exact physical-layer model.
                 )
             )
     elif is_tc:
-        # Baseline mode has no encode step, but still needs each robot's own map
-        # to genuinely originate from inside that robot's netns (not the main
-        # netns) so a peer's downlink pull crosses BOTH robots' tc-shaped links,
-        # matching vxch mode's two-hop fidelity (source robot's uplink, then the
-        # consuming robot's downlink) instead of only one.
+        # Baseline mode has no encode step, just a rename to /{name}/map_uplink
+        # so ddil_proxy below has a stable topic name to pull regardless of
+        # mode. See the vxch encoder's comment above for why this deliberately
+        # stays OUT of the robot's own netns.
         for i, name in enumerate(robot_names):
             actions.append(
                 Node(
@@ -333,10 +336,6 @@ def _create_all_actions(context):
                     output="screen",
                     arguments=[f"/{name}/map", f"/{name}/map_uplink"],
                     parameters=[{"use_sim_time": use_sim_time}],
-                    # See the vxch encoder's identical comment above -- same
-                    # bidirectional-discovery fix applies here.
-                    **_netns_kwargs(
-                        i, [MAIN_NETNS_IP] + [_netns_ip(p) for p in range(num_robots) if p != i]),
                 )
             )
 
@@ -393,11 +392,15 @@ def _create_all_actions(context):
                         "relay_topics": relay_topics,
                     }],
                     # Runs inside X's own netns (this is X's own onboard relay
-                    # process): needs peer Y's netns to reach Y's encoder
-                    # output, and the main netns so this node's own output
-                    # (consumed by vxch_decoder_{X}_from_{Y}, which stays in
-                    # the main netns) is discoverable there.
-                    **_netns_kwargs(i, [_netns_ip(peer_index), MAIN_NETNS_IP]),
+                    # process): this is the one hop that's actually meant to be
+                    # tc-shaped, so X's incoming pull of Y's data genuinely
+                    # crosses X's shaped veth. Y's encoder now runs in the main
+                    # netns (see vxch_encoder_{name} above), not Y's own netns,
+                    # so MAIN_NETNS_IP is the only static peer needed to reach
+                    # it; it also covers this node's own output being
+                    # discoverable by vxch_decoder_{X}_from_{Y}, which stays in
+                    # the main netns.
+                    **_netns_kwargs(i, [MAIN_NETNS_IP]),
                 )
             )
             actions.append(
@@ -416,10 +419,11 @@ def _create_all_actions(context):
                 )
             )
         else:
-            # In tc mode, subscribe to the peer's netns-sourced map_uplink
-            # relay instead of /{peer}/map directly, so this hop crosses the
-            # peer's own tc-shaped link too (see map_uplink_relay_{name}
-            # above) -- same two-hop fidelity as vxch mode.
+            # In tc mode, pull from the peer's map_uplink relay (a stable name
+            # regardless of mode) rather than /{peer}/map directly -- both now
+            # live in the main netns (see map_uplink_relay_{name} above), so
+            # this is purely a naming convenience at this point, not a second
+            # shaped hop.
             source_topic = f"/{peer_name}/map_uplink" if is_tc else f"/{peer_name}/map"
             actions.append(
                 Node(
@@ -434,7 +438,7 @@ def _create_all_actions(context):
                             " nav_msgs/msg/OccupancyGrid reliable"
                         ],
                     }],
-                    **_netns_kwargs(i, [_netns_ip(peer_index), MAIN_NETNS_IP]),
+                    **_netns_kwargs(i, [MAIN_NETNS_IP]),
                 )
             )
 
