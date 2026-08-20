@@ -25,6 +25,9 @@ ROBOT="${ROBOT:-mogi_bot}"
 
 # Experiment parameters — forwarded by docker.sh from experiment.conf.
 MAP_TRANSPORT="${MAP_TRANSPORT:-baseline}"
+# pure_pursuit (default) mirrors navigation_hw.yaml's real-hardware controller;
+# mppi is sim's original controller, kept for A/B comparison against it.
+CONTROLLER_TYPE="${CONTROLLER_TYPE:-pure_pursuit}"
 BANDWIDTH_KBPS="${BANDWIDTH_KBPS:-0}"
 LOSS_PCT="${LOSS_PCT:-0.0}"
 DELAY_MS="${DELAY_MS:-0}"
@@ -320,6 +323,7 @@ if (( NUM_ROBOTS > 1 )); then
     z:="${SPAWN_Z}" \
     yaw:="${SPAWN_YAW}" \
     map_transport:="${MAP_TRANSPORT}" \
+    controller_type:="${CONTROLLER_TYPE}" \
     impairment_mode:="${IMPAIRMENT_MODE}" \
     bandwidth_kbps:="${BANDWIDTH_KBPS}" \
     loss_pct:="${LOSS_PCT}" \

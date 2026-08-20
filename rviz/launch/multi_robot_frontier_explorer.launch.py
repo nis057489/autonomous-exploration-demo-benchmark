@@ -125,7 +125,23 @@ def generate_launch_description():
     return LaunchDescription(
         [
             DeclareLaunchArgument("num_robots", default_value="2"),
-            DeclareLaunchArgument("params_file", default_value="config/frontier_exploration_ros2/config.yaml"),
+            # config_visit_once.yaml (not the lighter-tuned config.yaml) matches
+            # launch_real_hardware.sh's own default -- it's the config that was
+            # hand-tuned against real-hardware "windy path that doubles back
+            # through already-seen area" / "chooses only nearby frontiers"
+            # failures (dp_planning_horizon, weight_gain_ws/weight_distance_wd,
+            # min_frontier_size_cells, frontier_visit_tolerance,
+            # sensor_effective_range_m, frontier_candidate_min_goal_distance_m --
+            # see that file's own per-parameter comments for what each one
+            # fixes). Sim was still defaulting to the untuned config.yaml, so it
+            # never got that fix -- exactly the same symptom class reported in
+            # sim runs (esp. turtlebot3_waffle, whose short real-LDS-01-range
+            # lidar model makes it more sensitive to config.yaml's
+            # distance-over-gain weighting than mogi_bot's much longer-range
+            # sensor).
+            DeclareLaunchArgument(
+                "params_file",
+                default_value="config/frontier_exploration_ros2/config_visit_once.yaml"),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
             DeclareLaunchArgument("autostart", default_value="true"),
             DeclareLaunchArgument("control_service_enabled", default_value="true"),

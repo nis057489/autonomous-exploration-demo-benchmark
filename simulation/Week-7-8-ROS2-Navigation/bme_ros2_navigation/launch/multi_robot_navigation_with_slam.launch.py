@@ -94,7 +94,108 @@ def _robot_pose(index, count, x, y, z, yaw, spacing, world):
     )
 
 
-def _navigation_params(base_path, output_dir, namespace, use_sim_time):
+# navigation.yaml's footprint/inflation_radius values are URDF-derived for one
+# specific robot (mogi_bot: 0.4x0.2 collision box -- see the footprint comment in
+# navigation.yaml itself) and were, until now, applied unchanged to every model.
+# turtlebot3_waffle's actual collision geometry (turtlebot3_waffle.urdf: 0.266 x
+# 0.266 box) is meaningfully smaller, so reusing mogi_bot's larger footprint made
+# Nav2 believe the waffle was ~50% bigger than it really is in both dimensions --
+# planner treats passable gaps as too narrow (windy, indirect paths hugging open
+# space) and frontier_exploration_ros2's reachability check (which just consults
+# this same costmap, it has no footprint notion of its own) rejects/avoids
+# frontiers a real-sized waffle could reach, leaving only nearby ones actually
+# selectable.
+#
+# Originally used robot_radius (a circular approximation, matching ROBOTIS's own
+# turtlebot3_navigation2 reference config for waffle) instead of an explicit
+# footprint polygon -- but MPPI's ConstraintCritic/CostCritic (consider_footprint:
+# true, see navigation.yaml) throw "Considering footprint in collision checking
+# but no robot footprint provided in the costmap" against this installed nav2
+# build when the costmap is configured via robot_radius alone, aborting Nav2
+# bringup entirely (robots never move). An explicit polygon is the same
+# mechanism already proven working for mogi_bot in this exact setup, so use that
+# instead of chasing the robot_radius/critic interaction further. Derived
+# directly from turtlebot3_waffle.urdf's actual collision box (0.266 x 0.266,
+# centered at x=-0.064 relative to base_link, which coincides with
+# base_footprint in x/y -- see base_joint's xyz offset, z-only).
+_MOGI_BOT_FOOTPRINT = {
+    "footprint": "[[0.22, 0.19], [0.22, -0.19], [-0.22, -0.19], [-0.22, 0.19]]",
+    "footprint_padding": 0.01,
+}
+_TURTLEBOT3_WAFFLE_FOOTPRINT = {
+    "footprint": "[[0.069, 0.133], [0.069, -0.133], [-0.197, -0.133], [-0.197, 0.133]]",
+    "footprint_padding": 0.01,
+}
+# Scaled down from mogi_bot's local/global inflation_radius by the ratio of the
+# two robots' effective radii, with local raised just enough (0.243 -> 0.26,
+# not the 0.30 tried first) to clear the footprint's own circumscribed radius
+# (~0.2516m, the max footprint_padding-padded vertex distance from base_link)
+# and silence nav2's "inflation radius is smaller than the circumscribed
+# radius" warning. 0.30 was tried first but proved too aggressive in practice:
+# in the warehouse world specifically, it added enough extra obstacle buffer to
+# push some genuinely passable (if narrow) aisles past the planner's tolerance,
+# causing GridBased to fail outright ("Failed to create plan with tolerance of:
+# 0.5") and the robot to retry/clear-costmap/fail in a loop -- a real planning
+# failure, not just a smoothness issue, and worse than the warning it was meant
+# to fix. Keep this as small above 0.2516 as clears the warning, not the
+# largest value that still clears it.
+_TURTLEBOT3_WAFFLE_INFLATION = {"local": 0.26, "global": 0.5}
+
+# navigation.yaml's active general_goal_checker tolerance (xy 0.15m, yaw 0.12rad)
+# is tight relative to turtlebot3_waffle's actual footprint/turning behavior --
+# RegulatedPurePursuitController's rotate-to-heading finishing move can overshoot
+# and re-correct repeatedly trying to land within that tight a window, wasting
+# real time per frontier goal rather than accepting "close enough" and moving on
+# to the next one. Reuses the file's own already-sketched (but previously
+# inactive) "precise_goal_checker" values -- a misleading name, since 0.25/0.25
+# is actually looser than the active 0.15/0.12, not stricter.
+_TURTLEBOT3_WAFFLE_GOAL_TOLERANCE = {"xy_goal_tolerance": 0.25, "yaw_goal_tolerance": 0.25}
+
+
+def _apply_goal_tolerance(controller_server_params: dict, model: str) -> None:
+    if "turtlebot3_waffle" not in model:
+        return
+    controller_server_params.setdefault("general_goal_checker", {}).update(
+        _TURTLEBOT3_WAFFLE_GOAL_TOLERANCE
+    )
+
+
+def _apply_footprint(costmap_params: dict, model: str, costmap_kind: str) -> None:
+    """costmap_kind: "local" or "global" -- selects which of navigation.yaml's two
+    (differently-tuned) inflation_radius values to scale for a non-default model.
+    navigation.yaml's own existing value is left untouched for mogi_bot."""
+    for key in ("footprint", "footprint_padding", "robot_radius"):
+        costmap_params.pop(key, None)
+    if "turtlebot3_waffle" in model:
+        costmap_params.update(_TURTLEBOT3_WAFFLE_FOOTPRINT)
+        costmap_params.setdefault("inflation_layer", {})["inflation_radius"] = (
+            _TURTLEBOT3_WAFFLE_INFLATION[costmap_kind]
+        )
+    else:
+        costmap_params.update(_MOGI_BOT_FOOTPRINT)
+
+
+# "mppi" | "pure_pursuit" -- navigation.yaml's "FollowPath" key (what
+# controller_plugins actually references) is already the pure_pursuit config, so
+# a static/single-robot consumer of that file with zero further processing gets
+# pure_pursuit by default, matching navigation_hw.yaml's real-hardware
+# controller. Multi-robot runs can instead select "mppi", which overwrites
+# "FollowPath" with navigation.yaml's FollowPathMPPI block, for A/B comparison.
+_VALID_CONTROLLER_TYPES = ("mppi", "pure_pursuit")
+
+
+def _apply_controller_type(controller_server_params: dict, controller_type: str) -> None:
+    if controller_type == "mppi":
+        controller_server_params["FollowPath"] = controller_server_params.pop("FollowPathMPPI")
+    else:
+        controller_server_params.pop("FollowPathMPPI", None)
+
+
+def _navigation_params(base_path, output_dir, namespace, use_sim_time, model, controller_type):
+    if controller_type not in _VALID_CONTROLLER_TYPES:
+        raise ValueError(
+            f"controller_type must be one of {_VALID_CONTROLLER_TYPES}, got '{controller_type}'")
+
     data = copy.deepcopy(_load_yaml(base_path))
     base_link_frame = f"{namespace}/base_link"
     base_footprint_frame = f"{namespace}/base_footprint"
@@ -108,12 +209,17 @@ def _navigation_params(base_path, output_dir, namespace, use_sim_time):
     bt_navigator["robot_base_frame"] = base_link_frame
     bt_navigator["odom_topic"] = f"/{namespace}/odom"
 
+    controller_server_params = _node_params(data, "controller_server")
+    _apply_controller_type(controller_server_params, controller_type)
+    _apply_goal_tolerance(controller_server_params, model)
+
     local_costmap = _costmap_params(data, "local_costmap")
     local_costmap["global_frame"] = odom_frame
     local_costmap["robot_base_frame"] = base_link_frame
     local_costmap.setdefault("voxel_layer", {}).setdefault("scan", {})["topic"] = (
         f"/{namespace}/scan"
     )
+    _apply_footprint(local_costmap, model, "local")
 
     global_costmap = _costmap_params(data, "global_costmap")
     global_costmap["global_frame"] = "map"
@@ -122,6 +228,7 @@ def _navigation_params(base_path, output_dir, namespace, use_sim_time):
         f"/{namespace}/scan"
     )
     global_costmap.setdefault("static_layer", {})["map_topic"] = f"/{namespace}/nav_map"
+    _apply_footprint(global_costmap, model, "global")
 
     behavior_server = _node_params(data, "behavior_server")
     behavior_server["local_frame"] = odom_frame
@@ -528,6 +635,7 @@ def _create_multi_robot_actions(context):
     use_sim_time_text = LaunchConfiguration("use_sim_time").perform(context)
     use_sim_time = _bool_value(use_sim_time_text)
     is_tc = LaunchConfiguration("impairment_mode").perform(context) == "tc"
+    controller_type = LaunchConfiguration("controller_type").perform(context)
     x = float(LaunchConfiguration("x").perform(context))
     y = float(LaunchConfiguration("y").perform(context))
     z = float(LaunchConfiguration("z").perform(context))
@@ -598,7 +706,7 @@ def _create_multi_robot_actions(context):
         )
 
         navigation_params = _navigation_params(
-            navigation_params_path, output_dir, namespace, use_sim_time
+            navigation_params_path, output_dir, namespace, use_sim_time, model, controller_type
         )
         slam_params = _slam_params(slam_params_path, output_dir, namespace, use_sim_time)
         ekf_params = _ekf_params(ekf_params_path, output_dir, namespace, use_sim_time)
@@ -860,6 +968,13 @@ def generate_launch_description():
             DeclareLaunchArgument("world", default_value="bookstore"),
             DeclareLaunchArgument("num_robots", default_value="2"),
             DeclareLaunchArgument("model", default_value="mogi_bot.urdf"),
+            DeclareLaunchArgument(
+                "controller_type", default_value="pure_pursuit",
+                description="'pure_pursuit' (default) = nav2_regulated_pure_pursuit_"
+                            "controller, mirroring navigation_hw.yaml's real-hardware "
+                            "tuning exactly, so sim and hardware behavior are comparable. "
+                            "'mppi' = nav2_mppi_controller, sim's original controller -- "
+                            "kept available for A/B comparison against pure_pursuit."),
             DeclareLaunchArgument("x", default_value="2.5"),
             DeclareLaunchArgument("y", default_value="1.5"),
             DeclareLaunchArgument("z", default_value="0.05"),

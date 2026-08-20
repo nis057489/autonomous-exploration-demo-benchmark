@@ -97,8 +97,40 @@ controller_server:
       RotateToGoal.slowing_factor: 8.0
       RotateToGoal.lookahead_time: -1.0
       publish_cost_grid_pc: True
-    # MPPI parameters, active controller
+    # Regulated Pure Pursuit -- mirrors navigation_hw.yaml's real-hardware tuning
+    # exactly (same plugin, same params) so sim and hardware behavior are
+    # comparable. This is the active "FollowPath" (default controller, and what
+    # any static/single-robot consumer of this file gets with zero further
+    # processing); multi-robot runs can instead select FollowPathMPPI via
+    # _navigation_params()'s controller_type arg, which then overwrites this
+    # "FollowPath" key with FollowPathMPPI's content for A/B comparison.
+    # FollowPathDWB above is never referenced either way.
     FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.22
+      lookahead_dist: 0.4
+      min_lookahead_dist: 0.3
+      max_lookahead_dist: 0.6
+      lookahead_time: 1.5
+      transform_tolerance: 0.2
+      use_velocity_scaled_lookahead_dist: false
+      min_approach_linear_velocity: 0.05
+      approach_velocity_scaling_dist: 0.6
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_target: 1.0
+      use_regulated_linear_velocity_scaling: true
+      use_fixed_curvature_lookahead: false
+      curvature_lookahead_dist: 0.25
+      use_cost_regulated_linear_velocity_scaling: false
+      regulated_linear_scaling_min_radius: 0.9
+      regulated_linear_scaling_min_speed: 0.25
+      use_rotate_to_heading: true
+      rotate_to_heading_min_angle: 0.785
+      rotate_to_heading_angular_vel: 1.8
+      max_angular_accel: 2.0
+      max_robot_pose_search_dist: 10.0
+    # MPPI parameters
+    FollowPathMPPI:
       plugin: "nav2_mppi_controller::MPPIController"
       time_steps: 30
       model_dt: 0.08

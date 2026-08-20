@@ -157,18 +157,28 @@ def _create_all_actions(context):
         return f"10.77.0.{10 + robot_index + 1}"
 
     def _netns_kwargs(robot_index: int, static_peers: list) -> dict:
-        """Node kwargs that run a node inside robot_index's own netns, restricted
-        to explicit unicast discovery of exactly the given peer addresses -- same
-        ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST + ROS_STATIC_PEERS pattern
-        hw_namespaced_stack.launch.py already uses for real multi-machine
-        discovery, just pointed at netns addresses instead of separate hosts.
-        Empty dict (no namespacing) in sim mode."""
+        """Node kwargs that run a node inside robot_index's own netns.
+        ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET (not LOCALHOST) -- verified
+        against real run logs that LOCALHOST + static-peers-only discovery is
+        NOT reliable under load: one robot's encoder->main-netns discovery
+        (needed just to subscribe to its own /{robot}/map) would consistently
+        never complete, correctly configured ROS_STATIC_PEERS notwithstanding,
+        with zero self-healing even after 60s+ of grace before tc shaping.
+        SUBNET is safe here specifically because a robot's netns has exactly
+        one external interface (its veth into br-ddil, a bridge with no route
+        to the container's own outward-facing network) -- multicast discovery
+        physically cannot escape the isolated 10.77.0.0/24 subnet, so this
+        doesn't reopen the earlier cross-container multicast-pollution bug
+        (that was about the container's own eth0/docker-bridge subnet, a
+        completely different network this netns has no route to at all).
+        ROS_STATIC_PEERS is kept alongside SUBNET as a redundant accelerant,
+        not the sole mechanism. Empty dict (no namespacing) in sim mode."""
         if not is_tc:
             return {}
         return {
             "prefix": f"ip netns exec {_netns_name(robot_index)}",
             "additional_env": {
-                "ROS_AUTOMATIC_DISCOVERY_RANGE": "LOCALHOST",
+                "ROS_AUTOMATIC_DISCOVERY_RANGE": "SUBNET",
                 "ROS_STATIC_PEERS": ";".join(static_peers),
             },
         }
@@ -235,11 +245,24 @@ def _create_all_actions(context):
                 "seed": str(rng_seed),
                 "spawn_positions_json": LaunchConfiguration("spawn_positions_json"),
                 "impairment_mode": impairment_mode,
+                "controller_type": LaunchConfiguration("controller_type"),
             }.items(),
         )
     )
 
     # ── Frontier exploration ───────────────────────────────────────────────────
+    # config_visit_once.yaml is tuned specifically against real turtlebot3_waffle
+    # hardware (0.22 m/s, ~3.5m real LDS-01 lidar range) -- applying it blanket to
+    # mogi_bot (0.8 m/s max, 10m sim sensor) would be the same class of mismatch
+    # the footprint fix above exists to avoid, just for frontier scoring instead
+    # of costmap geometry. mogi_bot keeps config.yaml (its long-standing default,
+    # no reported issues); only turtlebot3_waffle -- which is meant to mirror
+    # hardware -- gets the hardware-tuned config.
+    frontier_params_file = (
+        "config/frontier_exploration_ros2/config_visit_once.yaml"
+        if "turtlebot3_waffle" in model
+        else "config/frontier_exploration_ros2/config.yaml"
+    )
     actions.append(
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -249,6 +272,7 @@ def _create_all_actions(context):
                 "num_robots": str(num_robots),
                 "use_sim_time": use_sim_time_str,
                 "robot_startup_delay_s": str(robot_startup_delay_s),
+                "params_file": frontier_params_file,
             }.items(),
         )
     )
@@ -277,10 +301,21 @@ def _create_all_actions(context):
                     }],
                     # In tc mode this runs inside the robot's own netns so its
                     # output genuinely crosses that robot's tc-shaped veth before
-                    # any peer can reach it -- MAIN_NETNS_IP is needed only to
-                    # discover /{name}/map's publisher (slam_toolbox), which
-                    # stays in the main netns.
-                    **_netns_kwargs(i, [MAIN_NETNS_IP]),
+                    # any peer can reach it. Static peers list MAIN_NETNS_IP (to
+                    # discover /{name}/map's publisher, slam_toolbox, which stays
+                    # in the main netns) AND every other robot's netns IP --
+                    # discovery relying solely on each peer's own
+                    # ddil_proxy_{peer}_from_{name} initiating the SPDP handshake
+                    # was a real race: whichever robot's one-directional
+                    # announce/response didn't land in time (contention, timing)
+                    # ended up permanently undiscoverable, no matter how long
+                    # IMPAIRMENT_DELAY_S waited -- it was never really about
+                    # elapsed time, just whether a single attempt happened to
+                    # succeed. Having the encoder also announce toward every
+                    # consumer makes each pairing attempt discovery from both
+                    # directions instead of depending on one.
+                    **_netns_kwargs(
+                        i, [MAIN_NETNS_IP] + [_netns_ip(p) for p in range(num_robots) if p != i]),
                 )
             )
     elif is_tc:
@@ -298,94 +333,121 @@ def _create_all_actions(context):
                     output="screen",
                     arguments=[f"/{name}/map", f"/{name}/map_uplink"],
                     parameters=[{"use_sim_time": use_sim_time}],
-                    **_netns_kwargs(i, [MAIN_NETNS_IP]),
+                    # See the vxch encoder's identical comment above -- same
+                    # bidirectional-discovery fix applies here.
+                    **_netns_kwargs(
+                        i, [MAIN_NETNS_IP] + [_netns_ip(p) for p in range(num_robots) if p != i]),
                 )
             )
 
-    # ── Per-robot, per-peer DDIL relay + local fusion ───────────────────────────
+    # ── Per-robot, per-peer DDIL relay ──────────────────────────────────────────
     # Every robot X pulls each peer Y's map directly over its own independent
     # (X, Y) downlink -- no shared/centralized fusion node in between, matching
     # hw_namespaced_stack.launch.py exactly (which runs the equivalent of this
     # loop once per physical robot, on that robot's own compute). Here all robots
     # run in one process, so the loop just does it N times instead of N robots
     # each doing it once.
+    #
+    # Pair creation order is round-robin across robots (round 1: each robot's
+    # "+1" peer; round 2: each robot's "+2" peer; ...), NOT grouped by robot
+    # (all of robot1's pairs, then all of robot2's, ...). Grouped-by-robot order
+    # was a real bug: in tc mode, each Node action's underlying process spawn
+    # (particularly with the `ip netns exec` prefix) has enough overhead that
+    # earlier-listed actions get a measurable head start on DDS discovery over
+    # later-listed ones. With every one of robot1's pairs listed before any of
+    # robot2's, before any of robot3's, robot1's outbound discovery consistently
+    # won races against robot3's, producing an exact, reproducible pattern where
+    # every (i, j) pair with i < j succeeded and every pair with i > j failed --
+    # not the random per-run flakiness it first looked like, but a deterministic
+    # bandwidth/discovery advantage for lower-indexed robots every single time.
+    # Round-robin order spreads that head-start evenly across every robot instead
+    # of concentrating it on whichever one happens to be listed first.
+    pair_order = [
+        (i, (i + offset) % num_robots)
+        for offset in range(1, num_robots)
+        for i in range(num_robots)
+    ]
+    for i, peer_index in pair_order:
+        name = robot_names[i]
+        peer_name = robot_names[peer_index]
+        robot_ddil_base = f"/{name}/incoming/{peer_name}"
+
+        if is_vxch:
+            relay_topics = [
+                f"/{peer_name}/vxch/map/band_{k} {robot_ddil_base}/band_{k}"
+                " voxelcodec_msgs/msg/VoxelChannel"
+                for k in range(total_bands)
+            ]
+            relay_topics.append(
+                f"/{peer_name}/vxch/map/manifest {robot_ddil_base}/manifest"
+                " voxelcodec_msgs/msg/VoxelManifest reliable"
+            )
+            actions.append(
+                Node(
+                    package="voxelcodec_ros",
+                    executable="ddil_proxy_node",
+                    name=f"ddil_proxy_{name}_from_{peer_name}",
+                    output="screen",
+                    parameters=[{
+                        **ddil_params_for(i, peer_index),
+                        "relay_topics": relay_topics,
+                    }],
+                    # Runs inside X's own netns (this is X's own onboard relay
+                    # process): needs peer Y's netns to reach Y's encoder
+                    # output, and the main netns so this node's own output
+                    # (consumed by vxch_decoder_{X}_from_{Y}, which stays in
+                    # the main netns) is discoverable there.
+                    **_netns_kwargs(i, [_netns_ip(peer_index), MAIN_NETNS_IP]),
+                )
+            )
+            actions.append(
+                Node(
+                    package="voxelcodec_ros",
+                    executable="vxch_occupancy_grid_node",
+                    name=f"vxch_decoder_{name}_from_{peer_name}",
+                    output="screen",
+                    parameters=[{
+                        "input_base_topic": robot_ddil_base,
+                        "output_topic": f"{robot_ddil_base}/map",
+                        "haar_levels": haar_levels,
+                        "publish_rate_hz": 1.0,
+                        "use_sim_time": use_sim_time,
+                    }],
+                )
+            )
+        else:
+            # In tc mode, subscribe to the peer's netns-sourced map_uplink
+            # relay instead of /{peer}/map directly, so this hop crosses the
+            # peer's own tc-shaped link too (see map_uplink_relay_{name}
+            # above) -- same two-hop fidelity as vxch mode.
+            source_topic = f"/{peer_name}/map_uplink" if is_tc else f"/{peer_name}/map"
+            actions.append(
+                Node(
+                    package="voxelcodec_ros",
+                    executable="ddil_proxy_node",
+                    name=f"ddil_proxy_{name}_from_{peer_name}",
+                    output="screen",
+                    parameters=[{
+                        **ddil_params_for(i, peer_index),
+                        "relay_topics": [
+                            f"{source_topic} {robot_ddil_base}/map"
+                            " nav_msgs/msg/OccupancyGrid reliable"
+                        ],
+                    }],
+                    **_netns_kwargs(i, [_netns_ip(peer_index), MAIN_NETNS_IP]),
+                )
+            )
+
+    # ── Per-robot local fusion ──────────────────────────────────────────────────
+    # Separate from the interleaved relay loop above (team_map_fusion runs in the
+    # main netns and isn't part of the discovery race that loop's ordering
+    # exists to defuse, so its own creation order doesn't matter).
     for i, name in enumerate(robot_names):
         peer_indices = [p for p in range(num_robots) if p != i]
-        for peer_index in peer_indices:
-            peer_name = robot_names[peer_index]
-            robot_ddil_base = f"/{name}/incoming/{peer_name}"
-
-            if is_vxch:
-                relay_topics = [
-                    f"/{peer_name}/vxch/map/band_{k} {robot_ddil_base}/band_{k}"
-                    " voxelcodec_msgs/msg/VoxelChannel"
-                    for k in range(total_bands)
-                ]
-                relay_topics.append(
-                    f"/{peer_name}/vxch/map/manifest {robot_ddil_base}/manifest"
-                    " voxelcodec_msgs/msg/VoxelManifest reliable"
-                )
-                actions.append(
-                    Node(
-                        package="voxelcodec_ros",
-                        executable="ddil_proxy_node",
-                        name=f"ddil_proxy_{name}_from_{peer_name}",
-                        output="screen",
-                        parameters=[{
-                            **ddil_params_for(i, peer_index),
-                            "relay_topics": relay_topics,
-                        }],
-                        # Runs inside X's own netns (this is X's own onboard relay
-                        # process): needs peer Y's netns to reach Y's encoder
-                        # output, and the main netns so this node's own output
-                        # (consumed by vxch_decoder_{X}_from_{Y}, which stays in
-                        # the main netns) is discoverable there.
-                        **_netns_kwargs(i, [_netns_ip(peer_index), MAIN_NETNS_IP]),
-                    )
-                )
-                actions.append(
-                    Node(
-                        package="voxelcodec_ros",
-                        executable="vxch_occupancy_grid_node",
-                        name=f"vxch_decoder_{name}_from_{peer_name}",
-                        output="screen",
-                        parameters=[{
-                            "input_base_topic": robot_ddil_base,
-                            "output_topic": f"{robot_ddil_base}/map",
-                            "haar_levels": haar_levels,
-                            "publish_rate_hz": 1.0,
-                            "use_sim_time": use_sim_time,
-                        }],
-                    )
-                )
-            else:
-                # In tc mode, subscribe to the peer's netns-sourced map_uplink
-                # relay instead of /{peer}/map directly, so this hop crosses the
-                # peer's own tc-shaped link too (see map_uplink_relay_{name}
-                # above) -- same two-hop fidelity as vxch mode.
-                source_topic = f"/{peer_name}/map_uplink" if is_tc else f"/{peer_name}/map"
-                actions.append(
-                    Node(
-                        package="voxelcodec_ros",
-                        executable="ddil_proxy_node",
-                        name=f"ddil_proxy_{name}_from_{peer_name}",
-                        output="screen",
-                        parameters=[{
-                            **ddil_params_for(i, peer_index),
-                            "relay_topics": [
-                                f"{source_topic} {robot_ddil_base}/map"
-                                " nav_msgs/msg/OccupancyGrid reliable"
-                            ],
-                        }],
-                        **_netns_kwargs(i, [_netns_ip(peer_index), MAIN_NETNS_IP]),
-                    )
-                )
-
-        # Local fusion of every peer's (DDIL'd) map into this robot's own team view.
-        # Placed at peer_index's spawn offset so a peer's map lands in the right
-        # place in this robot's "map" frame regardless of which robot is doing the
-        # fusing -- same team_map_fusion.py node hw_namespaced_stack.launch.py uses
-        # for its own per-robot role.
+        # Placed at each peer's spawn offset so a peer's map lands in the right
+        # place in this robot's "map" frame regardless of which robot is doing
+        # the fusing -- same team_map_fusion.py node hw_namespaced_stack.launch.py
+        # uses for its own per-robot role.
         peer_names = [robot_names[p] for p in peer_indices]
         peer_offsets = [robot_poses[p] for p in peer_indices]
         actions.append(
@@ -430,6 +492,12 @@ def generate_launch_description():
                             "Requires the container to have CAP_NET_ADMIN and "
                             "setup_ddil_netns.sh to have already been run for this "
                             "num_robots (launch.sh does this automatically)."),
+            DeclareLaunchArgument(
+                "controller_type", default_value="pure_pursuit",
+                description="'pure_pursuit' (default) = nav2_regulated_pure_pursuit_"
+                            "controller, mirroring navigation_hw.yaml's real-hardware "
+                            "tuning. 'mppi' = nav2_mppi_controller, sim's original "
+                            "controller -- kept for A/B comparison against pure_pursuit."),
             DeclareLaunchArgument(
                 "haar_levels", default_value="4",
                 description="Haar wavelet levels (total bands = levels+1)"),
