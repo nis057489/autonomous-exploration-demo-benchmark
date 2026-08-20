@@ -18,6 +18,17 @@
   </class>
 </library>
 
+<library path="network_stats_panel">
+  <class name="voxelcodec_ros/NetworkStatsPanel"
+         type="voxelcodec_ros::NetworkStatsPanel"
+         base_class_type="rviz_common::Panel">
+    <description>
+      Download-manager style view of every active VXCH DDIL link: per-band
+      queued data, current send/idle status, available bandwidth, and ETA.
+    </description>
+  </class>
+</library>
+
 <library path="voxel_display">
   <class name="voxelcodec_ros/VoxelDisplay"
          type="voxelcodec_ros::VoxelDisplay"

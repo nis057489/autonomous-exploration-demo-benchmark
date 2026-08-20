@@ -234,6 +234,7 @@ def _create_all_actions(context):
                 "rviz": rviz,
                 "seed": str(rng_seed),
                 "spawn_positions_json": LaunchConfiguration("spawn_positions_json"),
+                "impairment_mode": impairment_mode,
             }.items(),
         )
     )

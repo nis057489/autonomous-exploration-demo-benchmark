@@ -258,6 +258,26 @@ public:
 
   void set_aging_interval_ms(double aging_interval_ms) {aging_interval_ms_ = aging_interval_ms;}
 
+  // Aggregate currently-queued (not-yet-sent) count/bytes per band index,
+  // across all tiles. Manifest (band_priority -1) and non-band relay traffic
+  // (band_priority INT_MAX) are excluded -- this is for band-level UI/stats
+  // reporting only (e.g. NetworkStatsPanel), never on the push/pop hot path,
+  // so an O(n) scan over the queue here is fine.
+  std::map<int, std::pair<std::size_t, std::uint64_t>> pending_by_band() const
+  {
+    std::map<int, std::pair<std::size_t, std::uint64_t>> result;
+    for (const auto & entry : entries_) {
+      const int bp = entry.msg.band_priority;
+      if (bp < 0 || bp == std::numeric_limits<int>::max()) {
+        continue;
+      }
+      auto & agg = result[bp];
+      agg.first += 1;
+      agg.second += entry.msg.serialized->size();
+    }
+    return result;
+  }
+
   // Returns true if this push replaced an already-queued entry (dedup fired).
   bool push(QueuedMessage msg)
   {

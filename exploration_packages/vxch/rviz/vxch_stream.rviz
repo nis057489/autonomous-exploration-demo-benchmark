@@ -7,6 +7,8 @@ Panels:
     Name: Progressive
   - Class: voxelcodec_ros/BandwidthPanel
     Name: Bandwidth
+  - Class: voxelcodec_ros/NetworkStatsPanel
+    Name: Network Stats
 Visualization Manager:
   Class: ""
   Displays:

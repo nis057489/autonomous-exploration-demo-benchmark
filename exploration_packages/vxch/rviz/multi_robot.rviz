@@ -3,6 +3,8 @@ Panels:
     Name: Displays
   - Class: rviz_common/Views
     Name: Views
+  - Class: voxelcodec_ros/NetworkStatsPanel
+    Name: Network Stats
 
 Visualization Manager:
   Class: ""

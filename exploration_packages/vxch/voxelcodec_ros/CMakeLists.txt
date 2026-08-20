@@ -166,7 +166,25 @@ if(rviz_common_FOUND AND Qt5_FOUND)
     sensor_msgs
   )
 
-  install(TARGETS progressive_panel bandwidth_panel
+  add_library(network_stats_panel SHARED
+    src/network_stats_panel.cpp
+    include/voxelcodec_ros/network_stats_panel.hpp
+  )
+  target_compile_features(network_stats_panel PUBLIC cxx_std_17)
+  target_include_directories(network_stats_panel PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+  target_link_libraries(network_stats_panel
+    Qt5::Widgets
+  )
+  ament_target_dependencies(network_stats_panel
+    rclcpp
+    rviz_common
+    voxelcodec_msgs
+  )
+
+  install(TARGETS progressive_panel bandwidth_panel network_stats_panel
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin

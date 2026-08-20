@@ -216,6 +216,52 @@ TEST(DdilProxyLogic, BandQueueEmptyDedupKeyNeverDedups)
   EXPECT_EQ(queue.size(), 2U);
 }
 
+TEST(DdilProxyLogic, PendingByBandAggregatesAcrossTilesExcludingManifestAndBypass)
+{
+  voxelcodec_ros::BandQueue queue;
+
+  voxelcodec_msgs::msg::VoxelChannel chan;
+  chan.payload.resize(100, 0);
+  auto band0_tile_a = serialize_channel(chan);
+  auto band0_tile_b = serialize_channel(chan);
+  auto band1_tile_a = serialize_channel(chan);
+
+  voxelcodec_ros::QueuedMessage m0a;
+  m0a.band_priority = 0;
+  m0a.dedup_key = "tile_0_0:band_0";
+  m0a.serialized = band0_tile_a;
+  voxelcodec_ros::QueuedMessage m0b;
+  m0b.band_priority = 0;
+  m0b.dedup_key = "tile_1_0:band_0";
+  m0b.serialized = band0_tile_b;
+  voxelcodec_ros::QueuedMessage m1a;
+  m1a.band_priority = 1;
+  m1a.dedup_key = "tile_0_0:band_1";
+  m1a.serialized = band1_tile_a;
+
+  // Manifest (-1) and non-band relay traffic (INT_MAX) must not show up as bands.
+  voxelcodec_ros::QueuedMessage manifest;
+  manifest.band_priority = -1;
+  manifest.dedup_key = "manifest";
+  manifest.serialized = serialize_channel(chan);
+  voxelcodec_ros::QueuedMessage other;
+  other.band_priority = std::numeric_limits<int>::max();
+  other.serialized = serialize_channel(chan);
+
+  queue.push(m0a);
+  queue.push(m0b);
+  queue.push(m1a);
+  queue.push(manifest);
+  queue.push(other);
+
+  const auto pending = queue.pending_by_band();
+  ASSERT_EQ(pending.size(), 2U);
+  EXPECT_EQ(pending.at(0).first, 2U);
+  EXPECT_EQ(pending.at(0).second, band0_tile_a->size() + band0_tile_b->size());
+  EXPECT_EQ(pending.at(1).first, 1U);
+  EXPECT_EQ(pending.at(1).second, band1_tile_a->size());
+}
+
 TEST(DdilProxyLogic, BandQueueAgingLetsAWaitingFineBandEventuallyWinOverFreshCoarseOnes)
 {
   // 20ms aging interval so the test doesn't need to sleep for real seconds:

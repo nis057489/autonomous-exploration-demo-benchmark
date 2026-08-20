@@ -61,6 +61,14 @@ def _costmap_params(data, costmap_name):
     )
 
 
+# Mirrors multi_robot_vxch_experiment.launch.py's own `_netns_ip` exactly --
+# both files must derive the same per-robot netns IP from the same robot
+# index for rviz2's static-peer discovery (below) to actually reach the
+# netns ddil_proxy_node/occupancy_grid_vxch_node instances live in.
+def _netns_ip(robot_index):
+    return f"10.77.0.{10 + robot_index + 1}"
+
+
 def _robot_pose(index, count, x, y, z, yaw, spacing, world):
     if count == 1:
         return x, y, z, yaw
@@ -453,6 +461,10 @@ def _rviz_config(output_dir, namespaces):
                 "Class": "rviz_autonomous_exploration_benchmark/ExplorationControlPanel",
                 "Name": "Exploration Control",
             },
+            {
+                "Class": "voxelcodec_ros/NetworkStatsPanel",
+                "Name": "VXCH Network Stats",
+            },
         ],
         "Visualization Manager": {
             "Class": "",
@@ -515,6 +527,7 @@ def _create_multi_robot_actions(context):
     num_robots = int(LaunchConfiguration("num_robots").perform(context))
     use_sim_time_text = LaunchConfiguration("use_sim_time").perform(context)
     use_sim_time = _bool_value(use_sim_time_text)
+    is_tc = LaunchConfiguration("impairment_mode").perform(context) == "tc"
     x = float(LaunchConfiguration("x").perform(context))
     y = float(LaunchConfiguration("y").perform(context))
     z = float(LaunchConfiguration("z").perform(context))
@@ -785,6 +798,29 @@ def _create_multi_robot_actions(context):
     actions.append(TimerAction(period=12.0, actions=nav2_actions))
 
     rviz_config_path = _rviz_config(output_dir, namespaces)
+
+    # In tc mode, ddil_proxy_node/occupancy_grid_vxch_node run confined to a
+    # robot's own netns with ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST -- they
+    # only become visible to a participant that they themselves manage to
+    # discover via their own (necessarily limited-range, since the main
+    # netns can easily have 50+ other participants) static-peer scan of
+    # MAIN_NETNS_IP. rviz2 is started last of everything (this 14s
+    # TimerAction), so it reliably lands outside whatever scan window those
+    # already-running confined participants catch, and its own default
+    # (SUBNET) automatic discovery never reaches into their LOCALHOST-only
+    # netns either -- net result, RViz panels/displays reading
+    # netns-confined topics stay empty. Fixed by having rviz2 itself
+    # actively probe each (small, 2-3 participant) robot netns as an
+    # additional static peer -- that scan is cheap enough to actually
+    # succeed, unlike the reverse direction. ROS_AUTOMATIC_DISCOVERY_RANGE
+    # is deliberately left at its default here so rviz2 still discovers
+    # every ordinary main-netns node (nav2, SLAM, etc.) exactly as before.
+    rviz_additional_env = {}
+    if is_tc:
+        rviz_additional_env["ROS_STATIC_PEERS"] = ";".join(
+            _netns_ip(i) for i in range(num_robots)
+        )
+
     actions.append(
         TimerAction(
             period=14.0,
@@ -797,6 +833,7 @@ def _create_multi_robot_actions(context):
                     arguments=["-d", rviz_config_path],
                     condition=IfCondition(LaunchConfiguration("rviz")),
                     parameters=[{"use_sim_time": use_sim_time}],
+                    additional_env=rviz_additional_env,
                 )
             ],
         )
@@ -830,6 +867,12 @@ def generate_launch_description():
             DeclareLaunchArgument("spacing", default_value="0.8"),
             DeclareLaunchArgument("use_sim_time", default_value="True"),
             DeclareLaunchArgument("rviz", default_value="true"),
+            DeclareLaunchArgument(
+                "impairment_mode", default_value="sim",
+                description="'sim' | 'tc' -- must match multi_robot_vxch_experiment."
+                            "launch.py's own impairment_mode so rviz2's static-peer "
+                            "discovery (see rviz2 Node below) is only added when it's "
+                            "actually needed and points at the right netns IPs."),
             DeclareLaunchArgument("seed", default_value="-1",
                 description="Gazebo physics RNG seed (-1 = non-deterministic)"),
             DeclareLaunchArgument(

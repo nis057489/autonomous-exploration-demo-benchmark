@@ -1,20 +1,27 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <deque>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <random>
+#include <set>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
 #include <rclcpp/serialized_message.hpp>
 
+#include <voxelcodec_msgs/msg/ddil_band_status.hpp>
+#include <voxelcodec_msgs/msg/ddil_stats.hpp>
 #include <voxelcodec_msgs/msg/voxel_channel.hpp>
 #include <voxelcodec_msgs/msg/voxel_manifest.hpp>
 
@@ -98,6 +105,16 @@ public:
     stats_timer_ = create_wall_timer(
       std::chrono::seconds(10),
       [this]() {log_stats();});
+
+    // Structured per-band stats for monitoring/UI (e.g. NetworkStatsPanel in
+    // RViz) -- separate from log_stats() above, published often enough (5 Hz)
+    // for a responsive progress bar/ETA display without being a meaningful
+    // load at this message size.
+    stats_pub_ = create_publisher<voxelcodec_msgs::msg::DdilStats>(
+      "~/ddil_stats", rclcpp::QoS(5).best_effort());
+    stats_pub_timer_ = create_wall_timer(
+      std::chrono::milliseconds(200),
+      [this]() {publish_stats();});
 
     // Worker thread processes the throttled queue
     worker_ = std::thread([this]() {worker_loop();});
@@ -300,6 +317,29 @@ private:
       msgs_sent_.fetch_add(1, std::memory_order_relaxed);
       bytes_sent_.fetch_add(nbytes, std::memory_order_relaxed);
 
+      // Per-band cumulative counters + windowed send rate + "what's active
+      // right now" tracking, all for publish_stats()'s consumption. Only
+      // touched here (worker thread) and read (under the same mutex) from
+      // the stats timer on the main executor thread.
+      {
+        const auto now_steady = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(worker_stats_mutex_);
+        if (item.band_priority >= 0 && item.band_priority != std::numeric_limits<int>::max()) {
+          auto & bc = band_counters_[item.band_priority];
+          bc.sent_bytes += nbytes;
+          bc.sent_count += 1;
+        }
+        last_sent_band_priority_ = item.band_priority;
+        last_sent_time_ = now_steady;
+        recent_sends_.emplace_back(now_steady, nbytes);
+        while (!recent_sends_.empty() &&
+          std::chrono::duration<double>(now_steady - recent_sends_.front().first).count() >
+          kRateWindowSec)
+        {
+          recent_sends_.pop_front();
+        }
+      }
+
       RCLCPP_DEBUG(
         get_logger(), "SEND  prio=%d  %zu B  (total sent: %zu msgs / %zu KB)",
         item.band_priority == std::numeric_limits<int>::max() ? -1 : item.band_priority,
@@ -327,6 +367,111 @@ private:
       get_logger(),
       "stats | rcvd=%lu  sent=%lu (%lu KB)  dropped=%lu  deduped=%lu  stale=%lu (%lu KB)  queued=%zu",
       received, sent, kb_sent, dropped, deduped, stale, kb_stale, queue_depth);
+  }
+
+  // Builds and publishes one DdilStats snapshot: current queue backlog per
+  // band (from BandQueue::pending_by_band()), cumulative sent counters per
+  // band, a windowed measured send rate, and a rough per-band ETA.
+  //
+  // ETA approximation: bands are drained in ascending band_priority order
+  // (coarsest first) modulo BandQueue's aging (see ddil_proxy_logic.hpp) --
+  // aging isn't accounted for here, so this is "time to drain this band and
+  // everything still-coarser ahead of it, assuming strict priority order and
+  // the current measured/configured rate holds," not an exact prediction.
+  // Good enough for a UI progress readout, not for anything decode-critical.
+  void publish_stats()
+  {
+    std::map<int, std::pair<std::size_t, std::uint64_t>> pending;
+    {
+      std::lock_guard<std::mutex> lock(queue_mutex_);
+      pending = queue_.pending_by_band();
+    }
+
+    std::map<int, BandCounters> sent_counters_copy;
+    double send_rate_bps = 0.0;
+    int active_band = std::numeric_limits<int>::min();
+    {
+      const auto now_steady = std::chrono::steady_clock::now();
+      std::lock_guard<std::mutex> lock(worker_stats_mutex_);
+      sent_counters_copy = band_counters_;
+
+      while (!recent_sends_.empty() &&
+        std::chrono::duration<double>(now_steady - recent_sends_.front().first).count() >
+        kRateWindowSec)
+      {
+        recent_sends_.pop_front();
+      }
+      if (!recent_sends_.empty()) {
+        std::uint64_t window_bytes = 0;
+        for (const auto & sample : recent_sends_) {
+          window_bytes += sample.second;
+        }
+        const double span =
+          std::chrono::duration<double>(now_steady - recent_sends_.front().first).count();
+        // Guard against a near-zero span (e.g. a single sample) blowing the rate up.
+        send_rate_bps = span > 0.05 ? static_cast<double>(window_bytes) / span : 0.0;
+      }
+      // "Active" only counts as long as something was actually sent recently --
+      // otherwise a long-idle link would keep showing its last band as "sending".
+      constexpr double kActiveWindowSec = 0.5;
+      if (std::chrono::duration<double>(now_steady - last_sent_time_).count() < kActiveWindowSec) {
+        active_band = last_sent_band_priority_;
+      }
+    }
+
+    const double link_bytes_per_sec =
+      bandwidth_kbps_ > 0.0 ? bandwidth_kbps_ * 125.0 : send_rate_bps;
+
+    std::set<int> band_indices;
+    for (const auto & entry : pending) {
+      band_indices.insert(entry.first);
+    }
+    for (const auto & entry : sent_counters_copy) {
+      band_indices.insert(entry.first);
+    }
+
+    voxelcodec_msgs::msg::DdilStats msg;
+    msg.header.stamp = now();
+    msg.link_name = get_name();
+    msg.bandwidth_kbps = bandwidth_kbps_;
+    msg.send_rate_bps = send_rate_bps;
+    msg.msgs_received = msgs_received_.load(std::memory_order_relaxed);
+    msg.msgs_dropped = msgs_dropped_.load(std::memory_order_relaxed);
+    msg.msgs_deduped = msgs_deduped_.load(std::memory_order_relaxed);
+    msg.msgs_stale_dropped = msgs_stale_dropped_.load(std::memory_order_relaxed);
+    msg.sent_bytes = bytes_sent_.load(std::memory_order_relaxed);
+
+    std::uint64_t queued_bytes = 0;
+    std::uint64_t cumulative_ahead_bytes = 0;  // sorted ascending -- see ETA note above
+    for (const int band : band_indices) {
+      voxelcodec_msgs::msg::DdilBandStatus bs;
+      bs.band_index = static_cast<std::uint8_t>(band);
+
+      const auto pit = pending.find(band);
+      bs.pending_count = pit != pending.end() ? static_cast<std::uint32_t>(pit->second.first) : 0;
+      bs.pending_bytes = pit != pending.end() ? pit->second.second : 0;
+
+      const auto sit = sent_counters_copy.find(band);
+      bs.sent_bytes = sit != sent_counters_copy.end() ? sit->second.sent_bytes : 0;
+      bs.sent_count = sit != sent_counters_copy.end() ? sit->second.sent_count : 0;
+
+      bs.active = (band == active_band);
+
+      queued_bytes += bs.pending_bytes;
+      cumulative_ahead_bytes += bs.pending_bytes;
+      if (bs.pending_bytes == 0) {
+        bs.eta_sec = 0.0;
+      } else if (link_bytes_per_sec > 0.0) {
+        bs.eta_sec = static_cast<double>(cumulative_ahead_bytes) / link_bytes_per_sec;
+      } else {
+        bs.eta_sec = -1.0;
+      }
+
+      msg.bands.push_back(bs);
+    }
+    msg.queued_bytes = queued_bytes;
+
+    stats_pub_->publish(msg);
   }
 
   rcl_interfaces::msg::SetParametersResult on_param_change(
@@ -368,6 +513,9 @@ private:
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_;
   rclcpp::TimerBase::SharedPtr stats_timer_;
 
+  rclcpp::Publisher<voxelcodec_msgs::msg::DdilStats>::SharedPtr stats_pub_;
+  rclcpp::TimerBase::SharedPtr stats_pub_timer_;
+
   BandQueue queue_;
   std::mutex queue_mutex_;
   std::condition_variable queue_cv_;
@@ -390,6 +538,22 @@ private:
   std::atomic<uint64_t> bytes_sent_{0};
   std::atomic<uint64_t> msgs_stale_dropped_{0};
   std::atomic<uint64_t> bytes_stale_dropped_{0};
+
+  // Per-band cumulative sent counters + windowed send rate + "currently
+  // active band" tracking for publish_stats(). Written only by worker_loop()
+  // (the worker thread), read only by publish_stats() (the stats timer, on
+  // the main executor thread) -- both under worker_stats_mutex_.
+  struct BandCounters
+  {
+    uint64_t sent_bytes{0};
+    uint64_t sent_count{0};
+  };
+  std::map<int, BandCounters> band_counters_;
+  std::deque<std::pair<std::chrono::steady_clock::time_point, std::size_t>> recent_sends_;
+  int last_sent_band_priority_{std::numeric_limits<int>::min()};
+  std::chrono::steady_clock::time_point last_sent_time_{};
+  std::mutex worker_stats_mutex_;
+  static constexpr double kRateWindowSec = 2.0;
 };
 
 }  // namespace
