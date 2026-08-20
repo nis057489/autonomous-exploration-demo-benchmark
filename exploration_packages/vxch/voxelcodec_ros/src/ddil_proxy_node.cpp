@@ -283,20 +283,16 @@ private:
         item = queue_.pop();
       }
 
-      if (item.epoch_role == EpochRole::kBand) {
-        const auto band_stamp = extract_stamp(item);
-        if (voxelcodec_ros::should_drop_as_stale(band_stamp, latest_manifest_stamp_)) {
-          const std::size_t stale_bytes = item.serialized->size();
-          msgs_stale_dropped_.fetch_add(1, std::memory_order_relaxed);
-          bytes_stale_dropped_.fetch_add(stale_bytes, std::memory_order_relaxed);
-          RCLCPP_DEBUG(
-            get_logger(), "STALE prio=%d  %zu B  epoch=%d.%09u  latest_manifest=%d.%09u",
-            item.band_priority, stale_bytes, band_stamp.sec, band_stamp.nanosec,
-            latest_manifest_stamp_->sec, latest_manifest_stamp_->nanosec);
-          continue;
-        }
-      }
-
+      // NOTE: previously dropped bands here as "stale" whenever their stamp
+      // predated the newest manifest already sent by this proxy. That check
+      // was global across all tiles, not per-slot, so under real throttling
+      // (queue backlog growing faster than it drains) it ended up discarding
+      // still-undelivered content for tiles the newer manifest never even
+      // touched -- observed as a proxy sending ~0 bytes/s despite having a
+      // full queue. BandQueue::push()'s per-(tile,band) dedup_key already
+      // replaces a slot's stale content with its newer version in-place
+      // (see ddil_proxy_logic.hpp) without discarding unrelated slots, which
+      // is the correct place for this decision.
       const std::size_t nbytes = item.serialized->size();
 
       // Token bucket: blocks until enough tokens available

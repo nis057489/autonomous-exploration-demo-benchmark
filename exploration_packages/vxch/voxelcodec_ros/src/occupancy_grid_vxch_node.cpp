@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -152,15 +153,35 @@ public:
           output_base_topic_ + "/band_" + std::to_string(k), band_qos);
     }
 
+    // on_map() (a full per-tile Haar re-encode of the map) and send_pending_bands()
+    // (the fixed-rate sender) used to share the implicit default callback group,
+    // which a plain rclcpp::spin() services with a SingleThreadedExecutor -- so
+    // one slow on_map() call (e.g. after a large map growth/loop-closure jump)
+    // silently blocked the send timer from firing at all for its entire
+    // duration, not just delayed it. Live measurement: one robot's encoder went
+    // 159s between send ticks, then dumped its entire backlog in a burst the
+    // instant on_map() finally returned -- indistinguishable from "not even
+    // trying" at the network layer even though the link itself was idle the
+    // whole time. Separate reentrant-safe callback groups + a MultiThreadedExecutor
+    // (see main()) let the timer keep firing on schedule regardless of how long
+    // any single on_map() call takes; scheduler_mutex_ below serializes their
+    // actual access to shared scheduler_/manifest_ state.
+    map_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    send_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
+    rclcpp::SubscriptionOptions map_sub_options;
+    map_sub_options.callback_group = map_cb_group_;
     map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
       input_topic_, map_qos,
       [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr msg) {
         on_map(msg);
-      });
+      },
+      map_sub_options);
 
     send_timer_ = create_wall_timer(
       std::chrono::duration<double>(1.0 / send_rate_hz_),
-      [this]() {send_pending_bands();});
+      [this]() {send_pending_bands();},
+      send_cb_group_);
 
     RCLCPP_INFO(
       get_logger(),
@@ -189,6 +210,12 @@ private:
       return;
     }
 
+    // scheduler_/manifest_/latest_header_/has_map_ are also touched by
+    // send_pending_bands(), now running on a separate callback group/thread
+    // (see constructor) so a slow ingest_grid() below can't block the send
+    // timer -- this lock is what keeps that concurrent access safe instead of
+    // just fast.
+    std::lock_guard<std::mutex> lock(scheduler_mutex_);
     const auto result = scheduler_->ingest_grid(
       msg->data, grid_w, grid_h, static_cast<double>(msg->info.resolution),
       msg->info.origin.position.x, msg->info.origin.position.y);
@@ -218,6 +245,15 @@ private:
 
   void send_pending_bands()
   {
+    // Holds scheduler_mutex_ for the whole call, including the publish()es below --
+    // take_pending_bands() moves EncodedChannel payloads out of scheduler_ internals,
+    // so releasing the lock before publishing would let a concurrent on_map() ingest
+    // a new update and mutate scheduler_ while this thread still holds references
+    // into what used to be its state. The publishes themselves are cheap (already-
+    // serialized-shape messages going to DDS), so lock hold time stays bounded by
+    // take_pending_bands()'s own cost, not by ingest_grid()'s.
+    std::lock_guard<std::mutex> lock(scheduler_mutex_);
+
     if (!has_map_ || !scheduler_->has_pending()) {
       return;
     }
@@ -267,7 +303,13 @@ private:
   std::string schedule_mode_;
 
   std::unique_ptr<TileScheduler> scheduler_;
+  // Guards scheduler_/manifest_/latest_header_/has_map_, shared between
+  // on_map() and send_pending_bands() -- now on separate callback groups
+  // (see constructor) so they can genuinely run concurrently.
+  std::mutex scheduler_mutex_;
 
+  rclcpp::CallbackGroup::SharedPtr map_cb_group_;
+  rclcpp::CallbackGroup::SharedPtr send_cb_group_;
   rclcpp::Publisher<voxelcodec_msgs::msg::VoxelManifest>::SharedPtr manifest_pub_;
   std::vector<rclcpp::Publisher<voxelcodec_msgs::msg::VoxelChannel>::SharedPtr> band_pubs_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
@@ -288,7 +330,13 @@ int main(int argc, char ** argv)
   rclcpp::init(argc, argv);
   try {
     auto node = std::make_shared<voxelcodec_ros::OccupancyGridVxchNode>();
-    rclcpp::spin(node);
+    // MultiThreadedExecutor, not plain spin()'s default SingleThreadedExecutor --
+    // required for on_map()'s and send_pending_bands()'s separate callback groups
+    // (see constructor) to actually run concurrently instead of just being
+    // logically separate but still serialized on one thread.
+    rclcpp::executors::MultiThreadedExecutor executor;
+    executor.add_node(node);
+    executor.spin();
   } catch (const std::exception & e) {
     RCLCPP_FATAL(rclcpp::get_logger("occupancy_grid_vxch_node"), "%s", e.what());
     rclcpp::shutdown();
