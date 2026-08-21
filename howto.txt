@@ -1,0 +1,11 @@
+Manually run these in 2 different windows. 
+
+ROS_DOMAIN_ID=42 TURTLEBOT3_MODEL=waffle_pi ros2 launch turtlebot3_bringup robot.launch.py
+
+after that starts up run this:
+
+ROS_DOMAIN_ID=42 TURTLEBOT3_MODEL=waffle_pi ros2 launch turtlebot3_navigation2 navigation2.launch.py slam:=True use_sim_time:=False use_rviz:=False
+
+and after that starts up run
+
+ROS_DOMAIN_ID=42 ros2 run lite_frontier_explorer lite_frontier_explorer_node --ros-args   -p costmap_topic:=global_costmap/costmap   -p global_frame:=map   -p robot_base_frame:=base_footprint   -p use_sim_time:=false
