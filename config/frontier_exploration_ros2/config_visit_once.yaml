@@ -114,7 +114,7 @@ frontier_explorer:
     post_goal_settle_enabled: true
 
     # Minimum seconds to wait before selecting the next frontier after a successful goal.
-    post_goal_min_settle: 1.50
+    post_goal_min_settle: 5.0
 
     # Enable temporary suppression for frontiers that repeatedly fail or stall.
     # Use if you are having issues with SLAM or Nav2.
