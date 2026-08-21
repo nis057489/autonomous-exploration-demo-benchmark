@@ -174,7 +174,7 @@ frontier_explorer:
 
     # Distance used to treat a frontier region as recently visited.
     # Use if you are having navigation loops.
-    frontier_visit_tolerance: 2.0
+    frontier_visit_tolerance: 4.0
 
     # --------------- Map Optimization --------------- #
 
@@ -183,7 +183,7 @@ frontier_explorer:
     # Higher values reduce local dithering but can skip useful nearby openings.
     # Example: 0.25 allows immediate local cleanup, 0.5 forces a small commit distance.
     # Recommended value: 2.5x size of robot's radius
-    frontier_candidate_min_goal_distance_m: 0.8
+    frontier_candidate_min_goal_distance_m: 2.0
 
     # Occupancy threshold applied to the global costmap during frontier validation.
     # Neighbor cells at or above this cost are treated as blocked for frontier tests.
