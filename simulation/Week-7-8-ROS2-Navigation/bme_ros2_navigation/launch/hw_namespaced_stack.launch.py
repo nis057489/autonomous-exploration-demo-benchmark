@@ -3,7 +3,7 @@ Per-robot namespaced hardware stack.
 
 Called by launch_real_hardware.sh when ROBOT_ID is set.
 Handles SLAM, Nav2, per_robot_map_compositor, frontier_path_tracker,
-and frontier_explorer — all under /{namespace}/.
+and lite_frontier_explorer — all under /{namespace}/.
 
 Assumes turtlebot3_bringup is already running on this Pi (started by
 launch_real_hardware.sh before this file is invoked, or --local-bringup
@@ -172,59 +172,6 @@ def _patch_nav_params(base_path, namespace, output_dir):
     cm.setdefault("scan", {})["topic"] = f"/{namespace}/scan"
 
     return _write_yaml(output_dir, f"{namespace}_navigation.yaml", data)
-
-
-#  Matches _PATH_COLORS in multi_robot_navigation_with_slam.launch.py and
-#  _PATH_COLORS_255 in rviz/launch/multi_robot_frontier_explorer.launch.py
-#  (values in 0-255).
-_PATH_COLORS_255 = [
-    (255, 85, 0),    # orange-red  (robot1)
-    (0, 100, 255),   # blue        (robot2)
-    (0, 200, 50),    # green       (robot3)
-    (200, 0, 200),   # purple      (robot4+)
-]
-
-
-def _robot_index(namespace):
-    digits = "".join(ch for ch in namespace if ch.isdigit())
-    return (int(digits) - 1) if digits else 0
-
-
-def _patch_explore_params(base_path, namespace, output_dir, peers=()):
-    data = copy.deepcopy(_load_yaml(base_path))
-    p = data.setdefault("frontier_explorer", {}).setdefault(
-        "ros__parameters", {})
-    p["use_sim_time"] = False
-    p["map_topic"] = f"/{namespace}/nav_map"
-    p["costmap_topic"] = f"/{namespace}/global_costmap/costmap"
-    p["local_costmap_topic"] = f"/{namespace}/local_costmap/costmap"
-    p["global_frame"] = "map"
-    p["robot_base_frame"] = f"{namespace}/base_footprint"
-    p["frontier_marker_topic"] = f"/{namespace}/explore/frontiers"
-    p["selected_frontier_topic"] = f"/{namespace}/explore/selected_frontier"
-    p["optimized_map_topic"] = f"/{namespace}/explore/optimized_map"
-    color_255 = _PATH_COLORS_255[min(_robot_index(namespace), len(_PATH_COLORS_255) - 1)]
-    p["frontier_marker_color_r"] = color_255[0] / 255.0
-    p["frontier_marker_color_g"] = color_255[1] / 255.0
-    p["frontier_marker_color_b"] = color_255[2] / 255.0
-    # team_map_topic and own_pose_topic are left as their config defaults
-    # ("team_map_ddil" / "explore/pose") -- both relative, so the frontier_explorer
-    # Node's own namespace push below resolves them to /{namespace}/... automatically,
-    # matching team_map_fusion's own_pose_topic output_topic and this robot's own publish
-    # topic respectively. peer_pose_topics has no such default to fall back on: it names
-    # *other* robots' namespaces, which this robot's own namespace push cannot derive, so
-    # without this it silently stays empty and peer_avoidance_radius_m never filters
-    # anything (team_awareness_enabled's "no peers configured" no-op path, permanently).
-    p["peer_pose_topics"] = [f"/{peer['name']}/explore/pose" for peer in peers]
-    # The frontier_explorer Node() below passes this file straight through as
-    # a --params-file with no namespace-aware rewriting (same issue fixed for
-    # slam_toolbox above). A bare "frontier_explorer:" key does not bind to
-    # the node once it's namespaced as /{namespace}/frontier_explorer, so
-    # every override here was being silently dropped -- confirmed live via
-    # "Could not transform base_footprint -> map" (the bare, un-namespaced
-    # default) instead of using robot_base_frame's override.
-    data[f"/{namespace}/frontier_explorer"] = data.pop("frontier_explorer")
-    return _write_yaml(output_dir, f"{namespace}_explore.yaml", data)
 
 
 # ── Distributed team map sharing ───────────────────────────────────────────────
@@ -519,7 +466,6 @@ def _create_actions(context):
     abs_namespace = f"/{namespace}"
     nav_params_file = LaunchConfiguration("nav_params_file").perform(context)
     slam_params_file = LaunchConfiguration("slam_params_file").perform(context)
-    explore_config = LaunchConfiguration("explore_config").perform(context)
     local_bringup = LaunchConfiguration("local_bringup").perform(context).lower() in (
         "1", "true", "yes", "on"
     )
@@ -544,7 +490,6 @@ def _create_actions(context):
 
     slam_cfg = _patch_slam_params(slam_params_file, namespace, output_dir)
     nav_cfg = _patch_nav_params(nav_params_file, namespace, output_dir)
-    explore_cfg = _patch_explore_params(explore_config, namespace, output_dir, peers)
 
     slam_launch = os.path.join(
         get_package_share_directory("slam_toolbox"),
@@ -641,9 +586,9 @@ def _create_actions(context):
                 "robot_base_frame": f"{namespace}/base_footprint",
                 "path_topic": f"/{namespace}/explore/traversed_path",
                 "package_topics": [
-                    f"frontier_exploration_ros2:/{namespace}/explore/traversed_path",
+                    f"lite_frontier_explorer:/{namespace}/explore/traversed_path",
                 ],
-                "default_package": "frontier_exploration_ros2",
+                "default_package": "lite_frontier_explorer",
                 "active_package_topic": f"/{namespace}/explore/path_tracker/active_package",
                 "initial_pose_topic": f"/{namespace}/explore/path_tracker/initial_pose",
                 "reset_topic": "/explore/reset_traveled_path",
@@ -692,12 +637,17 @@ def _create_actions(context):
 
     actions.append(
         Node(
-            package="frontier_exploration_ros2",
-            executable="frontier_explorer",
-            name="frontier_explorer",
+            package="lite_frontier_explorer",
+            executable="lite_frontier_explorer_node",
+            name="lite_frontier_explorer",
             namespace=abs_namespace,
             output="screen",
-            parameters=[explore_cfg, {"use_sim_time": False}],
+            parameters=[{
+                "costmap_topic": "global_costmap/costmap",
+                "global_frame": "map",
+                "robot_base_frame": f"{namespace}/base_footprint",
+                "use_sim_time": False,
+            }],
         )
     )
 
@@ -727,11 +677,9 @@ def generate_launch_description():
         DeclareLaunchArgument("namespace",
                               description="ROS namespace for this robot, e.g. robot1"),
         DeclareLaunchArgument("nav_params_file",
-                              description="Path to navigation_hw.yaml"),
+                              description="Path to nav2's params yaml (stock nav2_bringup default)"),
         DeclareLaunchArgument("slam_params_file",
-                              description="Path to slam_toolbox_mapping_hw.yaml"),
-        DeclareLaunchArgument("explore_config",
-                              description="Path to frontier_exploration_ros2 config.yaml"),
+                              description="Path to slam_toolbox's params yaml (stock slam_toolbox default)"),
         DeclareLaunchArgument("local_bringup", default_value="false",
                               description="true = also launch turtlebot3_bringup here"),
         DeclareLaunchArgument("tb3_model", default_value="waffle_pi"),

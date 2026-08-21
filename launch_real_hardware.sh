@@ -196,7 +196,7 @@ _check_install_exec() {
 _check_install_file "${PROJECT_ROOT}/install/bme_ros2_navigation_py/share/bme_ros2_navigation_py/local_setup.bash" bme_ros2_navigation_py
 _check_install_exec "${PROJECT_ROOT}/install/bme_ros2_navigation_py/libexec/bme_ros2_navigation_py/tf_frame_renamer" bme_ros2_navigation_py
 _check_install_file "${PROJECT_ROOT}/install/bme_ros2_navigation/share/bme_ros2_navigation/local_setup.bash" bme_ros2_navigation
-_check_install_file "${PROJECT_ROOT}/install/frontier_exploration_ros2/share/frontier_exploration_ros2/local_setup.bash" frontier_exploration_ros2
+_check_install_file "${PROJECT_ROOT}/install/lite_frontier_explorer/share/lite_frontier_explorer/local_setup.bash" lite_frontier_explorer
 _check_install_file "${PROJECT_ROOT}/install/rviz_autonomous_exploration_benchmark/share/rviz_autonomous_exploration_benchmark/local_setup.bash" rviz_autonomous_exploration_benchmark
 _check_install_file "${PROJECT_ROOT}/install/voxelcodec_msgs/share/voxelcodec_msgs/local_setup.bash" voxelcodec_msgs
 _check_install_file "${PROJECT_ROOT}/install/voxelcodec_ros/share/voxelcodec_ros/local_setup.bash" voxelcodec_ros
@@ -204,7 +204,7 @@ _check_install_file "${PROJECT_ROOT}/install/voxelcodec_ros/share/voxelcodec_ros
 if [[ "${REBUILD}" == true ]] || [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
   if [[ "${REBUILD}" == true ]]; then
     echo "Rebuilding selected workspace packages..."
-    BUILD_PACKAGES=(bme_ros2_navigation bme_ros2_navigation_py frontier_exploration_ros2 rviz_autonomous_exploration_benchmark voxelcodec_msgs voxelcodec_ros)
+    BUILD_PACKAGES=(bme_ros2_navigation bme_ros2_navigation_py lite_frontier_explorer rviz_autonomous_exploration_benchmark voxelcodec_msgs voxelcodec_ros)
   else
     echo "Missing install packages: ${MISSING_PKGS[*]}. Building only those packages..."
     BUILD_PACKAGES=("${MISSING_PKGS[@]}")
@@ -241,40 +241,10 @@ check_pkg() {
   fi
 }
 
-ensure_frontier_exploration_ros2() {
-  if ros2 pkg prefix frontier_exploration_ros2 >/dev/null 2>&1; then
-    return 0
-  fi
-
-  echo "Package 'frontier_exploration_ros2' not found. Initializing submodule..."
-
-  local submodule_dir="${PROJECT_ROOT}/exploration_packages/frontier_exploration_ros2"
-
-  (cd "${PROJECT_ROOT}" && git submodule sync --recursive -- "${submodule_dir}" \
-    && git submodule update --init --recursive -- "${submodule_dir}")
-
-  echo "Building frontier_exploration_ros2 (this may take a minute)..."
-  (
-    cd "${PROJECT_ROOT}"
-    colcon build --packages-select frontier_exploration_ros2 --symlink-install
-  )
-
-  # Re-source workspace so the newly built package is visible.
-  # shellcheck source=/dev/null
-  source "${PROJECT_ROOT}/install/setup.bash"
-
-  if ! ros2 pkg prefix frontier_exploration_ros2 >/dev/null 2>&1; then
-    echo "Build succeeded but 'frontier_exploration_ros2' is still not found — check build output above." >&2
-    exit 1
-  fi
-
-  echo "frontier_exploration_ros2 installed successfully."
-}
-
 check_pkg slam_toolbox
 check_pkg nav2_bringup
+check_pkg nav2_simple_commander
 check_pkg bme_ros2_navigation
-ensure_frontier_exploration_ros2
 sync
 
 if [[ "${LOCAL_BRINGUP}" == true ]]; then
@@ -283,11 +253,10 @@ fi
 
 # ── Config file paths ─────────────────────────────────────────────────────────
 
-# Reuse the existing sim nav params — they are already tuned to TB3 velocity limits.
-# If you have a robot-specific nav params file, point NAVIGATION_PARAMS at it instead.
-NAVIGATION_PARAMS="${PROJECT_ROOT}/simulation/Week-7-8-ROS2-Navigation/bme_ros2_navigation/config/navigation_hw.yaml"
-SLAM_PARAMS="${PROJECT_ROOT}/simulation/Week-7-8-ROS2-Navigation/bme_ros2_navigation/config/slam_toolbox_mapping_hw.yaml"
-EXPLORE_CONFIG="${PROJECT_ROOT}/config/frontier_exploration_ros2/config_visit_once.yaml"
+# Stock nav2/slam_toolbox defaults, resolved from whatever versions are
+# actually installed -- no repo-custom tuning, per the switch to lite_frontier_explorer.
+NAVIGATION_PARAMS="$(ros2 pkg prefix nav2_bringup)/share/nav2_bringup/params/nav2_params.yaml"
+SLAM_PARAMS="$(ros2 pkg prefix slam_toolbox)/share/slam_toolbox/config/mapper_params_online_async.yaml"
 
 TRACKER_PARAMS="${PROJECT_ROOT}/install/rviz_autonomous_exploration_benchmark/share/rviz_autonomous_exploration_benchmark/config/frontier_path_tracker.yaml"
 if [[ ! -f "${TRACKER_PARAMS}" ]]; then
@@ -436,7 +405,6 @@ if [[ -n "${ROBOT_ID}" ]]; then
     namespace:="${ROBOT_ID}" \
     nav_params_file:="${NAVIGATION_PARAMS}" \
     slam_params_file:="${SLAM_PARAMS}" \
-    explore_config:="${EXPLORE_CONFIG}" \
     local_bringup:="${LOCAL_BRINGUP}" \
     tb3_model:="${TB3_MODEL}" \
     spawn_x:="${ROBOT_OFFSET_X}" \
@@ -505,11 +473,10 @@ cleanup_existing_nav2
 
 # ── Config file paths ─────────────────────────────────────────────────────────
 
-# Reuse the existing sim nav params — they are already tuned to TB3 velocity limits.
-# If you have a robot-specific nav params file, point NAVIGATION_PARAMS at it instead.
-NAVIGATION_PARAMS="${PROJECT_ROOT}/simulation/Week-7-8-ROS2-Navigation/bme_ros2_navigation/config/navigation_hw.yaml"
-SLAM_PARAMS="${PROJECT_ROOT}/simulation/Week-7-8-ROS2-Navigation/bme_ros2_navigation/config/slam_toolbox_mapping_hw.yaml"
-EXPLORE_CONFIG="${PROJECT_ROOT}/config/frontier_exploration_ros2/config_visit_once.yaml"
+# Stock nav2/slam_toolbox defaults, resolved from whatever versions are
+# actually installed -- no repo-custom tuning, per the switch to lite_frontier_explorer.
+NAVIGATION_PARAMS="$(ros2 pkg prefix nav2_bringup)/share/nav2_bringup/params/nav2_params.yaml"
+SLAM_PARAMS="$(ros2 pkg prefix slam_toolbox)/share/slam_toolbox/config/mapper_params_online_async.yaml"
 
 TRACKER_PARAMS="${PROJECT_ROOT}/install/rviz_autonomous_exploration_benchmark/share/rviz_autonomous_exploration_benchmark/config/frontier_path_tracker.yaml"
 if [[ ! -f "${TRACKER_PARAMS}" ]]; then
@@ -598,13 +565,15 @@ echo "frontier_path_tracker.py started (pid=${TRACKER_PID})."
 
 # ── 4) Frontier exploration ───────────────────────────────────────────────────
 
-EXPLORE_CONFIG="${PROJECT_ROOT}/config/frontier_exploration_ros2/config_visit_once.yaml"
-echo "Starting frontier_exploration_ros2 (params=${EXPLORE_CONFIG})..."
-ros2 launch frontier_exploration_ros2 frontier_explorer.launch.py \
-  use_sim_time:=false \
-  params_file:="${EXPLORE_CONFIG}" &
+echo "Starting lite_frontier_explorer..."
+ros2 run lite_frontier_explorer lite_frontier_explorer_node \
+  --ros-args \
+  -p costmap_topic:=global_costmap/costmap \
+  -p global_frame:=map \
+  -p robot_base_frame:=base_footprint \
+  -p use_sim_time:=false &
 EXPLORE_PID=$!
-echo "frontier_exploration_ros2 started (pid=${EXPLORE_PID})."
+echo "lite_frontier_explorer started (pid=${EXPLORE_PID})."
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 
