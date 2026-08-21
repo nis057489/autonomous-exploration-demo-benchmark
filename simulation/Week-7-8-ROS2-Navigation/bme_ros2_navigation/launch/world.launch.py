@@ -64,7 +64,7 @@ def _build_world_launch(context, pkg_ros_gz_sim, pkg_bme_ros2_navigation, worlds
     world_path = _resolve_world_path(pkg_bme_ros2_navigation, worlds_root, selected_world)
     seed = int(LaunchConfiguration('seed').perform(context))
     seed_flag = f' --seed {seed}' if seed >= 0 else ''
-    gz_args = f'{world_path} -r -s -v -v1{seed_flag}'
+    gz_args = f'{world_path} -r -v -v1{seed_flag}'
 
     return [
         IncludeLaunchDescription(
