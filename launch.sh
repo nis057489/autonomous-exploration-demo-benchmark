@@ -37,7 +37,6 @@ VARINT_ENCODING="${VARINT_ENCODING:-true}"
 TILE_SIZE_M="${TILE_SIZE_M:-2.0}"
 SCHEDULE_MODE="${SCHEDULE_MODE:-smart}"
 RANDOM_SEED="${RANDOM_SEED:--1}"
-ROBOT_STARTUP_DELAY_S="${ROBOT_STARTUP_DELAY_S:-0.0}"
 RECORD_METRICS="${RECORD_METRICS:-false}"
 # sim (default): ddil_proxy_node's in-process token-bucket/loss/delay simulation.
 # tc: real netns + veth + `tc netem` per robot (see setup_ddil_netns.sh) -- the
@@ -349,7 +348,6 @@ if (( NUM_ROBOTS > 1 )); then
     tile_size_m:="${TILE_SIZE_M}" \
     schedule_mode:="${SCHEDULE_MODE}" \
     rng_seed:="${RANDOM_SEED}" \
-    robot_startup_delay_s:="${ROBOT_STARTUP_DELAY_S}" \
     spawn_positions_json:="${SPAWN_POSITIONS_JSON}" &
   STACK_PID=$!
 

@@ -49,7 +49,6 @@ VARINT_ENCODING="${VARINT_ENCODING:-true}"
 TILE_SIZE_M="${TILE_SIZE_M:-2.0}"
 SCHEDULE_MODE="${SCHEDULE_MODE:-smart}"
 RANDOM_SEED="${RANDOM_SEED:--1}"
-ROBOT_STARTUP_DELAY_S="${ROBOT_STARTUP_DELAY_S:-0.0}"
 # ROBOT_HOSTS: every robot in the team, "name@ip@x@y@yaw" comma-separated, for
 # distributed map sharing (each robot's own launch excludes itself to get its
 # peer list). Empty = no map sharing.
@@ -507,8 +506,7 @@ if (( NUM_ROBOTS > 1 )); then
     varint_encoding:="${VARINT_ENCODING}" \
     tile_size_m:="${TILE_SIZE_M}" \
     schedule_mode:="${SCHEDULE_MODE}" \
-    rng_seed:="${RANDOM_SEED}" \
-    robot_startup_delay_s:="${ROBOT_STARTUP_DELAY_S}"
+    rng_seed:="${RANDOM_SEED}"
 
   exit $?
 fi
