@@ -49,12 +49,13 @@ class LiteFrontierExplorer(BasicNavigator):
             OccupancyGrid, self._costmap_topic, self._on_costmap, 1)
         self.create_timer(replan_period_s, self._tick)
 
+        # Deliberately not calling waitUntilNav2Active(): its default
+        # localizer='amcl' blocks forever on amcl/get_state, which never
+        # exists in this stack (slam_toolbox does localization, not AMCL).
+        # goToPose() below already waits for the NavigateToPose action
+        # server itself before sending a goal, which is all we need.
         self.get_logger().info(
-            f"lite_frontier_explorer: watching '{self._costmap_topic}', "
-            f"waiting for nav2..."
-        )
-        self.waitUntilNav2Active()
-        self.get_logger().info("nav2 active -- exploring.")
+            f"lite_frontier_explorer: watching '{self._costmap_topic}'")
 
     def _on_costmap(self, msg):
         self._latest_costmap = msg
