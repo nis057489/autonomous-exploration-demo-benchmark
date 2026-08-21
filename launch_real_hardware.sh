@@ -253,9 +253,14 @@ fi
 # ── Config file paths ─────────────────────────────────────────────────────────
 
 # Stock nav2/slam_toolbox defaults, resolved from whatever versions are
-# actually installed -- no repo-custom tuning, per the switch to lite_frontier_explorer.
+# actually installed. NAV_SAFETY_OVERRIDES is the one exception -- a small,
+# visible yaml (lite_frontier_explorer/config/nav2_safety_overrides.yaml)
+# deep-merged on top of the stock nav2 params in hw_namespaced_stack.launch.py,
+# carrying just the footprint/inflation/obstacle-range values needed so the
+# robot doesn't clip obstacles; everything else stays stock.
 NAVIGATION_PARAMS="$(ros2 pkg prefix nav2_bringup)/share/nav2_bringup/params/nav2_params.yaml"
 SLAM_PARAMS="$(ros2 pkg prefix slam_toolbox)/share/slam_toolbox/config/mapper_params_online_async.yaml"
+NAV_SAFETY_OVERRIDES="$(ros2 pkg prefix lite_frontier_explorer)/share/lite_frontier_explorer/config/nav2_safety_overrides.yaml"
 
 TRACKER_PARAMS="${PROJECT_ROOT}/install/rviz_autonomous_exploration_benchmark/share/rviz_autonomous_exploration_benchmark/config/frontier_path_tracker.yaml"
 if [[ ! -f "${TRACKER_PARAMS}" ]]; then
@@ -403,6 +408,7 @@ if [[ -n "${ROBOT_ID}" ]]; then
   ros2 launch bme_ros2_navigation hw_namespaced_stack.launch.py \
     namespace:="${ROBOT_ID}" \
     nav_params_file:="${NAVIGATION_PARAMS}" \
+    nav_safety_overrides_file:="${NAV_SAFETY_OVERRIDES}" \
     slam_params_file:="${SLAM_PARAMS}" \
     local_bringup:="${LOCAL_BRINGUP}" \
     tb3_model:="${TB3_MODEL}" \

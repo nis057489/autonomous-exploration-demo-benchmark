@@ -1,0 +1,56 @@
+# Hand-picked safety overrides, deep-merged on top of whichever nav2 params
+# file is passed as --nav_params_file (currently nav2_bringup's stock
+# nav2_params.yaml) -- see hw_namespaced_stack.launch.py::_patch_nav_params.
+# Everything else in the nav2 stack is stock; this file exists only for the
+# handful of values that directly control how close the robot gets to
+# obstacles before avoiding them, carried over unchanged from this repo's
+# original hand-tuned navigation_hw.yaml (see git history / the original
+# frontier_exploration_ros2-era config for the full file this was pulled
+# from).
+#
+# Why these specific values, not nav2's or TurtleBot3's own stock defaults:
+#   - footprint: measured from the real Waffle Pi body (306mm x 281mm,
+#     padded ~5cm/side), not a robot_radius circle. TurtleBot3's own
+#     official turtlebot3_navigation2/param/waffle_pi.yaml uses
+#     robot_radius: 0.15, which is smaller than the robot's actual
+#     corner-to-corner extent (~0.26m diagonal) -- nav2 ends up thinking
+#     the robot is skinnier than it is and lets planned paths brush closer
+#     to obstacles than the real body clearance allows. This polygon
+#     matches the true footprint instead.
+#   - inflation_radius / cost_scaling_factor: local costmap uses a smaller
+#     radius + steeper falloff (tight, fast-reacting local avoidance);
+#     global costmap uses a larger radius + gentler falloff (biases the
+#     planned path away from obstacles well in advance, not just at the
+#     last moment).
+#   - obstacle_layer scan ranges: matched to the LDS-02 LiDAR's real range
+#     (nav2_bringup/TB3 stock defaults use much shorter ranges tuned for
+#     smaller sim/demo spaces).
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      footprint: "[[0.20, 0.17], [0.20, -0.17], [-0.20, -0.17], [-0.20, 0.17]]"
+      footprint_padding: 0.01
+      inflation_layer:
+        inflation_radius: 0.30
+        cost_scaling_factor: 8.0
+      obstacle_layer:
+        scan:
+          raytrace_max_range: 7.5
+          raytrace_min_range: 0.16
+          obstacle_max_range: 6.0
+          obstacle_min_range: 0.16
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      footprint: "[[0.20, 0.17], [0.20, -0.17], [-0.20, -0.17], [-0.20, 0.17]]"
+      footprint_padding: 0.01
+      inflation_layer:
+        inflation_radius: 0.55
+        cost_scaling_factor: 3.0
+      obstacle_layer:
+        scan:
+          raytrace_max_range: 7.5
+          raytrace_min_range: 0.16
+          obstacle_max_range: 6.0
+          obstacle_min_range: 0.16

@@ -128,8 +128,10 @@ def _patch_slam_params(base_path, namespace, output_dir):
     return _write_yaml(output_dir, f"{namespace}_slam.yaml", data)
 
 
-def _patch_nav_params(base_path, namespace, output_dir):
+def _patch_nav_params(base_path, namespace, output_dir, safety_overrides_path=None):
     data = copy.deepcopy(_load_yaml(base_path))
+    if safety_overrides_path:
+        _deep_merge(data, _load_yaml(safety_overrides_path))
     base_link = f"{namespace}/base_link"
     base_fp = f"{namespace}/base_footprint"
     odom = f"{namespace}/odom"
@@ -465,6 +467,7 @@ def _create_actions(context):
     namespace = LaunchConfiguration("namespace").perform(context)
     abs_namespace = f"/{namespace}"
     nav_params_file = LaunchConfiguration("nav_params_file").perform(context)
+    nav_safety_overrides_file = LaunchConfiguration("nav_safety_overrides_file").perform(context)
     slam_params_file = LaunchConfiguration("slam_params_file").perform(context)
     local_bringup = LaunchConfiguration("local_bringup").perform(context).lower() in (
         "1", "true", "yes", "on"
@@ -489,7 +492,10 @@ def _create_actions(context):
     output_dir = tempfile.mkdtemp(prefix=f"bme_hw_{namespace}_")
 
     slam_cfg = _patch_slam_params(slam_params_file, namespace, output_dir)
-    nav_cfg = _patch_nav_params(nav_params_file, namespace, output_dir)
+    nav_cfg = _patch_nav_params(
+        nav_params_file, namespace, output_dir,
+        nav_safety_overrides_file or None,
+    )
 
     slam_launch = os.path.join(
         get_package_share_directory("slam_toolbox"),
@@ -678,6 +684,12 @@ def generate_launch_description():
                               description="ROS namespace for this robot, e.g. robot1"),
         DeclareLaunchArgument("nav_params_file",
                               description="Path to nav2's params yaml (stock nav2_bringup default)"),
+        DeclareLaunchArgument(
+            "nav_safety_overrides_file", default_value="",
+            description="Optional yaml, deep-merged onto nav_params_file before "
+                        "namespacing -- lite_frontier_explorer's hand-picked "
+                        "footprint/inflation/obstacle-range safety values. "
+                        "Empty = no override, use nav_params_file as-is."),
         DeclareLaunchArgument("slam_params_file",
                               description="Path to slam_toolbox's params yaml (stock slam_toolbox default)"),
         DeclareLaunchArgument("local_bringup", default_value="false",
