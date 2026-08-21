@@ -9,8 +9,6 @@ A ROS 2 Jazzy benchmark workspace created to compare multiple autonomous explora
 
 The repository brings together a simulaton environment, multiple exploration packages, benchmark utilities, and result reporting so exploration behavior can be compared more fairly.
 
-An extra purpose of this repository is testing stability and correctness of the [frontier_exploration_ros2](https://github.com/mertgulerx/frontier_exploration_ros2) package.
-
 ## Table of Contents
 
 - [Overview](#overview)
@@ -20,8 +18,6 @@ An extra purpose of this repository is testing stability and correctness of the 
 - [Build and Run](#build-and-run)
 - [Usage](#usage)
 - [Contributing](#contributing)
-- [frontier_exploration_ros2 Integration](#frontier_exploration_ros2-integration)
-
 - [Thanks](#thanks)
 - [License](#license)
 - [Maintainer](#maintainer)
@@ -54,20 +50,16 @@ For any inquiries or concerns related to these, please [contact me](#maintainer)
 
 ### Exploration Packages
 
-1. `frontier_exploration_ros2`
-   - License: `Apache-2.0`
-   - Source: [mertgulerx/frontier_exploration_ros2](https://github.com/mertgulerx/frontier_exploration_ros2)
-   - Commit: [6655b3a3a765051e865f3e2544dfa8a21368d8a1](https://github.com/mertgulerx/frontier_exploration_ros2/commit/6655b3a3a765051e865f3e2544dfa8a21368d8a1)
-2. `m-explore-ros2 (slam_toolbox branch)`
+1. `m-explore-ros2 (slam_toolbox branch)`
    - License: `BSD`
    - Source: [robo-friends/m-explore-ros2](https://github.com/robo-friends/m-explore-ros2)
    - Commit: [9b64d8d35213dd50bc44f1b5b4959c1f58c32d2e](https://github.com/robo-friends/m-explore-ros2/commit/9b64d8d35213dd50bc44f1b5b4959c1f58c32d2e)
-3. `nav2_wavefront_frontier_exploration`
+2. `nav2_wavefront_frontier_exploration`
    - License: `MIT`
    - Source: [SeanReg/nav2_wavefront_frontier_exploration](https://github.com/SeanReg/nav2_wavefront_frontier_exploration)
    - Commit: [07473294204663473fd6ae058729c4bba71b6074](https://github.com/SeanReg/nav2_wavefront_frontier_exploration/commit/07473294204663473fd6ae058729c4bba71b6074)
 
-4. `roadmap-explorer`
+3. `roadmap-explorer`
    - License: `Apache License 2.0`
    - Citation: `S. Saravanan, A. Bains, C. Chanel, D. Vivet, "FIT-SLAM 2: Efficient 3D Exploration with Fisher Information and Traversability Based Adaptive Roadmap"`
    - Source: [suchetanrs/roadmap-explorer](https://github.com/suchetanrs/roadmap-explorer)
@@ -546,16 +538,6 @@ Contributions are welcome, especially in areas that improve:
 - result reproducibility
 
 When contributing, please keep changes focused and document any effect on benchmark behavior, metrics, launch assumptions, or package configuration.
-
-## frontier_exploration_ros2 Integration
-
-This repository is also a demo integration for my own `frontier_exploration_ros2` package. It was very easy to integrate.
-
-- I cloned the package
-- Created my own YAML config according to MOGI Robot's specifications.
-- Built without optional RViz plugin.
-- Launched it with `ros2 launch frontier_exploration_ros2 frontier_explorer.launch.py params_file:=config/frontier_exploration_ros2/config.yaml`
-- Worked absolutely fine. Had no stucking problem but I tweaked some parameters to make it work better with **10m range LiDAR** of the MOGI Robot.
 
 ## Thanks
 

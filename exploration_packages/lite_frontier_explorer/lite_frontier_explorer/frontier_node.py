@@ -31,6 +31,7 @@ class LiteFrontierExplorer(Node):
         self.declare_parameter('global_frame', 'map')
         self.declare_parameter('robot_base_frame', 'base_footprint')
         self.declare_parameter('min_frontier_size_cells', 6)
+        self.declare_parameter('min_frontier_distance_m', 2.0)
         self.declare_parameter('occ_threshold', 50)
         self.declare_parameter('replan_period_s', 3.0)
         self.declare_parameter('navigate_to_pose_action_name', 'navigate_to_pose')
@@ -39,6 +40,7 @@ class LiteFrontierExplorer(Node):
         self._global_frame = self.get_parameter('global_frame').value
         self._robot_base_frame = self.get_parameter('robot_base_frame').value
         self._min_frontier_size = self.get_parameter('min_frontier_size_cells').value
+        self._min_frontier_distance_m = self.get_parameter('min_frontier_distance_m').value
         self._occ_threshold = self.get_parameter('occ_threshold').value
         replan_period_s = self.get_parameter('replan_period_s').value
         action_name = self.get_parameter('navigate_to_pose_action_name').value
@@ -100,11 +102,18 @@ class LiteFrontierExplorer(Node):
                 throttle_duration_sec=5.0)
             return
 
-        goal_x, goal_y = select_nearest_frontier(
+        goal = select_nearest_frontier(
             clusters, robot_pose[0], robot_pose[1],
             costmap.info.resolution,
             costmap.info.origin.position.x, costmap.info.origin.position.y,
+            min_distance_m=self._min_frontier_distance_m,
         )
+        if goal is None:
+            self.get_logger().info(
+                "No frontiers beyond min_frontier_distance_m -- waiting.",
+                throttle_duration_sec=10.0)
+            return
+        goal_x, goal_y = goal
 
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = self._global_frame

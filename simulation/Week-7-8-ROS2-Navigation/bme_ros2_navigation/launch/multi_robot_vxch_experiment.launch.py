@@ -271,9 +271,9 @@ def _create_all_actions(context):
     # no reported issues); only turtlebot3_waffle -- which is meant to mirror
     # hardware -- gets the hardware-tuned config.
     frontier_params_file = (
-        "config/frontier_exploration_ros2/config_visit_once.yaml"
+        "config/lite_frontier_explorer/config_visit_once.yaml"
         if "turtlebot3_waffle" in model
-        else "config/frontier_exploration_ros2/config.yaml"
+        else "config/lite_frontier_explorer/config.yaml"
     )
     actions.append(
         IncludeLaunchDescription(
@@ -283,7 +283,6 @@ def _create_all_actions(context):
             launch_arguments={
                 "num_robots": str(num_robots),
                 "use_sim_time": use_sim_time_str,
-                "robot_startup_delay_s": str(robot_startup_delay_s),
                 "params_file": frontier_params_file,
             }.items(),
         )

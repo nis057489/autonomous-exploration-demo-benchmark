@@ -68,22 +68,18 @@ RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
     colcon build --symlink-install --packages-select \
         bme_ros2_navigation bme_ros2_navigation_py \
         rviz_autonomous_exploration_benchmark"
-    
-# ── frontier_exploration_ros2 (frequently changed) ────────────────────────────
-COPY exploration_packages/frontier_exploration_ros2 exploration_packages/frontier_exploration_ros2
+
+# ── lite_frontier_explorer (frequently changed) ───────────────────────────────
+COPY exploration_packages/lite_frontier_explorer exploration_packages/lite_frontier_explorer
 
 RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
     apt-get update && \
-    rosdep install --from-paths exploration_packages/frontier_exploration_ros2 --ignore-src -r -y && \
+    rosdep install --from-paths exploration_packages/lite_frontier_explorer --ignore-src -r -y && \
     rm -rf /var/lib/apt/lists/*"
 
 RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
     source ${WORKSPACE_DIR}/install/setup.bash && \
-    colcon build --symlink-install --packages-select frontier_exploration_ros2"
-
-RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && \
-    source ${WORKSPACE_DIR}/install/setup.bash && \
-    colcon build --symlink-install --packages-select frontier_exploration_ros2_rviz"
+    colcon build --symlink-install --packages-select lite_frontier_explorer"
 
 # ── vxch (frequently changed) ─────────────────────────────────────────────────
 COPY exploration_packages/vxch exploration_packages/vxch

@@ -101,7 +101,7 @@ def _robot_pose(index, count, x, y, z, yaw, spacing, world):
 # 0.266 box) is meaningfully smaller, so reusing mogi_bot's larger footprint made
 # Nav2 believe the waffle was ~50% bigger than it really is in both dimensions --
 # planner treats passable gaps as too narrow (windy, indirect paths hugging open
-# space) and frontier_exploration_ros2's reachability check (which just consults
+# space) and lite_frontier_explorer's reachability check (which just consults
 # this same costmap, it has no footprint notion of its own) rejects/avoids
 # frontiers a real-sized waffle could reach, leaving only nearby ones actually
 # selectable.
@@ -887,9 +887,9 @@ def _create_multi_robot_actions(context):
                     "robot_base_frame": f"{namespace}/base_footprint",
                     "path_topic": f"/{namespace}/explore/traversed_path",
                     "package_topics": [
-                        f"frontier_exploration_ros2:/{namespace}/explore/traversed_path",
+                        f"lite_frontier_explorer:/{namespace}/explore/traversed_path",
                     ],
-                    "default_package": "frontier_exploration_ros2",
+                    "default_package": "lite_frontier_explorer",
                     "active_package_topic": f"/{namespace}/explore/path_tracker/active_package",
                     "initial_pose_topic": f"/{namespace}/explore/path_tracker/initial_pose",
                     "reset_topic": "/explore/reset_traveled_path",

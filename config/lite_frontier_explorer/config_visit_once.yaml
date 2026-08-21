@@ -1,0 +1,30 @@
+frontier_explorer:
+  ros__parameters:
+    # Global costmap topic used to compute frontiers. Multi-robot launch files
+    # override this per-robot; this is just the standalone default.
+    costmap_topic: /global_costmap/costmap
+
+    # Nav2 NavigateToPose action name.
+    navigate_to_pose_action_name: navigate_to_pose
+
+    # Global frame used for frontier goals and TF lookups.
+    global_frame: map
+
+    # Robot base frame used for TF lookups.
+    robot_base_frame: base_footprint
+
+    # Occupancy threshold applied to the global costmap during frontier validation.
+    # Cells at or above this cost are treated as blocked. Value between 0-100.
+    # Lower than config.yaml's 100 -- tuned against real turtlebot3_waffle hardware
+    # (0.22 m/s, ~3.5m real LDS-01 lidar range), which needs a stricter obstacle
+    # margin than mogi_bot's longer-range sensor.
+    occ_threshold: 95
+
+    # Minimum connected frontier size accepted by frontier detection, measured in cells.
+    min_frontier_size_cells: 3
+
+    # Minimum distance in meters between the robot and a candidate frontier.
+    min_frontier_distance_m: 2.0
+
+    # Seconds between replanning attempts.
+    replan_period_s: 3.0

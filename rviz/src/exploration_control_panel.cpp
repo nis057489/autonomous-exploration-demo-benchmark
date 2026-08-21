@@ -100,35 +100,15 @@ ExplorationControlPanel::ExplorationControlPanel(QWidget * parent)
     }();
 
   int row = 0;
-  if (robot_count > 1) {
-    add_explorer_row(
-      row++,
-      "frontier_exploration_ros2 team (mrtsp)",
-      "rviz_autonomous_exploration_benchmark",
-      "multi_robot_frontier_explorer.launch.py",
-      QString("num_robots:=%1 params_file:=config/frontier_exploration_ros2/config.yaml")
-      .arg(robot_count),
-      "frontier_explorer",
-      "frontier_exploration_ros2_team");
-  }
-
   add_explorer_row(
     row++,
-    "frontier_exploration_ros2 (mrtsp)",
-    "frontier_exploration_ros2",
-    "frontier_explorer.launch.py",
-    "params_file:=config/frontier_exploration_ros2/config.yaml",
-    "frontier_explorer",
-    "frontier_exploration_ros2_mrtsp");
-
-  add_explorer_row(
-    row++,
-    "frontier_exploration_ros2 (nearest)",
-    "frontier_exploration_ros2",
-    "frontier_explorer.launch.py",
-    "params_file:=config/frontier_exploration_ros2/config_nearest.yaml",
-    "frontier_explorer",
-    "frontier_exploration_ros2_nearest");
+    "lite_frontier_explorer",
+    "rviz_autonomous_exploration_benchmark",
+    "multi_robot_frontier_explorer.launch.py",
+    QString("num_robots:=%1 params_file:=config/lite_frontier_explorer/config.yaml")
+    .arg(robot_count),
+    "lite_frontier_explorer_node",
+    "lite_frontier_explorer");
 
   add_explorer_row(
     row++,

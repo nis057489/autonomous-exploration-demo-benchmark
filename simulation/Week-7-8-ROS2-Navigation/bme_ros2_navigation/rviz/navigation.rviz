@@ -256,8 +256,7 @@ Visualization Manager:
         Robot footprint: true
         RobotModel: true
         TF: true
-        Traveled Path frontier_exploration_ros2 (mrtsp): true
-        Traveled Path frontier_exploration_ros2 (nearest): true
+        Traveled Path lite_frontier_explorer: true
         Traveled Path m_explore_ros2: true
         Traveled Path nav2_wavefront_frontier_exploration: true
         Traveled Path roadmap_explorer: true
@@ -387,7 +386,7 @@ Visualization Manager:
       Length: 0.3
       Line Style: Billboards
       Line Width: 0.05
-      Name: Traveled Path frontier_exploration_ros2 (mrtsp)
+      Name: Traveled Path lite_frontier_explorer
       Offset:
         X: 0
         Y: 0
@@ -404,34 +403,6 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /explore/traversed_path
-      Value: true
-    - Alpha: 1
-      Buffer Length: 1
-      Class: rviz_default_plugins/Path
-      Color: 255; 105; 180
-      Enabled: true
-      Head Diameter: 0.3
-      Head Length: 0.2
-      Length: 0.3
-      Line Style: Billboards
-      Line Width: 0.05
-      Name: Traveled Path frontier_exploration_ros2 (nearest)
-      Offset:
-        X: 0
-        Y: 0
-        Z: 0
-      Pose Color: 255; 85; 255
-      Pose Style: None
-      Radius: 0.03
-      Shaft Diameter: 0.1
-      Shaft Length: 0.1
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /explore/traversed_path/frontier_exploration_ros2_nearest
       Value: true
     - Alpha: 1
       Buffer Length: 1

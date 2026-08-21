@@ -49,13 +49,12 @@ class FrontierPathTracker(Node):
         self.declare_parameter(
             "package_topics",
             [
-                "frontier_exploration_ros2_mrtsp:/explore/traversed_path",
-                "frontier_exploration_ros2_nearest:/explore/traversed_path/frontier_exploration_ros2_nearest",
+                "lite_frontier_explorer:/explore/traversed_path",
             ],
         )
         self.declare_parameter("active_package_topic", "/explore/path_tracker/active_package")
         self.declare_parameter("initial_pose_topic", "/explore/path_tracker/initial_pose")
-        self.declare_parameter("default_package", "frontier_exploration_ros2_mrtsp")
+        self.declare_parameter("default_package", "lite_frontier_explorer")
         self.declare_parameter("reset_topic", "/explore/reset_traveled_path")
         self.declare_parameter("update_rate_hz", 5.0)
         self.declare_parameter("min_translation_delta_m", 0.05)
@@ -97,7 +96,7 @@ class FrontierPathTracker(Node):
         self.path_qos = path_qos
         self.package_topics = self._parse_package_topics(self.package_topics_raw)
         if self.default_package == "":
-            self.default_package = "frontier_exploration_ros2_mrtsp"
+            self.default_package = "lite_frontier_explorer"
         if self.default_package not in self.package_topics:
             self.package_topics[self.default_package] = self.path_topic
 
@@ -164,7 +163,7 @@ class FrontierPathTracker(Node):
 
         # Ensure at least one writable channel exists; callers can still switch dynamically later.
         if not package_topics:
-            package_topics["frontier_exploration_ros2_mrtsp"] = self.path_topic
+            package_topics["lite_frontier_explorer"] = self.path_topic
         return package_topics
 
     def _sanitize_package_name(self, package_name: str) -> str:

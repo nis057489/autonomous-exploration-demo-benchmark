@@ -7,11 +7,10 @@ frontier_path_tracker:
     # Latched path topic shown in RViz for the robot's completed trajectory.
     path_topic: /explore/traversed_path
     package_topics:
-      - "frontier_exploration_ros2_mrtsp:/explore/traversed_path"
-      - "frontier_exploration_ros2_nearest:/explore/traversed_path/frontier_exploration_ros2_nearest"
+      - "lite_frontier_explorer:/explore/traversed_path"
     active_package_topic: /explore/path_tracker/active_package
     initial_pose_topic: /explore/path_tracker/initial_pose
-    default_package: frontier_exploration_ros2_mrtsp
+    default_package: lite_frontier_explorer
     reset_topic: /explore/reset_traveled_path
 
     # Sampling guard to keep the path detailed without publishing duplicate poses.

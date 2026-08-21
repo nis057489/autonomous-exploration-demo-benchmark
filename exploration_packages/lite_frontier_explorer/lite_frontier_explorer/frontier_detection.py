@@ -69,14 +69,17 @@ def cluster_centroid_world(cluster, resolution, origin_x, origin_y):
     )
 
 
-def select_nearest_frontier(clusters, robot_x, robot_y, resolution, origin_x, origin_y):
-    """Return the (x, y) world centroid of the cluster nearest the robot, or
-    None if clusters is empty."""
+def select_nearest_frontier(clusters, robot_x, robot_y, resolution, origin_x, origin_y,
+                             min_distance_m=0.0):
+    """Return the (x, y) world centroid of the nearest cluster at least
+    min_distance_m from the robot, or None if no cluster qualifies."""
     best_xy = None
     best_dist = None
     for cluster in clusters:
         x, y = cluster_centroid_world(cluster, resolution, origin_x, origin_y)
         dist = math.hypot(x - robot_x, y - robot_y)
+        if dist < min_distance_m:
+            continue
         if best_dist is None or dist < best_dist:
             best_dist = dist
             best_xy = (x, y)
