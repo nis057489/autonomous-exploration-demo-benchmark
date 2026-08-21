@@ -90,17 +90,11 @@ frontier_explorer:
     # "greedy" traverses the full MRTSP matrix one step at a time. Cost free.
     mrtsp_solver: dp
     # Maximum number of scored frontier candidates passed into the bounded-horizon dp solver.
-    # Raised from 12 -> 16 so more distant, still-unexplored candidates are in the pool instead
-    # of only the nearest ones -- narrower pools kept re-selecting fringes near already-covered
-    # ground because the genuinely-new frontier had fallen outside the candidate cutoff.
-    dp_solver_candidate_limit: 16
+    dp_solver_candidate_limit: 12
     # Number of distinct frontier visits evaluated in the candidate pool.
-    # Raised from 8 -> 12: a shallow horizon plans "what's next" greedily and produces routes
-    # that double back through already-seen area; a deeper horizon can see a few moves ahead
-    # and commit to a forward sweep instead.
-    dp_planning_horizon: 12
+    dp_planning_horizon: 8
 
-    # Enable decision-map preprocessing for frontier extraction.
+    # Enable decision-map preprocessing for frontier extraction. 
     # Disable only if you are having performance issues. Not a problem for most CPUs.
     frontier_map_optimization_enabled: true
 
@@ -141,19 +135,13 @@ frontier_explorer:
     # Increasing this makes the explorer more distance-sensitive and conservative.
     # Decreasing it makes information gain dominate more often.
     # Example: 2.0 prefers closer frontiers, 0.5 allows farther high-gain picks.
-    # Lowered from 1.0 -> 0.6: at 1.0 distance still outweighed gain enough that a nearby
-    # fringe next to already-covered ground could out-score a farther genuinely-unexplored
-    # cluster, causing the robot to loop back into rooms it had already seen.
-    weight_distance_wd: 0.6
+    weight_distance_wd: 1.0
 
     # Weight applied to the frontier information-gain term.
     # Larger values favor large frontier clusters that promise more map expansion.
     # Smaller values make the robot clean up nearby small frontiers first.
     # Example: 2.0 may skip small room corners, 0.5 tends to clear them sooner.
-    # Raised from 0.5 -> 1.2 to pair with the weight_distance_wd cut above: this makes large
-    # unexplored clusters dominate scoring over small nearby fringes so each area gets one
-    # committed visit instead of being partially cleared and revisited later.
-    weight_gain_ws: 1.2
+    weight_gain_ws: 0.5
 
     # Max linear speed used only in the lower-bound time term.
     # It does not command the robot directly; it estimates how fast a frontier
@@ -172,22 +160,21 @@ frontier_explorer:
     # This favors frontiers that can reveal more space from farther away.
     # Example: 0.5 makes costs distance-heavy, 2.0 rewards sensing reach more.
     # Doesn't have to be a real sensor value. Used for distance scoring.
-    # Raised from 3.5 -> 4.5: pushes the MRTSP cost matrix further toward committing to a
-    # farther high-gain frontier over a nearby low-gain one, on top of the weight change above.
-    sensor_effective_range_m: 4.5
+    # Raised from 1.5 -> 3.5: at 0.22 m/s travel dominates run time, so it's worth biasing the
+    # MRTSP cost matrix toward committing to a farther high-gain frontier over a nearby
+    # low-gain one, rather than re-approaching the same area repeatedly.
+    sensor_effective_range_m: 3.5
 
     # --------------- Navigation Safety --------------- #
 
     # Minimum distance before a frontier is considered a valid target.
     # Used for dispatch not filterization.
     # Recommended value: 2.5x size of robot's radius
-    frontier_selection_min_distance: 2.0
+    frontier_selection_min_distance: 0.8
 
     # Distance used to treat a frontier region as recently visited.
     # Use if you are having navigation loops.
-    # Raised from 2.0 -> 3.5: robot was re-targeting frontiers inside rooms it had personally
-    # already covered because the "recently visited" radius was too tight to cover the room.
-    frontier_visit_tolerance: 4.0
+    frontier_visit_tolerance: 2.0
 
     # --------------- Map Optimization --------------- #
 
@@ -196,33 +183,26 @@ frontier_explorer:
     # Higher values reduce local dithering but can skip useful nearby openings.
     # Example: 0.25 allows immediate local cleanup, 0.5 forces a small commit distance.
     # Recommended value: 2.5x size of robot's radius
-    # Raised from 0.8 -> 1.2 to force a bigger real commitment per goal instead of shuffling
-    # between adjacent points inside an area already substantially seen.
-    frontier_candidate_min_goal_distance_m: 2.0
+    frontier_candidate_min_goal_distance_m: 0.8
 
     # Occupancy threshold applied to the global costmap during frontier validation.
     # Neighbor cells at or above this cost are treated as blocked for frontier tests.
     # Lower values make the explorer avoid inflated-cost regions more aggressively.
     # Higher values allow frontiers closer to obstacles and inflation bands.
     # Value between 0-100. Use higher values if exploration skips very small areas.
-    occ_threshold: 100
+    occ_threshold: 95
 
     # Minimum connected frontier size accepted by WFD, measured in cells.
     # This removes tiny fragments caused by noise or partial unknown boundaries.
     # Lower values increase responsiveness but can create jittery micro-goals.
     # Higher values stabilize behavior but may ignore narrow real openings.
-    # Raised from 3 -> 6: small noise-driven unknown speckles inside already-mapped free
-    # space were qualifying as frontiers and pulling the robot back into rooms it had
-    # already covered. This was the main driver of the repeated-revisit behavior.
-    min_frontier_size_cells: 6
+    min_frontier_size_cells: 3
 
     # Spatial sigma of the bilateral filter in map cells.
     # Larger values smooth over wider neighborhoods before frontier extraction.
     # Too low preserves noise; too high can merge narrow openings unrealistically.
     # Example: 1.0 keeps details sharp, 3.0 makes corridors look cleaner but broader.
-    # Raised from 2.0 -> 3.0 alongside min_frontier_size_cells to further suppress
-    # noise-driven phantom frontiers inside already-explored regions.
-    sigma_s: 3.0
+    sigma_s: 2.0
 
     # Range sigma of the bilateral filter in occupancy-image intensity space.
     # Larger values let dissimilar neighboring cells influence each other more.
@@ -234,9 +214,7 @@ frontier_explorer:
     # This expands filtered free regions before running WFD on the optimized map.
     # Higher values help bridge tiny gaps, but can also over-open door thresholds.
     # Example: 0 keeps the map literal, 2 can merge thin fragmented frontiers.
-    # Raised from 1 -> 2 to close small noise gaps in already-covered free space so WFD
-    # stops re-detecting them as frontiers on later map_processing_rate_hz passes.
-    dilation_kernel_radius_cells: 2
+    dilation_kernel_radius_cells: 1
 
     # --------------- Preemption --------------- #
 
