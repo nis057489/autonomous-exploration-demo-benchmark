@@ -181,13 +181,13 @@ frontier_explorer:
     # Minimum distance before a frontier is considered a valid target.
     # Used for dispatch not filterization.
     # Recommended value: 2.5x size of robot's radius
-    frontier_selection_min_distance: 0.8
+    frontier_selection_min_distance: 2.0
 
     # Distance used to treat a frontier region as recently visited.
     # Use if you are having navigation loops.
     # Raised from 2.0 -> 3.5: robot was re-targeting frontiers inside rooms it had personally
     # already covered because the "recently visited" radius was too tight to cover the room.
-    frontier_visit_tolerance: 3.5
+    frontier_visit_tolerance: 4.0
 
     # --------------- Map Optimization --------------- #
 
@@ -198,14 +198,14 @@ frontier_explorer:
     # Recommended value: 2.5x size of robot's radius
     # Raised from 0.8 -> 1.2 to force a bigger real commitment per goal instead of shuffling
     # between adjacent points inside an area already substantially seen.
-    frontier_candidate_min_goal_distance_m: 1.2
+    frontier_candidate_min_goal_distance_m: 2.0
 
     # Occupancy threshold applied to the global costmap during frontier validation.
     # Neighbor cells at or above this cost are treated as blocked for frontier tests.
     # Lower values make the explorer avoid inflated-cost regions more aggressively.
     # Higher values allow frontiers closer to obstacles and inflation bands.
     # Value between 0-100. Use higher values if exploration skips very small areas.
-    occ_threshold: 95
+    occ_threshold: 100
 
     # Minimum connected frontier size accepted by WFD, measured in cells.
     # This removes tiny fragments caused by noise or partial unknown boundaries.
