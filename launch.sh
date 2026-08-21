@@ -311,6 +311,13 @@ if [[ "${RECORD_METRICS}" == true ]]; then
     )
   fi
 
+  # Needed to place each robot's /{name}/map (slam_toolbox's own per-robot
+  # frame) during replay -- nav_map/team_map_ddil are already in the shared
+  # "map" frame and need no TF, but /map isn't. Latched/one-shot per robot
+  # (see launch_real_hardware.sh's matching BAG_TOPICS comment), so this is
+  # cheap; unlike /tf (continuous, ~50 Hz+ per robot), it's not needed here.
+  BAG_TOPICS+=("/tf_static")
+
   ros2 bag record -o "${RUN_DIR}/bag" "${BAG_TOPICS[@]}" \
     >"${RUN_DIR}/bag_record.log" 2>&1 &
   BAG_PID=$!

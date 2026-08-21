@@ -349,12 +349,23 @@ if [[ -n "${ROBOT_ID}" ]]; then
     # merge -- "the ddil map") are bagged unconditionally in both
     # transports so nav_map's composite can be checked against its two
     # inputs, not just trusted at face value.
+    #
+    # /tf_static: unlike nav_map/team_map_ddil, /map is published in
+    # slam_toolbox's per-robot frame ("{ROBOT_ID}/map", not the shared "map"
+    # frame), so without the map -> {ROBOT_ID}/map static offset RViz has no
+    # way to place it during replay and it silently never renders. That
+    # transform is latched (TRANSIENT_LOCAL, published once by
+    # static_transform_publisher), so this costs next to nothing -- unlike
+    # /tf, which is high-rate (slam_toolbox's map->odom broadcast alone is
+    # 50 Hz per robot) and not needed just to render /map's own cells, since
+    # the OccupancyGrid message already carries its origin within its frame.
     BAG_TOPICS=(
       "/${ROBOT_ID}/explore/traversed_path"
       "/${ROBOT_ID}/explore/frontiers"
       "/${ROBOT_ID}/nav_map"
       "/${ROBOT_ID}/map"
       "/${ROBOT_ID}/team_map_ddil"
+      "/tf_static"
     )
 
     # VXCH map transport: this robot's own encoded bands/manifest (what it
