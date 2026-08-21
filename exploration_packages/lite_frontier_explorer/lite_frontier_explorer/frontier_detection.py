@@ -29,23 +29,32 @@ def find_frontier_clusters(data, width, height, occ_threshold=50, min_size=6):
     free_mask = (grid >= 0) & (grid < occ_threshold)
     unknown_mask = grid == -1
 
+    # 1. Vectorized neighbor check: shift the unknown-cell mask one step
+    #    in each of the 4 directions and OR the results together, so every
+    #    cell learns "do I border an unknown cell?" in whole-array ops
+    #    rather than a width*height Python loop.
     neighbor_unknown = np.zeros_like(unknown_mask)
     neighbor_unknown[1:, :] |= unknown_mask[:-1, :]   # neighbor above is unknown
     neighbor_unknown[:-1, :] |= unknown_mask[1:, :]   # neighbor below
     neighbor_unknown[:, 1:] |= unknown_mask[:, :-1]   # neighbor to the left
     neighbor_unknown[:, :-1] |= unknown_mask[:, 1:]   # neighbor to the right
 
+    # 2. A frontier cell is free and touches at least one unknown cell.
     frontier_mask = free_mask & neighbor_unknown
     frontier_cells = {(int(r), int(c)) for r, c in np.argwhere(frontier_mask)}
 
+    # 1. Group frontier cells into connected clusters via BFS/flood-fill.
     clusters = []
     visited = set()
     for cell in frontier_cells:
+        # 2. Skip cells already swept into an earlier cluster.
         if cell in visited:
             continue
         visited.add(cell)
         stack = [cell]
         cluster = []
+        # 3. Flood-fill outward from this seed cell, walking only
+        #    4-connected neighbors that are themselves frontier cells.
         while stack:
             r, c = stack.pop()
             cluster.append((r, c))
@@ -54,6 +63,7 @@ def find_frontier_clusters(data, width, height, occ_threshold=50, min_size=6):
                 if nb in frontier_cells and nb not in visited:
                     visited.add(nb)
                     stack.append(nb)
+        # 4. Discard clusters too small to be a meaningful frontier.
         if len(cluster) >= min_size:
             clusters.append(cluster)
 
