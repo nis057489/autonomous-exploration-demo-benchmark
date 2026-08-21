@@ -389,12 +389,14 @@ class ReplayGUI(tk.Tk):
         ) + ".png"
         out_path = os.path.join(FIGURES_DIR, out_name)
 
-        # Always "python3" (never sys.executable): this command runs inside
-        # jazzy_env (rosbag2_py/rclpy live there, not on the host), either
-        # directly if replay_gui.py itself is already in-container, or via
-        # the distrobox wrapper below otherwise -- sys.executable would be
-        # the *host* interpreter in that second case, which lacks rosbag2_py.
-        py_cmd = ["python3", FIGURE_SCRIPT]
+        # Always the container's system "/usr/bin/python3" -- never
+        # sys.executable (that'd be the *host* interpreter when we're not
+        # already in-container, which lacks rosbag2_py) and never a bare
+        # "python3" (PATH inside the distrobox login shell below inherits
+        # whatever the host shell had prepended -- e.g. an activated venv --
+        # which can shadow the system interpreter that actually has
+        # matplotlib/rosbag2_py installed).
+        py_cmd = ["/usr/bin/python3", FIGURE_SCRIPT]
         for condition, session in selected.items():
             py_cmd += [f"--{condition}"] + bag_args(session)
         py_cmd += ["--out", out_path]
