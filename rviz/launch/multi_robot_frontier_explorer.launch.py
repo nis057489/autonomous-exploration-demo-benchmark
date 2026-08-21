@@ -45,8 +45,8 @@ def _load_yaml(path):
 
 
 # The parameter keys lite_frontier_explorer's node actually declares -- it's a
-# nearest-frontier-only node with no marker topics/autostart/control_service/
-# team-awareness, and no peer coordination of its own.
+# nearest-frontier-only node with no autostart/control_service/team-awareness,
+# and no peer coordination of its own.
 _LITE_PARAM_KEYS = (
     "costmap_topic",
     "global_frame",
@@ -56,10 +56,20 @@ _LITE_PARAM_KEYS = (
     "occ_threshold",
     "replan_period_s",
     "navigate_to_pose_action_name",
+    "frontier_marker_scale",
 )
 
+# Matches _PATH_COLORS in multi_robot_navigation_with_slam.launch.py (values in 0-255)
+# so a robot's frontier candidates/selected-goal markers match its traveled-path color.
+_MARKER_COLORS_255 = [
+    (255, 85, 0),    # orange-red  (robot1)
+    (0, 100, 255),   # blue        (robot2)
+    (0, 200, 50),    # green       (robot3)
+    (200, 0, 200),   # purple      (robot4+)
+]
 
-def _frontier_params(base_path, namespace, use_sim_time):
+
+def _frontier_params(base_path, namespace, use_sim_time, color_255):
     data = _load_yaml(base_path)
     source = data.get("frontier_explorer", {}).get("ros__parameters", {})
     params = {k: source[k] for k in _LITE_PARAM_KEYS if k in source}
@@ -67,6 +77,10 @@ def _frontier_params(base_path, namespace, use_sim_time):
     params["costmap_topic"] = f"/{namespace}/global_costmap/costmap"
     params["global_frame"] = "map"
     params["robot_base_frame"] = f"{namespace}/base_footprint"
+    params["frontier_marker_topic"] = f"/{namespace}/explore/frontiers"
+    params["frontier_marker_color_r"] = color_255[0] / 255.0
+    params["frontier_marker_color_g"] = color_255[1] / 255.0
+    params["frontier_marker_color_b"] = color_255[2] / 255.0
     return params
 
 
@@ -83,7 +97,8 @@ def _create_explorer_actions(context):
     actions = []
     for index in range(num_robots):
         namespace = f"robot{index + 1}"
-        generated_params = _frontier_params(params_file, namespace, use_sim_time)
+        color_255 = _MARKER_COLORS_255[min(index, len(_MARKER_COLORS_255) - 1)]
+        generated_params = _frontier_params(params_file, namespace, use_sim_time, color_255)
         actions.append(
             Node(
                 package="lite_frontier_explorer",

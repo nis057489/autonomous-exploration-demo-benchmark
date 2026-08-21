@@ -16,8 +16,10 @@ from rclpy.node import Node
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
+from visualization_msgs.msg import Marker, MarkerArray
 
 from lite_frontier_explorer.frontier_detection import (
+    cluster_centroid_world,
     find_frontier_clusters,
     select_nearest_frontier,
 )
@@ -35,6 +37,11 @@ class LiteFrontierExplorer(Node):
         self.declare_parameter('occ_threshold', 50)
         self.declare_parameter('replan_period_s', 3.0)
         self.declare_parameter('navigate_to_pose_action_name', 'navigate_to_pose')
+        self.declare_parameter('frontier_marker_topic', 'explore/frontiers')
+        self.declare_parameter('frontier_marker_scale', 0.15)
+        self.declare_parameter('frontier_marker_color_r', 0.15)
+        self.declare_parameter('frontier_marker_color_g', 0.9)
+        self.declare_parameter('frontier_marker_color_b', 0.2)
 
         self._costmap_topic = self.get_parameter('costmap_topic').value
         self._global_frame = self.get_parameter('global_frame').value
@@ -44,6 +51,12 @@ class LiteFrontierExplorer(Node):
         self._occ_threshold = self.get_parameter('occ_threshold').value
         replan_period_s = self.get_parameter('replan_period_s').value
         action_name = self.get_parameter('navigate_to_pose_action_name').value
+        self._marker_scale = self.get_parameter('frontier_marker_scale').value
+        self._marker_color = (
+            self.get_parameter('frontier_marker_color_r').value,
+            self.get_parameter('frontier_marker_color_g').value,
+            self.get_parameter('frontier_marker_color_b').value,
+        )
 
         self._latest_costmap = None
         self._goal_active = False
@@ -51,6 +64,8 @@ class LiteFrontierExplorer(Node):
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._nav_client = ActionClient(self, NavigateToPose, action_name)
+        self._marker_publisher = self.create_publisher(
+            MarkerArray, self.get_parameter('frontier_marker_topic').value, 1)
 
         self.create_subscription(
             OccupancyGrid, self._costmap_topic, self._on_costmap, 1)
@@ -75,9 +90,6 @@ class LiteFrontierExplorer(Node):
         return t.x, t.y
 
     def _tick(self):
-        if self._goal_active:
-            return  # still navigating -- _on_result() clears this when nav2 is done
-
         costmap = self._latest_costmap
         if costmap is None:
             return
@@ -90,9 +102,30 @@ class LiteFrontierExplorer(Node):
             costmap.data, costmap.info.width, costmap.info.height,
             occ_threshold=self._occ_threshold, min_size=self._min_frontier_size,
         )
+
+        goal = None
+        if clusters:
+            goal = select_nearest_frontier(
+                clusters, robot_pose[0], robot_pose[1],
+                costmap.info.resolution,
+                costmap.info.origin.position.x, costmap.info.origin.position.y,
+                min_distance_m=self._min_frontier_distance_m,
+            )
+
+        self._publish_frontier_markers(clusters, costmap, goal)
+
+        if self._goal_active:
+            return  # still navigating -- _on_result() clears this when nav2 is done
+
         if not clusters:
             self.get_logger().info(
                 "No frontiers left -- exploration complete.",
+                throttle_duration_sec=10.0)
+            return
+
+        if goal is None:
+            self.get_logger().info(
+                "No frontiers beyond min_frontier_distance_m -- waiting.",
                 throttle_duration_sec=10.0)
             return
 
@@ -102,17 +135,6 @@ class LiteFrontierExplorer(Node):
                 throttle_duration_sec=5.0)
             return
 
-        goal = select_nearest_frontier(
-            clusters, robot_pose[0], robot_pose[1],
-            costmap.info.resolution,
-            costmap.info.origin.position.x, costmap.info.origin.position.y,
-            min_distance_m=self._min_frontier_distance_m,
-        )
-        if goal is None:
-            self.get_logger().info(
-                "No frontiers beyond min_frontier_distance_m -- waiting.",
-                throttle_duration_sec=10.0)
-            return
         goal_x, goal_y = goal
 
         goal_msg = NavigateToPose.Goal()
@@ -129,6 +151,61 @@ class LiteFrontierExplorer(Node):
         self._goal_active = True
         send_future = self._nav_client.send_goal_async(goal_msg)
         send_future.add_done_callback(self._on_goal_response)
+
+    def _publish_frontier_markers(self, clusters, costmap, goal):
+        marker_array = MarkerArray()
+        stamp = self.get_clock().now().to_msg()
+
+        delete_all = Marker()
+        delete_all.header.frame_id = self._global_frame
+        delete_all.header.stamp = stamp
+        delete_all.action = Marker.DELETEALL
+        marker_array.markers.append(delete_all)
+
+        color_r, color_g, color_b = self._marker_color
+        for idx, cluster in enumerate(clusters):
+            x, y = cluster_centroid_world(
+                cluster, costmap.info.resolution,
+                costmap.info.origin.position.x, costmap.info.origin.position.y)
+            marker = Marker()
+            marker.header.frame_id = self._global_frame
+            marker.header.stamp = stamp
+            marker.ns = "frontier_candidates"
+            marker.id = idx
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+            marker.pose.position.x = x
+            marker.pose.position.y = y
+            marker.pose.position.z = 0.1
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = marker.scale.y = marker.scale.z = self._marker_scale
+            marker.color.r = color_r
+            marker.color.g = color_g
+            marker.color.b = color_b
+            marker.color.a = 0.8
+            marker_array.markers.append(marker)
+
+        if goal is not None:
+            goal_x, goal_y = goal
+            selected = Marker()
+            selected.header.frame_id = self._global_frame
+            selected.header.stamp = stamp
+            selected.ns = "selected_frontier"
+            selected.id = 0
+            selected.type = Marker.SPHERE
+            selected.action = Marker.ADD
+            selected.pose.position.x = goal_x
+            selected.pose.position.y = goal_y
+            selected.pose.position.z = 0.15
+            selected.pose.orientation.w = 1.0
+            selected.scale.x = selected.scale.y = selected.scale.z = self._marker_scale * 1.8
+            selected.color.r = 1.0
+            selected.color.g = 0.1
+            selected.color.b = 0.1
+            selected.color.a = 1.0
+            marker_array.markers.append(selected)
+
+        self._marker_publisher.publish(marker_array)
 
     def _on_goal_response(self, future):
         goal_handle = future.result()
