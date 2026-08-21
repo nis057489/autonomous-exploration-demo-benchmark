@@ -5,6 +5,8 @@ without a running node. Operates on a nav2-style costmap: -1 unknown,
 
 import math
 
+import numpy as np
+
 _NEIGHBOR_OFFSETS = ((-1, 0), (1, 0), (0, -1), (0, 1))
 
 
@@ -12,24 +14,29 @@ def find_frontier_clusters(data, width, height, occ_threshold=50, min_size=6):
     """Return a list of clusters, each a list of (row, col) cells.
 
     A cell is a frontier cell if it's free (cost < occ_threshold) and
-    4-connected-adjacent to at least one unknown (-1) cell. Frontier cells
-    are then grouped into 4-connected clusters; clusters smaller than
-    min_size are dropped.
+    4-connected-adjacent to at least one unknown (-1) cell. The per-cell
+    scan (the part that's O(width*height)) is vectorized with numpy:
+    shift the unknown-cell mask by one in each direction and OR the
+    shifted copies together, so every cell's "do I have an unknown
+    neighbor" check happens in a handful of whole-array ops instead of a
+    width*height Python loop. The frontier cells found are then grouped
+    into 4-connected clusters via BFS -- that stays plain Python since it
+    only touches the much smaller frontier-cell set, not the whole grid.
+    Clusters smaller than min_size are dropped.
     """
-    def at(r, c):
-        return data[r * width + c]
+    grid = np.asarray(data, dtype=np.int8).reshape(height, width)
 
-    frontier_cells = set()
-    for r in range(height):
-        for c in range(width):
-            v = at(r, c)
-            if not (0 <= v < occ_threshold):
-                continue
-            for dr, dc in _NEIGHBOR_OFFSETS:
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < height and 0 <= nc < width and at(nr, nc) == -1:
-                    frontier_cells.add((r, c))
-                    break
+    free_mask = (grid >= 0) & (grid < occ_threshold)
+    unknown_mask = grid == -1
+
+    neighbor_unknown = np.zeros_like(unknown_mask)
+    neighbor_unknown[1:, :] |= unknown_mask[:-1, :]   # neighbor above is unknown
+    neighbor_unknown[:-1, :] |= unknown_mask[1:, :]   # neighbor below
+    neighbor_unknown[:, 1:] |= unknown_mask[:, :-1]   # neighbor to the left
+    neighbor_unknown[:, :-1] |= unknown_mask[:, 1:]   # neighbor to the right
+
+    frontier_mask = free_mask & neighbor_unknown
+    frontier_cells = {(int(r), int(c)) for r, c in np.argwhere(frontier_mask)}
 
     clusters = []
     visited = set()
