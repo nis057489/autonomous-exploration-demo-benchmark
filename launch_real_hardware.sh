@@ -243,7 +243,6 @@ check_pkg() {
 
 check_pkg slam_toolbox
 check_pkg nav2_bringup
-check_pkg nav2_simple_commander
 check_pkg bme_ros2_navigation
 sync
 
