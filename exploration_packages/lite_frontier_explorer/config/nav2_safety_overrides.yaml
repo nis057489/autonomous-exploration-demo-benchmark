@@ -40,6 +40,34 @@ bt_navigator:
     # genuinely-dead server is still caught quickly in practice.
     default_server_timeout: 5000
 
+# turtlebot3_node (the real hardware driver) subscribes to cmd_vel as
+# geometry_msgs/msg/TwistStamped, but nav2's cmd_vel chain
+# (controller_server/behavior_server -> cmd_vel_nav -> velocity_smoother ->
+# cmd_vel_smoothed -> collision_monitor -> cmd_vel) defaults
+# enable_stamped_cmd_vel to false and publishes plain geometry_msgs/msg/Twist
+# end to end. A topic name match with mismatched types never connects at the
+# DDS layer -- confirmed live via `ros2 topic info -v /robot1/cmd_vel`
+# showing collision_monitor publishing Twist while turtlebot3_node subscribes
+# TwistStamped, and /robot1/joint_states position/velocity frozen at
+# [0.0, 0.0] the entire run despite controller_server successfully computing
+# and "passing" paths. Setting this true on every node in the chain makes the
+# final /robot1/cmd_vel a TwistStamped, matching what the base actually needs.
+controller_server:
+  ros__parameters:
+    enable_stamped_cmd_vel: true
+
+behavior_server:
+  ros__parameters:
+    enable_stamped_cmd_vel: true
+
+velocity_smoother:
+  ros__parameters:
+    enable_stamped_cmd_vel: true
+
+collision_monitor:
+  ros__parameters:
+    enable_stamped_cmd_vel: true
+
 local_costmap:
   local_costmap:
     ros__parameters:
