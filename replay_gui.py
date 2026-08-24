@@ -14,11 +14,14 @@ distrobox this GUI runs in (tkinter isn't installed on the host Python). So
 when running inside a container, the compare script is launched on the host
 via `distrobox-host-exec`.
 """
+import glob
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from datetime import datetime
 import tkinter as tk
@@ -63,13 +66,45 @@ def robots_in_bag(bag_dir):
     per-robot recorders on hardware), so this returns all of them --
     needed so generate_comparison_figure.py, which expects one bag per
     robot, gets a robot=bag_dir pair per robot instead of one for the
-    session's synthetic "world" key."""
+    session's synthetic "world" key.
+
+    If metadata.yaml is missing (recorder killed before finalizing, e.g. an
+    interrupted run), reindex a scratch copy of the raw .mcap first --
+    mirrors replay_compare.sh and generate_comparison_figure.py's same
+    fallback. Without this, an interrupted bag silently contributes zero
+    robots here, which drops that whole condition's args in generate_figure()
+    instead of surfacing a clear error."""
     metadata = os.path.join(bag_dir, "metadata.yaml")
+    scratch = None
+    if not os.path.isfile(metadata):
+        mcap_files = glob.glob(os.path.join(bag_dir, "*.mcap"))
+        if not mcap_files:
+            return []
+        scratch = tempfile.mkdtemp(prefix="replay_gui_reindex_")
+        for mcap_file in mcap_files:
+            # Symlink rather than copy -- reindex only reads the .mcap, and
+            # these can be multi-GB; copying would block the GUI's main
+            # thread (this runs synchronously in generate_figure(), before
+            # the background thread starts) for as long as the copy takes.
+            os.symlink(os.path.abspath(mcap_file), os.path.join(scratch, os.path.basename(mcap_file)))
+        try:
+            subprocess.run(
+                ["ros2", "bag", "reindex", "-s", "mcap", scratch],
+                check=True, capture_output=True, text=True,
+            )
+        except (subprocess.CalledProcessError, OSError):
+            shutil.rmtree(scratch, ignore_errors=True)
+            return []
+        metadata = os.path.join(scratch, "metadata.yaml")
+
     try:
         with open(metadata) as f:
             text = f.read()
     except OSError:
         return []
+    finally:
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
     return sorted(set(TOPIC_NAME_RE.findall(text)))
 
 

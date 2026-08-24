@@ -83,16 +83,19 @@ def parse_robot_paths(pairs):
 
 def _reindexed_copy(bag_dir):
     """metadata.yaml is missing (recorder killed before finalizing, e.g. an
-    interrupted run) -- copy the raw .mcap into a scratch dir and reindex
+    interrupted run) -- symlink the raw .mcap into a scratch dir and reindex
     there, mirroring replay_compare.sh's same fallback, so the original
-    recording is never touched. Returns the scratch dir, or raises if there's
-    nothing recoverable (no .mcap file, or reindexing itself fails)."""
+    recording is never touched. A symlink (not a copy) because these files
+    run multi-GB and reindexing only ever reads them -- copying risked
+    filling /tmp outright (seen as ENOSPC/disk-quota-exceeded on a real run).
+    Returns the scratch dir, or raises if there's nothing recoverable (no
+    .mcap file, or reindexing itself fails)."""
     mcap_files = sorted(bag_dir.glob("*.mcap"))
     if not mcap_files:
         raise FileNotFoundError(f"no .mcap file found in {bag_dir}")
     scratch = Path(tempfile.mkdtemp(prefix="vxch_figure_reindex_"))
     for mcap_file in mcap_files:
-        shutil.copy2(mcap_file, scratch)
+        (scratch / mcap_file.name).symlink_to(mcap_file.resolve())
     subprocess.run(
         ["ros2", "bag", "reindex", "-s", "mcap", str(scratch)],
         check=True, capture_output=True, text=True,
