@@ -79,14 +79,43 @@ def cluster_centroid_world(cluster, resolution, origin_x, origin_y):
     )
 
 
+def cluster_representative_cell(cluster):
+    """Return the cluster's own (row, col) cell closest to its arithmetic-mean
+    centroid.
+
+    The plain average of a cluster's cells is not guaranteed to land on a
+    member of the cluster at all -- for a non-convex frontier (one that
+    wraps around a corner, hugs an L-shaped wall, or traces along a doorway)
+    the mean position can fall outside the frontier entirely, landing in an
+    occupied or unknown cell nav2's planner can never reach within its goal
+    tolerance. Snapping to the nearest actual cluster member guarantees the
+    point is always a real frontier cell (free, adjacent to unknown).
+    """
+    avg_r = sum(r for r, _ in cluster) / len(cluster)
+    avg_c = sum(c for _, c in cluster) / len(cluster)
+    return min(cluster, key=lambda rc: (rc[0] - avg_r) ** 2 + (rc[1] - avg_c) ** 2)
+
+
+def cluster_goal_world(cluster, resolution, origin_x, origin_y):
+    """World (x, y) of a real, always-reachable-in-principle cell in the
+    cluster -- use this (not cluster_centroid_world) for anything that
+    becomes an actual nav2 goal or a blacklist key, since cluster_centroid_world's
+    plain average can fall outside the cluster. See cluster_representative_cell."""
+    r, c = cluster_representative_cell(cluster)
+    return (
+        origin_x + (c + 0.5) * resolution,
+        origin_y + (r + 0.5) * resolution,
+    )
+
+
 def select_nearest_frontier(clusters, robot_x, robot_y, resolution, origin_x, origin_y,
                              min_distance_m=0.0):
-    """Return the (x, y) world centroid of the nearest cluster at least
+    """Return the (x, y) world goal point of the nearest cluster at least
     min_distance_m from the robot, or None if no cluster qualifies."""
     best_xy = None
     best_dist = None
     for cluster in clusters:
-        x, y = cluster_centroid_world(cluster, resolution, origin_x, origin_y)
+        x, y = cluster_goal_world(cluster, resolution, origin_x, origin_y)
         dist = math.hypot(x - robot_x, y - robot_y)
         if dist < min_distance_m:
             continue
