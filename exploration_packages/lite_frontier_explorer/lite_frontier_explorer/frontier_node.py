@@ -9,6 +9,7 @@ nav_map upstream.
 import math
 
 import rclpy
+from action_msgs.msg import GoalStatus
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
@@ -34,6 +35,7 @@ class LiteFrontierExplorer(Node):
         self.declare_parameter('robot_base_frame', 'base_footprint')
         self.declare_parameter('min_frontier_size_cells', 6)
         self.declare_parameter('min_frontier_distance_m', 2.0)
+        self.declare_parameter('goal_blacklist_radius_m', 0.5)
         self.declare_parameter('occ_threshold', 50)
         self.declare_parameter('replan_period_s', 3.0)
         self.declare_parameter('navigate_to_pose_action_name', 'navigate_to_pose')
@@ -48,6 +50,7 @@ class LiteFrontierExplorer(Node):
         self._robot_base_frame = self.get_parameter('robot_base_frame').value
         self._min_frontier_size = self.get_parameter('min_frontier_size_cells').value
         self._min_frontier_distance_m = self.get_parameter('min_frontier_distance_m').value
+        self._goal_blacklist_radius_m = self.get_parameter('goal_blacklist_radius_m').value
         self._occ_threshold = self.get_parameter('occ_threshold').value
         replan_period_s = self.get_parameter('replan_period_s').value
         action_name = self.get_parameter('navigate_to_pose_action_name').value
@@ -60,6 +63,8 @@ class LiteFrontierExplorer(Node):
 
         self._latest_costmap = None
         self._goal_active = False
+        self._pending_goal_xy = None
+        self._blacklisted_goals = []
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -103,10 +108,17 @@ class LiteFrontierExplorer(Node):
             occ_threshold=self._occ_threshold, min_size=self._min_frontier_size,
         )
 
+        candidates = [
+            cluster for cluster in clusters
+            if not self._is_blacklisted(cluster_centroid_world(
+                cluster, costmap.info.resolution,
+                costmap.info.origin.position.x, costmap.info.origin.position.y))
+        ]
+
         goal = None
-        if clusters:
+        if candidates:
             goal = select_nearest_frontier(
-                clusters, robot_pose[0], robot_pose[1],
+                candidates, robot_pose[0], robot_pose[1],
                 costmap.info.resolution,
                 costmap.info.origin.position.x, costmap.info.origin.position.y,
                 min_distance_m=self._min_frontier_distance_m,
@@ -149,8 +161,16 @@ class LiteFrontierExplorer(Node):
         self.get_logger().info(
             f"Sending goal to frontier at ({goal_x:.2f}, {goal_y:.2f})")
         self._goal_active = True
+        self._pending_goal_xy = (goal_x, goal_y)
         send_future = self._nav_client.send_goal_async(goal_msg)
         send_future.add_done_callback(self._on_goal_response)
+
+    def _is_blacklisted(self, xy):
+        x, y = xy
+        return any(
+            math.hypot(x - bx, y - by) <= self._goal_blacklist_radius_m
+            for bx, by in self._blacklisted_goals
+        )
 
     def _publish_frontier_markers(self, clusters, costmap, goal):
         marker_array = MarkerArray()
@@ -211,14 +231,25 @@ class LiteFrontierExplorer(Node):
         goal_handle = future.result()
         if not goal_handle.accepted:
             self.get_logger().warn("Goal rejected by nav2.")
+            self._blacklist_pending_goal()
             self._goal_active = False
             return
         goal_handle.get_result_async().add_done_callback(self._on_result)
 
-    def _on_result(self, _future):
-        # Don't inspect the result -- succeeded, aborted, or canceled all
-        # just mean "free to pick a new frontier next tick."
+    def _on_result(self, future):
+        status = future.result().status
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            self._pending_goal_xy = None
+        else:
+            self.get_logger().warn(
+                f"Goal did not succeed (status={status}) -- blacklisting it.")
+            self._blacklist_pending_goal()
         self._goal_active = False
+
+    def _blacklist_pending_goal(self):
+        if self._pending_goal_xy is not None:
+            self._blacklisted_goals.append(self._pending_goal_xy)
+            self._pending_goal_xy = None
 
 
 def main():
