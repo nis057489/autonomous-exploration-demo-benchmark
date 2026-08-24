@@ -114,6 +114,19 @@ def _patch_slam_params(base_path, namespace, output_dir):
     # so map -> odom is never published. See slam_toolbox_localization.yaml's
     # own "#if 0 never publishes odometry" note.
     p["transform_publish_period"] = 0.02
+    # SLAM_PARAMS resolves to the stock installed slam_toolbox package config
+    # (see launch_real_hardware.sh), whose minimum_travel_distance/heading
+    # default to 0.5 -- fine solo, but under the extra per-robot CPU load of
+    # the multi-robot map-sharing stack (ddil_proxy x2, team_map_fusion,
+    # per_robot_map_compositor, tf_frame_renamer all running alongside SLAM),
+    # slam_toolbox's tf2 message filter can drop the first scan(s) right at
+    # startup. With a nonzero minimum_travel_distance, no further scan is
+    # accepted until the robot has moved that far -- but it can't move
+    # without a seeded map to explore from, so it deadlocks permanently at
+    # zero map. Forcing 0.0 means the very next surviving scan always seeds
+    # the map regardless of travel distance, closing that deadlock.
+    p["minimum_travel_distance"] = 0.0
+    p["minimum_travel_heading"] = 0.0
     p["use_sim_time"] = False
     # slam_toolbox's online_async_launch.py passes this file straight through
     # as a --params-file with no namespace-aware rewriting (unlike
