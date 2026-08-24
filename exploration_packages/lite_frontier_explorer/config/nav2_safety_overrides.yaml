@@ -25,6 +25,21 @@
 #   - obstacle_layer scan ranges: matched to the LDS-02 LiDAR's real range
 #     (nav2_bringup/TB3 stock defaults use much shorter ranges tuned for
 #     smaller sim/demo spaces).
+bt_navigator:
+  ros__parameters:
+    # Stock nav2_bringup default is 20ms (see nav2_bringup's nav2_params.yaml)
+    # -- fine on a lightly loaded machine, but on these Pi 4s running SLAM +
+    # full Nav2 + frontier_explorer + per_robot_map_compositor + team_map_fusion
+    # + 2x ddil_proxy_node concurrently, planner_server/controller_server can
+    # take longer than 20ms just to get scheduled and ack a goal request under
+    # scheduling pressure -- bt_navigator was treating a merely-slow-to-ack
+    # action server as dead and aborting every goal ("Timed out while waiting
+    # for action server to acknowledge goal request"), even though the map and
+    # frontiers were valid and the server was alive. 2s gives real headroom;
+    # frontier goals are re-evaluated every replan_period_s anyway so a
+    # genuinely-dead server is still caught quickly in practice.
+    default_server_timeout: 5000
+
 local_costmap:
   local_costmap:
     ros__parameters:
