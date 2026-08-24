@@ -278,6 +278,25 @@ def _team_map_share_actions(
         # Only these relay nodes get broadened peer visibility; everything
         # else in this launch keeps the restrictive default set in
         # generate_launch_description.
+        #
+        # None of the relay_topics below carry the "reliable" flag (which
+        # would request RELIABLE + TRANSIENT_LOCAL) -- these input_topics are
+        # the actual network hop to the peer over real WiFi, and RELIABLE
+        # means the DDS layer retries/heartbeats to guarantee delivery. Under
+        # a degraded/lossy link (e.g. via set_wifi_bandwidth.sh) that retry
+        # machinery burns extra CPU inside this robot's own ddil_proxy_node
+        # process, proportional to how bad the link is -- and on these
+        # already CPU-tight Pi 4s that competes with controller_server's
+        # real-time loop for the same cores, observed as the robot's own
+        # LOCAL movement slowing down as the network got worse. A robot's own
+        # exploration must never depend on peer map health: peer data is
+        # strictly a bonus (per_robot_map_compositor already falls back to
+        # local-only whenever team data is absent/stale), so there is no
+        # correctness reason to pay for guaranteed delivery here -- BEST_EFFORT
+        # volatile (the same choice already made for the plain VXCH band
+        # relays below) just means an occasional lost peer update is silently
+        # skipped until the next one arrives, with zero cost to this robot's
+        # own progress.
         peer_env = {
             "ROS_AUTOMATIC_DISCOVERY_RANGE": "LOCALHOST",
             "ROS_STATIC_PEERS": f"{laptop_ip};{peer['ip']}",
@@ -293,7 +312,7 @@ def _team_map_share_actions(
             ]
             relay_topics.append(
                 f"/{peer_name}/vxch/map/manifest {robot_ddil_base}/manifest"
-                " voxelcodec_msgs/msg/VoxelManifest reliable"
+                " voxelcodec_msgs/msg/VoxelManifest"
             )
             actions.append(
                 Node(
@@ -343,7 +362,7 @@ def _team_map_share_actions(
                         "rng_seed": seed,
                         "relay_topics": [
                             f"/{peer_name}/zstd/map {robot_ddil_base}/zstd_map"
-                            " std_msgs/msg/UInt8MultiArray reliable"
+                            " std_msgs/msg/UInt8MultiArray"
                         ],
                         "use_sim_time": False,
                     }],
@@ -377,7 +396,7 @@ def _team_map_share_actions(
                         "rng_seed": seed,
                         "relay_topics": [
                             f"/{peer_name}/map /{namespace}/incoming/{peer_name}/map"
-                            " nav_msgs/msg/OccupancyGrid reliable"
+                            " nav_msgs/msg/OccupancyGrid"
                         ],
                         "use_sim_time": False,
                     }],
