@@ -35,7 +35,7 @@ bt_navigator:
     # scheduling pressure -- bt_navigator was treating a merely-slow-to-ack
     # action server as dead and aborting every goal ("Timed out while waiting
     # for action server to acknowledge goal request"), even though the map and
-    # frontiers were valid and the server was alive. 2s gives real headroom;
+    # frontiers were valid and the server was alive. 5s gives real headroom;
     # frontier goals are re-evaluated every replan_period_s anyway so a
     # genuinely-dead server is still caught quickly in practice.
     default_server_timeout: 5000
@@ -55,6 +55,22 @@ bt_navigator:
 controller_server:
   ros__parameters:
     enable_stamped_cmd_vel: true
+    # Stock nav2_bringup default for MPPI's CostCritic is consider_footprint:
+    # false, which scores each candidate trajectory's obstacle cost at the
+    # robot's *center point* only, using the inflation layer's cost gradient
+    # around a circular inscribed radius. That's fine for a circular
+    # robot_radius footprint, but this file already overrides the footprint
+    # below to the real, non-circular Waffle Pi rectangle (0.40m x 0.34m)
+    # specifically because it extends past the inscribed circle at the
+    # corners -- with consider_footprint false, MPPI can pick a trajectory
+    # that keeps the robot's center clear of the inflation gradient while its
+    # actual corners clip a wall or obstacle, especially turning around a
+    # corner or through a doorway. true makes CostCritic collision-check the
+    # actual swept footprint polygon against the costmap per candidate
+    # trajectory instead of a single point.
+    FollowPath:
+      CostCritic:
+        consider_footprint: true
 
 behavior_server:
   ros__parameters:
