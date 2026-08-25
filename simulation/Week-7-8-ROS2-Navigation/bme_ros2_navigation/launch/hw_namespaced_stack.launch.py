@@ -170,39 +170,6 @@ def _patch_nav_params(base_path, namespace, output_dir, safety_overrides_path=No
         "scan", {})["topic"] = f"/{namespace}/scan"
     gc.setdefault("static_layer", {})["map_topic"] = f"/{namespace}/nav_map"
 
-    # Peer-collision keepout: appended to both costmaps' plugin chains (not
-    # replacing the list, since a plain override here would silently drop
-    # the stock voxel_layer/obstacle_layer/inflation_layer entries) so a
-    # robot can neither *plan* through (global_costmap) nor *drive* through
-    # (local_costmap) a circle around where a higher-priority peer currently
-    # is. Fed by costmap_filter_info_server + peer_keepout_mask.py (see
-    # _nav2_actions and _team_map_share_actions) -- this mask is a
-    # costmap-only construct, never part of /{namespace}/map or /nav_map, so
-    # it never reaches anything actually relayed to peers.
-    filter_info_topic = f"/{namespace}/costmap_filter_info"
-    keepout_filter_cfg = {
-        "plugin": "nav2_costmap_2d::KeepoutFilter",
-        "enabled": True,
-        "filter_info_topic": filter_info_topic,
-    }
-    lc["plugins"] = list(lc.get("plugins", ["voxel_layer", "inflation_layer"])) + [
-        "keepout_filter"]
-    lc["keepout_filter"] = keepout_filter_cfg
-    gc["plugins"] = list(
-        gc.get("plugins", ["static_layer", "obstacle_layer", "inflation_layer"])
-    ) + ["keepout_filter"]
-    gc["keepout_filter"] = keepout_filter_cfg
-
-    # Announces the keepout mask's topic/type to both costmaps' keepout_filter
-    # instances above; the actual mask content comes from peer_keepout_mask.py
-    # (see _team_map_share_actions), republished live as peer positions update.
-    cfi = _node_params(data, "costmap_filter_info_server")
-    cfi["filter_info_topic"] = filter_info_topic
-    cfi["mask_topic"] = f"/{namespace}/keepout_mask"
-    cfi["type"] = 0
-    cfi["base"] = 0.0
-    cfi["multiplier"] = 1.0
-
     bs = _node_params(data, "behavior_server")
     bs["local_frame"] = odom
     bs["global_frame"] = "map"
@@ -246,19 +213,6 @@ def _parse_peers(peers_str):
     return peers
 
 
-def _robot_priority_index(name):
-    """Numeric priority for a "robotN" name -- lower wins (robot1 > robot2 >
-    robot3). Used to decide, deterministically and without any coordination
-    at runtime, which robot backs off when two robots' keepout zones would
-    otherwise conflict: a robot only ever avoids peers with a strictly lower
-    index than its own, never the other way around, so two robots can never
-    both be waiting on each other. Falls back to a very high number (never
-    avoided, never avoids anyone) for a name outside the usual convention.
-    """
-    digits = "".join(c for c in name if c.isdigit())
-    return int(digits) if digits else 999
-
-
 def _team_map_share_actions(
     namespace, peers, map_transport, bandwidth_kbps, loss_pct, delay_ms, haar_levels,
     compression, varint_encoding, tile_size_m, laptop_ip, schedule_mode
@@ -278,53 +232,6 @@ def _team_map_share_actions(
 
     actions = []
     total_bands = haar_levels + 1
-
-    # Republishes our own /{namespace}/odom at a fixed 1s period, purely
-    # local (reads our own odom). ddil_proxy_node's per-peer relays below
-    # forward *this* topic to peers instead of raw odom -- peers only need a
-    # coarse, infrequent position for the keepout mask below, so there is no
-    # reason to spend real WiFi bandwidth relaying odom at its native
-    # ~20-50Hz rate.
-    actions.append(
-        Node(
-            package="bme_ros2_navigation",
-            executable="pose_broadcaster.py",
-            name=f"pose_broadcaster_{namespace}",
-            output="screen",
-            parameters=[{
-                "robot_name": namespace,
-                "publish_period_s": 1.0,
-                "use_sim_time": False,
-            }],
-        )
-    )
-
-    # Which peers this robot must actually avoid: strictly-lower-priority
-    # peers only (robot1 > robot2 > robot3, see _robot_priority_index), so a
-    # standoff between two robots always resolves deterministically instead
-    # of both waiting on each other.
-    my_priority = _robot_priority_index(namespace)
-    avoid_peers = [p for p in peers if _robot_priority_index(p["name"]) < my_priority]
-    if avoid_peers:
-        actions.append(
-            Node(
-                package="bme_ros2_navigation",
-                executable="peer_keepout_mask.py",
-                name=f"peer_keepout_mask_{namespace}",
-                output="screen",
-                parameters=[{
-                    "robot_name": namespace,
-                    "avoid_peer_names": [p["name"] for p in avoid_peers],
-                    "avoid_peer_offsets_x": [p["x"] for p in avoid_peers],
-                    "avoid_peer_offsets_y": [p["y"] for p in avoid_peers],
-                    "avoid_peer_offsets_yaw": [p["yaw"] for p in avoid_peers],
-                    "keepout_radius_m": 2.0,
-                    "resolution": 0.05,
-                    "publish_rate_hz": 2.0,
-                    "use_sim_time": False,
-                }],
-            )
-        )
 
     if map_transport == "vxch":
         # Encode our own local map once, for any peer to pull. Purely local
@@ -376,7 +283,6 @@ def _team_map_share_actions(
             "ROS_STATIC_PEERS": f"{laptop_ip};{peer['ip']}",
         }
         seed = 42 + i
-        avoid_this_peer = peer_name in {p["name"] for p in avoid_peers}
 
         if map_transport == "vxch":
             robot_ddil_base = f"/{namespace}/incoming/{peer_name}"
@@ -389,14 +295,6 @@ def _team_map_share_actions(
                 f"/{peer_name}/vxch/map/manifest {robot_ddil_base}/manifest"
                 " voxelcodec_msgs/msg/VoxelManifest reliable"
             )
-            if avoid_this_peer:
-                # Peer live position, for peer_keepout_mask.py's collision
-                # keepout zone only -- see that node's own comment. Sourced
-                # from the peer's pose_broadcaster (1s period), not raw odom.
-                relay_topics.append(
-                    f"/{peer_name}/pose_broadcast {robot_ddil_base}/odom"
-                    " nav_msgs/msg/Odometry reliable"
-                )
             actions.append(
                 Node(
                     package="voxelcodec_ros",
@@ -431,15 +329,6 @@ def _team_map_share_actions(
             )
         elif map_transport == "zstd":
             robot_ddil_base = f"/{namespace}/incoming/{peer_name}"
-            relay_topics = [
-                f"/{peer_name}/zstd/map {robot_ddil_base}/zstd_map"
-                " std_msgs/msg/UInt8MultiArray reliable"
-            ]
-            if avoid_this_peer:
-                relay_topics.append(
-                    f"/{peer_name}/pose_broadcast {robot_ddil_base}/odom"
-                    " nav_msgs/msg/Odometry reliable"
-                )
             actions.append(
                 Node(
                     package="voxelcodec_ros",
@@ -452,7 +341,10 @@ def _team_map_share_actions(
                         "loss_pct": loss_pct,
                         "delay_ms": delay_ms,
                         "rng_seed": seed,
-                        "relay_topics": relay_topics,
+                        "relay_topics": [
+                            f"/{peer_name}/zstd/map {robot_ddil_base}/zstd_map"
+                            " std_msgs/msg/UInt8MultiArray reliable"
+                        ],
                         "use_sim_time": False,
                     }],
                 )
@@ -471,15 +363,6 @@ def _team_map_share_actions(
                 )
             )
         else:
-            relay_topics = [
-                f"/{peer_name}/map /{namespace}/incoming/{peer_name}/map"
-                " nav_msgs/msg/OccupancyGrid reliable"
-            ]
-            if avoid_this_peer:
-                relay_topics.append(
-                    f"/{peer_name}/pose_broadcast /{namespace}/incoming/{peer_name}/odom"
-                    " nav_msgs/msg/Odometry reliable"
-                )
             actions.append(
                 Node(
                     package="voxelcodec_ros",
@@ -492,7 +375,10 @@ def _team_map_share_actions(
                         "loss_pct": loss_pct,
                         "delay_ms": delay_ms,
                         "rng_seed": seed,
-                        "relay_topics": relay_topics,
+                        "relay_topics": [
+                            f"/{peer_name}/map /{namespace}/incoming/{peer_name}/map"
+                            " nav_msgs/msg/OccupancyGrid reliable"
+                        ],
                         "use_sim_time": False,
                     }],
                 )
@@ -552,7 +438,6 @@ def _nav2_actions(namespace, nav_cfg, log_level="info"):
         "velocity_smoother",
         "collision_monitor",
         "bt_navigator",
-        "costmap_filter_info_server",
     ]
 
     def _server(package, executable, name, extra_remappings=()):
@@ -578,7 +463,6 @@ def _nav2_actions(namespace, nav_cfg, log_level="info"):
         _server("nav2_velocity_smoother", "velocity_smoother", "velocity_smoother",
                 [("cmd_vel", "cmd_vel_nav")]),
         _server("nav2_collision_monitor", "collision_monitor", "collision_monitor"),
-        _server("nav2_map_server", "costmap_filter_info_server", "costmap_filter_info_server"),
         Node(
             package="nav2_lifecycle_manager",
             executable="lifecycle_manager",
