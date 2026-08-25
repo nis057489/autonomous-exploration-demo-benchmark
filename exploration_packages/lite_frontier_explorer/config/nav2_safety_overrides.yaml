@@ -55,6 +55,21 @@ bt_navigator:
 controller_server:
   ros__parameters:
     enable_stamped_cmd_vel: true
+    # Stock movement_time_allowance (10s) was sized against nav2_bringup's
+    # generic ~0.5 m/s stock velocity assumption. SimpleProgressChecker only
+    # counts straight-line radius from the check window's start, not path
+    # length -- it doesn't credit rotation. A TB3 honestly capped at
+    # 0.22 m/s (see FollowPath/velocity_smoother below) that spends several
+    # seconds turning to align through a tight frontier corridor before its
+    # translational push can easily burn the whole 10s without netting
+    # required_movement_radius, even though it never stopped moving. This
+    # doesn't weaken the actual "is it stuck" check (a truly frozen robot,
+    # e.g. under the Pi 4 CPU-overload stalls, still gets caught) -- it just
+    # gives a real robot enough time to finish rotating before penalizing it
+    # for not driving in a straight line.
+    progress_checker:
+      required_movement_radius: 0.5
+      movement_time_allowance: 20.0
     # Stock nav2_bringup default for MPPI's CostCritic is consider_footprint:
     # false, which scores each candidate trajectory's obstacle cost at the
     # robot's *center point* only, using the inflation layer's cost gradient
