@@ -20,7 +20,7 @@ from tf2_ros.transform_listener import TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 
 from lite_frontier_explorer.frontier_detection import (
-    cluster_goal_world,
+    cluster_centroid_world,
     find_frontier_clusters,
     select_nearest_frontier,
 )
@@ -110,7 +110,7 @@ class LiteFrontierExplorer(Node):
 
         candidates = [
             cluster for cluster in clusters
-            if not self._is_blacklisted(cluster_goal_world(
+            if not self._is_blacklisted(cluster_centroid_world(
                 cluster, costmap.info.resolution,
                 costmap.info.origin.position.x, costmap.info.origin.position.y))
         ]
@@ -184,7 +184,7 @@ class LiteFrontierExplorer(Node):
 
         color_r, color_g, color_b = self._marker_color
         for idx, cluster in enumerate(clusters):
-            x, y = cluster_goal_world(
+            x, y = cluster_centroid_world(
                 cluster, costmap.info.resolution,
                 costmap.info.origin.position.x, costmap.info.origin.position.y)
             marker = Marker()
