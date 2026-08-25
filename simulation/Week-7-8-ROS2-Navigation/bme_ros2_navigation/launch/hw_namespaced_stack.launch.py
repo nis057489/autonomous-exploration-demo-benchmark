@@ -15,6 +15,7 @@ that odom/base frames carry the robot's namespace prefix.
 
 import copy
 import os
+import re
 import tempfile
 
 import yaml
@@ -213,6 +214,15 @@ def _parse_peers(peers_str):
     return peers
 
 
+def _robot_priority(name):
+    """Trailing integer of a robot name ("robot2" -> 2). Lower number = higher
+    priority: a robot only ever excludes higher-priority (lower-numbered)
+    peers' paths from its own planning -- never the reverse -- so two robots
+    can't both defer to each other and deadlock."""
+    match = re.search(r"(\d+)$", name)
+    return int(match.group(1)) if match else 0
+
+
 def _team_map_share_actions(
     namespace, peers, map_transport, bandwidth_kbps, loss_pct, delay_ms, haar_levels,
     compression, varint_encoding, tile_size_m, laptop_ip, schedule_mode
@@ -283,6 +293,10 @@ def _team_map_share_actions(
             "ROS_STATIC_PEERS": f"{laptop_ip};{peer['ip']}",
         }
         seed = 42 + i
+        # Only relay peer_name's plan to us if we're lower-priority than it --
+        # a robot never yields to (and so never needs) a lower-priority peer's
+        # path. See _robot_priority.
+        yields_to_peer = _robot_priority(namespace) > _robot_priority(peer_name)
 
         if map_transport == "vxch":
             robot_ddil_base = f"/{namespace}/incoming/{peer_name}"
@@ -295,6 +309,10 @@ def _team_map_share_actions(
                 f"/{peer_name}/vxch/map/manifest {robot_ddil_base}/manifest"
                 " voxelcodec_msgs/msg/VoxelManifest reliable"
             )
+            if yields_to_peer:
+                relay_topics.append(
+                    f"/{peer_name}/plan {robot_ddil_base}/plan nav_msgs/msg/Path reliable"
+                )
             actions.append(
                 Node(
                     package="voxelcodec_ros",
@@ -329,6 +347,14 @@ def _team_map_share_actions(
             )
         elif map_transport == "zstd":
             robot_ddil_base = f"/{namespace}/incoming/{peer_name}"
+            relay_topics = [
+                f"/{peer_name}/zstd/map {robot_ddil_base}/zstd_map"
+                " std_msgs/msg/UInt8MultiArray reliable"
+            ]
+            if yields_to_peer:
+                relay_topics.append(
+                    f"/{peer_name}/plan {robot_ddil_base}/plan nav_msgs/msg/Path reliable"
+                )
             actions.append(
                 Node(
                     package="voxelcodec_ros",
@@ -341,10 +367,7 @@ def _team_map_share_actions(
                         "loss_pct": loss_pct,
                         "delay_ms": delay_ms,
                         "rng_seed": seed,
-                        "relay_topics": [
-                            f"/{peer_name}/zstd/map {robot_ddil_base}/zstd_map"
-                            " std_msgs/msg/UInt8MultiArray reliable"
-                        ],
+                        "relay_topics": relay_topics,
                         "use_sim_time": False,
                     }],
                 )
@@ -363,6 +386,15 @@ def _team_map_share_actions(
                 )
             )
         else:
+            robot_ddil_base = f"/{namespace}/incoming/{peer_name}"
+            relay_topics = [
+                f"/{peer_name}/map {robot_ddil_base}/map"
+                " nav_msgs/msg/OccupancyGrid reliable"
+            ]
+            if yields_to_peer:
+                relay_topics.append(
+                    f"/{peer_name}/plan {robot_ddil_base}/plan nav_msgs/msg/Path reliable"
+                )
             actions.append(
                 Node(
                     package="voxelcodec_ros",
@@ -375,14 +407,34 @@ def _team_map_share_actions(
                         "loss_pct": loss_pct,
                         "delay_ms": delay_ms,
                         "rng_seed": seed,
-                        "relay_topics": [
-                            f"/{peer_name}/map /{namespace}/incoming/{peer_name}/map"
-                            " nav_msgs/msg/OccupancyGrid reliable"
-                        ],
+                        "relay_topics": relay_topics,
                         "use_sim_time": False,
                     }],
                 )
             )
+
+    yield_to_peers = [p for p in peers if _robot_priority(namespace) > _robot_priority(p["name"])]
+    if yield_to_peers:
+        actions.append(
+            Node(
+                package="bme_ros2_navigation",
+                executable="peer_plan_keepout.py",
+                name=f"peer_plan_keepout_{namespace}",
+                output="screen",
+                parameters=[{
+                    "robot_names": [p["name"] for p in yield_to_peers],
+                    "plan_topic_template": f"/{namespace}/incoming/{{name}}/plan",
+                    "clearance_m": 0.5,
+                    "resolution": 0.05,
+                    "plan_ttl_s": 5.0,
+                    "publish_rate_hz": 2.0,
+                    "global_frame": "map",
+                    "mask_topic": f"/{namespace}/peer_plan_keepout/mask",
+                    "filter_info_topic": f"/{namespace}/peer_plan_keepout/filter_info",
+                    "use_sim_time": False,
+                }],
+            )
+        )
 
     actions.append(
         Node(

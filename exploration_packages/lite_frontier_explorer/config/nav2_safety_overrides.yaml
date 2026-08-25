@@ -126,3 +126,16 @@ global_costmap:
           raytrace_min_range: 0.16
           obstacle_max_range: 6.0
           obstacle_min_range: 0.16
+      # Global-only (not local): this stops the *planner* from routing
+      # through a higher-priority peer's currently active path in advance.
+      # It deliberately doesn't touch local_costmap/collision_monitor --
+      # real-time, close-range robot-to-robot avoidance already exists via
+      # each robot's own LIDAR (obstacle_layer) and stays untouched. Fed by
+      # peer_plan_keepout.py, which only exists on a robot at all when
+      # hw_namespaced_stack.launch.py's yield_to_peers is non-empty (i.e.
+      # this robot has a higher-numbered/lower-priority peer to yield to).
+      filters: ["keepout_filter"]
+      keepout_filter:
+        plugin: "nav2_costmap_2d::KeepoutFilter"
+        enabled: True
+        filter_info_topic: "peer_plan_keepout/filter_info"
