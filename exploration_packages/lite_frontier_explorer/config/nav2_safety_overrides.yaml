@@ -108,9 +108,23 @@ local_costmap:
       obstacle_layer:
         scan:
           raytrace_max_range: 7.5
-          raytrace_min_range: 0.16
+          # raytrace/obstacle_min_range used to be 0.16, on the assumption
+          # that's a safe margin above the LDS-02's noise floor. But the
+          # CostCritic.cost_weight comment above (this same file, real-bag
+          # measurement) shows the robot's actual min clearance to a wall
+          # was 0.100-0.141m -- *below* 0.16. Any scan return closer than
+          # raytrace/obstacle_min_range is dropped entirely, so once a robot
+          # got that close the local costmap stopped seeing the wall in
+          # front of it: no lethal cell to plan around, so it either drove
+          # further into the wall (motors stalling against it, looking like
+          # a frozen/stuck robot) or oscillated as the return flickered
+          # in and out around the 0.16 threshold. Lowered to 0.08 -- still
+          # above plausible self-chassis returns (~0.05m) but below the
+          # measured worst-case clearance, so the wall stays visible right
+          # up to the point the robot is actually touching it.
+          raytrace_min_range: 0.08
           obstacle_max_range: 6.0
-          obstacle_min_range: 0.16
+          obstacle_min_range: 0.08
 
 global_costmap:
   global_costmap:
@@ -123,6 +137,8 @@ global_costmap:
       obstacle_layer:
         scan:
           raytrace_max_range: 7.5
-          raytrace_min_range: 0.16
+          # Same reasoning as local_costmap above -- same physical LiDAR,
+          # same close-range dropout risk.
+          raytrace_min_range: 0.08
           obstacle_max_range: 6.0
-          obstacle_min_range: 0.16
+          obstacle_min_range: 0.08
