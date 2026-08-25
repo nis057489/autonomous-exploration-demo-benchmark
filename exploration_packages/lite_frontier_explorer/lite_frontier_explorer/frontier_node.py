@@ -33,7 +33,7 @@ class LiteFrontierExplorer(Node):
         self.declare_parameter('costmap_topic', 'global_costmap/costmap')
         self.declare_parameter('global_frame', 'map')
         self.declare_parameter('robot_base_frame', 'base_footprint')
-        self.declare_parameter('min_frontier_size_cells', 6)
+        self.declare_parameter('min_frontier_size_cells', 2)
         self.declare_parameter('min_frontier_distance_m', 0.5)
         self.declare_parameter('goal_blacklist_radius_m', 0.5)
         self.declare_parameter('occ_threshold', 50)
