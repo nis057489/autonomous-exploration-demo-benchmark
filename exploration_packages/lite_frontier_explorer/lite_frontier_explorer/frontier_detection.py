@@ -81,12 +81,22 @@ def cluster_centroid_world(cluster, resolution, origin_x, origin_y):
 
 
 def _free_space_distances(data, width, height, robot_x, robot_y, resolution,
-                           origin_x, origin_y, occ_threshold):
-    """BFS out from the robot's cell over 4-connected free space (cost <
-    occ_threshold; unknown/occupied cells block the walk). Returns a
-    height x width array of step counts, -1 where unreached."""
+                           origin_x, origin_y, path_occ_threshold):
+    """BFS out from the robot's cell over 4-connected passable space (cost <
+    path_occ_threshold; unknown/occupied cells block the walk). Returns a
+    height x width array of step counts, -1 where unreached.
+
+    path_occ_threshold is deliberately not the same knob as the
+    occ_threshold used to classify frontier cells. That one has to stay
+    low (default 50) so a frontier cell means "genuinely open ground",
+    but nav2 itself only refuses to drive through cost ~99 (inscribed --
+    the footprint can't fit) and 100 (lethal); everything below that is
+    real, costed-but-drivable space it will happily cross. Gating this
+    walk on the frontier threshold treated most of the map near any wall
+    as impassable and made every frontier look unreachable.
+    """
     grid = np.asarray(data, dtype=np.int8).reshape(height, width)
-    free_mask = (grid >= 0) & (grid < occ_threshold)
+    free_mask = (grid >= 0) & (grid < path_occ_threshold)
 
     dist = np.full((height, width), -1, dtype=np.int32)
     start_row = int((robot_y - origin_y) / resolution)
@@ -115,7 +125,7 @@ def _free_space_distances(data, width, height, robot_x, robot_y, resolution,
 
 
 def select_nearest_frontier(clusters, data, width, height, robot_x, robot_y, resolution,
-                             origin_x, origin_y, occ_threshold=50, min_distance_m=0.0):
+                             origin_x, origin_y, path_occ_threshold=99, min_distance_m=0.0):
     """Return the (x, y) world centroid of the cluster with the shortest
     walkable path through known free space, at least min_distance_m away
     (measured along that path), or None if no cluster qualifies.
@@ -124,9 +134,14 @@ def select_nearest_frontier(clusters, data, width, height, robot_x, robot_y, res
     flies but behind a wall, sending the robot on a long detour (or into
     a costmap-inflated no-path zone) instead of a farther-but-open one.
     Ranking by BFS step count through free space avoids that.
+
+    path_occ_threshold defaults to 99 (nav2's inscribed-obstacle cutoff,
+    the point at which the robot's footprint genuinely can't fit) rather
+    than the much lower occ_threshold used elsewhere for frontier-cell
+    classification -- see _free_space_distances for why.
     """
     dist_grid = _free_space_distances(
-        data, width, height, robot_x, robot_y, resolution, origin_x, origin_y, occ_threshold)
+        data, width, height, robot_x, robot_y, resolution, origin_x, origin_y, path_occ_threshold)
 
     best_xy = None
     best_dist = None

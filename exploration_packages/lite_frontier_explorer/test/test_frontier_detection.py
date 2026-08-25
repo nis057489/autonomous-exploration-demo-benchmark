@@ -122,30 +122,60 @@ def test_select_nearest_frontier_returns_none_when_all_clusters_too_close():
     assert goal is None
 
 
-def test_select_nearest_frontier_still_paths_out_when_robot_cell_at_occ_threshold():
+def test_select_nearest_frontier_still_paths_out_when_robot_cell_at_path_occ_threshold():
     # Regression: the real robot's own costmap cell can sit AT
-    # occ_threshold (e.g. inflation decay from a nearby wall puts it
+    # path_occ_threshold (e.g. inflation decay from a nearby wall puts it
     # exactly at the cutoff). That must not make the whole grid look
     # unreachable -- the robot is physically there, so the walk has to
     # be seeded from its cell regardless of that cell's own cost.
-    occ_threshold = 50
+    path_occ_threshold = 99
     rows = [
-        [occ_threshold, F, F, U],  # robot stands on the occ_threshold cell
+        [path_occ_threshold, F, F, U],  # robot stands on the path_occ_threshold cell
     ]
     width = len(rows[0])
     height = len(rows)
     data = [cell for row in rows for cell in row]
 
-    clusters = find_frontier_clusters(data, width, height, occ_threshold=occ_threshold, min_size=1)
+    clusters = find_frontier_clusters(data, width, height, occ_threshold=50, min_size=1)
     assert len(clusters) == 1
 
     resolution = 1.0
     origin_x, origin_y = 0.0, 0.0
-    robot_x, robot_y = 0.5, 0.5  # cell (0, 0), the occ_threshold cell
+    robot_x, robot_y = 0.5, 0.5  # cell (0, 0), the path_occ_threshold cell
 
     goal = select_nearest_frontier(
         clusters, data, width, height, robot_x, robot_y,
-        resolution, origin_x, origin_y, occ_threshold=occ_threshold,
+        resolution, origin_x, origin_y, path_occ_threshold=path_occ_threshold,
+    )
+
+    assert goal is not None
+
+
+def test_select_nearest_frontier_walks_through_inflated_but_drivable_cost():
+    # Regression: nav2 only refuses to drive through cost ~99 (inscribed)
+    # and 100 (lethal) -- moderate inflation cost well above the frontier
+    # occ_threshold (50) is still real, drivable space. A live robot1
+    # capture showed cost 79 on the robot's own cell and a smooth 30-99
+    # gradient all around it; using the frontier threshold (50) for path
+    # BFS treated that entire gradient as impassable and rejected every
+    # frontier. The default path_occ_threshold (99) must treat cost 79
+    # cells as passable so a path through them is still found.
+    rows = [
+        [79, 79, 79, 79, F, U],  # a band of moderate inflation cost, not free
+    ]
+    width = len(rows[0])
+    height = len(rows)
+    data = [cell for row in rows for cell in row]
+
+    clusters = find_frontier_clusters(data, width, height, occ_threshold=50, min_size=1)
+    assert len(clusters) == 1  # the (0, 4)/free cell bordering unknown
+
+    resolution = 1.0
+    origin_x, origin_y = 0.0, 0.0
+    robot_x, robot_y = 0.5, 0.5  # cell (0, 0), cost 79 -- above the frontier threshold
+
+    goal = select_nearest_frontier(
+        clusters, data, width, height, robot_x, robot_y, resolution, origin_x, origin_y,
     )
 
     assert goal is not None
@@ -188,7 +218,7 @@ def test_select_nearest_frontier_prefers_reachable_over_closer_but_walled_off():
 
     goal = select_nearest_frontier(
         clusters, data, width, height, robot_x, robot_y,
-        resolution, origin_x, origin_y, occ_threshold=50,
+        resolution, origin_x, origin_y,
     )
 
     assert goal == reachable_xy

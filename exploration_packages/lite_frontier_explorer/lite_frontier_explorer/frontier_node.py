@@ -37,6 +37,7 @@ class LiteFrontierExplorer(Node):
         self.declare_parameter('min_frontier_distance_m', 0.5)
         self.declare_parameter('goal_blacklist_radius_m', 0.0)
         self.declare_parameter('occ_threshold', 50)
+        self.declare_parameter('path_occ_threshold', 99)
         self.declare_parameter('replan_period_s', 3.0)
         self.declare_parameter('navigate_to_pose_action_name', 'navigate_to_pose')
         self.declare_parameter('frontier_marker_topic', 'explore/frontiers')
@@ -52,6 +53,7 @@ class LiteFrontierExplorer(Node):
         self._min_frontier_distance_m = self.get_parameter('min_frontier_distance_m').value
         self._goal_blacklist_radius_m = self.get_parameter('goal_blacklist_radius_m').value
         self._occ_threshold = self.get_parameter('occ_threshold').value
+        self._path_occ_threshold = self.get_parameter('path_occ_threshold').value
         replan_period_s = self.get_parameter('replan_period_s').value
         action_name = self.get_parameter('navigate_to_pose_action_name').value
         self._marker_scale = self.get_parameter('frontier_marker_scale').value
@@ -139,7 +141,7 @@ class LiteFrontierExplorer(Node):
                 robot_pose[0], robot_pose[1],
                 costmap.info.resolution,
                 costmap.info.origin.position.x, costmap.info.origin.position.y,
-                occ_threshold=self._occ_threshold,
+                path_occ_threshold=self._path_occ_threshold,
                 min_distance_m=self._min_frontier_distance_m,
             )
 
