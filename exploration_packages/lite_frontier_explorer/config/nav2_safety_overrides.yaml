@@ -71,19 +71,6 @@ controller_server:
     FollowPath:
       CostCritic:
         consider_footprint: true
-        # Stock cost_weight (3.81) is lower than PathAlignCritic's 14.0 and
-        # several other critics' 5.0 -- MPPI picks whichever trajectory
-        # minimizes the weighted SUM across all critics, so even with
-        # consider_footprint correctly computing a high cost near an
-        # obstacle, staying tightly path-aligned could still win overall.
-        # Measured directly from a real run's bag (each robot's own
-        # traversed_path vs its own nav_map): minimum clearance from robot
-        # center to the nearest mapped obstacle was 0.100-0.141m on all 3
-        # robots, less than the footprint's own smallest half-dimension
-        # (0.17m) -- i.e. the body was already overlapping the wall.
-        # Weighting obstacle cost above every path-following critic makes
-        # avoidance actually win that trade-off instead of losing it.
-        cost_weight: 20.0
 
 behavior_server:
   ros__parameters:
