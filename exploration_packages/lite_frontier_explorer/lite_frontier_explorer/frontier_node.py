@@ -35,7 +35,7 @@ class LiteFrontierExplorer(Node):
         self.declare_parameter('robot_base_frame', 'base_footprint')
         self.declare_parameter('min_frontier_size_cells', 2)
         self.declare_parameter('min_frontier_distance_m', 0.5)
-        self.declare_parameter('goal_blacklist_radius_m', 0.5)
+        self.declare_parameter('goal_blacklist_radius_m', 0.0)
         self.declare_parameter('occ_threshold', 50)
         self.declare_parameter('replan_period_s', 3.0)
         self.declare_parameter('navigate_to_pose_action_name', 'navigate_to_pose')
@@ -108,11 +108,28 @@ class LiteFrontierExplorer(Node):
             occ_threshold=self._occ_threshold, min_size=self._min_frontier_size,
         )
 
-        candidates = [
-            cluster for cluster in clusters
-            if not self._is_blacklisted(cluster_centroid_world(
+        # Classify every detected cluster so the markers can show *why* a
+        # frontier that's visible on the map isn't being driven to --
+        # otherwise "no frontiers beyond min_frontier_distance_m" looks like
+        # a lie when RViz still shows plenty of green dots.
+        cluster_xy = [
+            cluster_centroid_world(
                 cluster, costmap.info.resolution,
-                costmap.info.origin.position.x, costmap.info.origin.position.y))
+                costmap.info.origin.position.x, costmap.info.origin.position.y)
+            for cluster in clusters
+        ]
+        cluster_status = []
+        for xy in cluster_xy:
+            if self._is_blacklisted(xy):
+                cluster_status.append('blacklisted')
+            elif math.hypot(xy[0] - robot_pose[0], xy[1] - robot_pose[1]) < self._min_frontier_distance_m:
+                cluster_status.append('too_close')
+            else:
+                cluster_status.append('eligible')
+
+        candidates = [
+            cluster for cluster, status in zip(clusters, cluster_status)
+            if status == 'eligible'
         ]
 
         goal = None
@@ -124,7 +141,7 @@ class LiteFrontierExplorer(Node):
                 min_distance_m=self._min_frontier_distance_m,
             )
 
-        self._publish_frontier_markers(clusters, costmap, goal)
+        self._publish_frontier_markers(cluster_xy, cluster_status, goal)
 
         if self._goal_active:
             return  # still navigating -- _on_result() clears this when nav2 is done
@@ -172,7 +189,15 @@ class LiteFrontierExplorer(Node):
             for bx, by in self._blacklisted_goals
         )
 
-    def _publish_frontier_markers(self, clusters, costmap, goal):
+    # Eligible reuses the configured marker color; the other two states get
+    # fixed colors so they read the same regardless of what marker_color is
+    # tuned to.
+    _STATUS_COLORS = {
+        'too_close': (1.0, 0.75, 0.05),   # amber -- inside min_frontier_distance_m
+        'blacklisted': (0.55, 0.55, 0.55),  # grey -- inside a failed-goal exclusion zone
+    }
+
+    def _publish_frontier_markers(self, cluster_xy, cluster_status, goal):
         marker_array = MarkerArray()
         stamp = self.get_clock().now().to_msg()
 
@@ -182,11 +207,9 @@ class LiteFrontierExplorer(Node):
         delete_all.action = Marker.DELETEALL
         marker_array.markers.append(delete_all)
 
-        color_r, color_g, color_b = self._marker_color
-        for idx, cluster in enumerate(clusters):
-            x, y = cluster_centroid_world(
-                cluster, costmap.info.resolution,
-                costmap.info.origin.position.x, costmap.info.origin.position.y)
+        eligible_color = self._marker_color
+        for idx, ((x, y), status) in enumerate(zip(cluster_xy, cluster_status)):
+            color_r, color_g, color_b = self._STATUS_COLORS.get(status, eligible_color)
             marker = Marker()
             marker.header.frame_id = self._global_frame
             marker.header.stamp = stamp
@@ -202,8 +225,31 @@ class LiteFrontierExplorer(Node):
             marker.color.r = color_r
             marker.color.g = color_g
             marker.color.b = color_b
-            marker.color.a = 0.8
+            marker.color.a = 0.4 if status == 'blacklisted' else 0.8
             marker_array.markers.append(marker)
+
+        # Draw each blacklisted goal's actual exclusion circle so it's clear
+        # *why* nearby frontiers are greyed out, not just that they are.
+        for idx, (bx, by) in enumerate(self._blacklisted_goals):
+            zone = Marker()
+            zone.header.frame_id = self._global_frame
+            zone.header.stamp = stamp
+            zone.ns = "blacklist_zones"
+            zone.id = idx
+            zone.type = Marker.CYLINDER
+            zone.action = Marker.ADD
+            zone.pose.position.x = bx
+            zone.pose.position.y = by
+            zone.pose.position.z = 0.02
+            zone.pose.orientation.w = 1.0
+            diameter = self._goal_blacklist_radius_m * 2.0
+            zone.scale.x = zone.scale.y = diameter
+            zone.scale.z = 0.01
+            zone.color.r = 0.8
+            zone.color.g = 0.1
+            zone.color.b = 0.1
+            zone.color.a = 0.15
+            marker_array.markers.append(zone)
 
         if goal is not None:
             goal_x, goal_y = goal
