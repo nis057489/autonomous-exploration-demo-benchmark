@@ -83,23 +83,7 @@ controller_server:
     # corner or through a doorway. true makes CostCritic collision-check the
     # actual swept footprint polygon against the costmap per candidate
     # trajectory instead of a single point.
-    # Stock nav2_bringup's MPPI vx_max/ax_max/wz_max etc. are generic values
-    # (0.5 m/s, 3.0 m/s^2 accel) far beyond what a Waffle Pi can physically
-    # do (0.22 m/s max, nowhere near that accel). MPPI's DiffDrive rollout
-    # model plans assuming the robot can hit those numbers, so real execution
-    # lags the model every ~20Hz replan cycle -- next cycle starts from a
-    # state well behind prediction, MPPI corrects, overshoots the
-    # correction, repeat. That model/reality mismatch is what shows up on
-    # hardware as jerky, stop-start motion. These match the real Waffle Pi
-    # limits already used (and documented) in this repo's old
-    # navigation_hw.yaml velocity_smoother block.
     FollowPath:
-      vx_max: 0.22
-      vx_min: -0.10
-      wz_max: 1.8
-      ax_max: 0.5
-      ax_min: -0.5
-      az_max: 2.0
       CostCritic:
         consider_footprint: true
 
@@ -110,15 +94,6 @@ behavior_server:
 velocity_smoother:
   ros__parameters:
     enable_stamped_cmd_vel: true
-    # Same real Waffle Pi limits as FollowPath above -- stock nav2_bringup
-    # defaults (0.5 m/s, 2.5 m/s^2 accel) let the smoother pass through
-    # commands the base can't actually execute, so it wasn't smoothing
-    # anything in practice.
-    max_velocity: [0.22, 0.0, 1.8]
-    min_velocity: [-0.10, 0.0, -1.8]
-    max_accel: [0.5, 0.0, 2.0]
-    max_decel: [-0.5, 0.0, -2.0]
-    deadband_velocity: [0.03, 0.0, 0.08]
 
 collision_monitor:
   ros__parameters:
