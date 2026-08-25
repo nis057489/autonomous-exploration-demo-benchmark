@@ -93,9 +93,14 @@ def _free_space_distances(data, width, height, robot_x, robot_y, resolution,
     start_col = int((robot_x - origin_x) / resolution)
     if not (0 <= start_row < height and 0 <= start_col < width):
         return dist
-    if not free_mask[start_row, start_col]:
-        return dist
 
+    # Seed the walk at the robot's cell unconditionally, even if its own
+    # cost happens to sit at/above occ_threshold (e.g. inflation from a
+    # wall the robot is currently next to). The robot is physically
+    # there regardless of what the costmap says about that one cell --
+    # gating the seed on free_mask would make the whole grid unreachable
+    # (dist all -1) any time the robot's momentary cell cost creeps up,
+    # rejecting every frontier including ones plainly in the open.
     dist[start_row, start_col] = 0
     queue = deque([(start_row, start_col)])
     while queue:

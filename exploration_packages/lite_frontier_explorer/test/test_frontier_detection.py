@@ -122,6 +122,35 @@ def test_select_nearest_frontier_returns_none_when_all_clusters_too_close():
     assert goal is None
 
 
+def test_select_nearest_frontier_still_paths_out_when_robot_cell_at_occ_threshold():
+    # Regression: the real robot's own costmap cell can sit AT
+    # occ_threshold (e.g. inflation decay from a nearby wall puts it
+    # exactly at the cutoff). That must not make the whole grid look
+    # unreachable -- the robot is physically there, so the walk has to
+    # be seeded from its cell regardless of that cell's own cost.
+    occ_threshold = 50
+    rows = [
+        [occ_threshold, F, F, U],  # robot stands on the occ_threshold cell
+    ]
+    width = len(rows[0])
+    height = len(rows)
+    data = [cell for row in rows for cell in row]
+
+    clusters = find_frontier_clusters(data, width, height, occ_threshold=occ_threshold, min_size=1)
+    assert len(clusters) == 1
+
+    resolution = 1.0
+    origin_x, origin_y = 0.0, 0.0
+    robot_x, robot_y = 0.5, 0.5  # cell (0, 0), the occ_threshold cell
+
+    goal = select_nearest_frontier(
+        clusters, data, width, height, robot_x, robot_y,
+        resolution, origin_x, origin_y, occ_threshold=occ_threshold,
+    )
+
+    assert goal is not None
+
+
 def test_select_nearest_frontier_prefers_reachable_over_closer_but_walled_off():
     # Column 2 (rows 0-7) is a frontier strip that LOOKS closest to the
     # robot by straight-line distance, but it's sealed off: column 1 is a
