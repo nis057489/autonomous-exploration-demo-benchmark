@@ -79,7 +79,6 @@ def cluster_centroid_world(cluster, resolution, origin_x, origin_y):
     )
 
 
-<<<<<<< HEAD
 def select_nearest_frontier(clusters, robot_x, robot_y, resolution, origin_x, origin_y,
                              min_distance_m=0.0):
     """Return the (x, y) world centroid of the nearest cluster at least
@@ -88,102 +87,10 @@ def select_nearest_frontier(clusters, robot_x, robot_y, resolution, origin_x, or
     best_dist = None
     for cluster in clusters:
         x, y = cluster_centroid_world(cluster, resolution, origin_x, origin_y)
-=======
-def cluster_nearest_point_world(cluster, ref_x, ref_y, resolution, origin_x, origin_y):
-    """World (x, y) of the cluster's own cell closest to (ref_x, ref_y).
-
-    Always a real member of the cluster (free, adjacent to unknown) --
-    never the arithmetic-mean centroid, which is not guaranteed to land on
-    a member of the cluster at all: for a non-convex frontier (one that
-    wraps around a corner, hugs an L-shaped wall, or traces along a
-    doorway) the mean can fall outside the frontier entirely, into an
-    occupied or unknown cell nav2's planner can never reach within its goal
-    tolerance. Anchoring to ref_x/ref_y (typically the robot's current
-    position) instead of the cluster's own fixed centroid also means
-    ranking clusters by this point actually reflects which one is nearest:
-    a centroid-anchored point can sit meters from the robot on a large or
-    elongated cluster even while part of that same cluster is only
-    centimeters away, making a farther cluster look "nearer" by its
-    centroid than a closer cluster's true nearest edge.
-    """
-    best_xy = None
-    best_dist2 = None
-    for r, c in cluster:
-        wx = origin_x + (c + 0.5) * resolution
-        wy = origin_y + (r + 0.5) * resolution
-        dist2 = (wx - ref_x) ** 2 + (wy - ref_y) ** 2
-        if best_dist2 is None or dist2 < best_dist2:
-            best_dist2 = dist2
-            best_xy = (wx, wy)
-    return best_xy
-
-
-def yaw_from_quaternion(x, y, z, w):
-    siny_cosp = 2.0 * (w * z + x * y)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    return math.atan2(siny_cosp, cosy_cosp)
-
-
-def _wrap_to_pi(angle):
-    return (angle + math.pi) % (2.0 * math.pi) - math.pi
-
-
-def _bearing_band(frontier_x, frontier_y, robot_x, robot_y, robot_yaw):
-    """Classify a frontier point's bearing relative to robot_yaw: 'ahead'
-    (within 45 degrees), 'behind' (within 45 degrees of the opposite
-    direction), or 'beside' (the two 90-degree side wedges in between)."""
-    bearing = math.atan2(frontier_y - robot_y, frontier_x - robot_x)
-    abs_diff = abs(_wrap_to_pi(bearing - robot_yaw))
-    if abs_diff <= math.pi / 4:
-        return 'ahead'
-    if abs_diff >= 3.0 * math.pi / 4:
-        return 'behind'
-    return 'beside'
-
-
-def select_nearest_frontier(clusters, robot_x, robot_y, resolution, origin_x, origin_y,
-                             min_distance_m=0.0, robot_yaw=None):
-    """Return the (x, y) world goal point of the best qualifying cluster, or
-    None if none qualify.
-
-    When robot_yaw is given: frontiers behind the robot (more than 135
-    degrees from its heading) are excluded entirely. Among the rest, the
-    nearest frontier ahead of the robot (within 45 degrees) always wins over
-    any frontier beside it, even a closer one -- beside candidates are only
-    considered at all when there is no ahead candidate. When robot_yaw is
-    omitted, ranks purely by distance with no directional preference.
-    """
-    if robot_yaw is None:
-        best_xy = None
-        best_dist = None
-        for cluster in clusters:
-            x, y = cluster_nearest_point_world(
-                cluster, robot_x, robot_y, resolution, origin_x, origin_y)
-            dist = math.hypot(x - robot_x, y - robot_y)
-            if dist < min_distance_m:
-                continue
-            if best_dist is None or dist < best_dist:
-                best_dist = dist
-                best_xy = (x, y)
-        return best_xy
-
-    best_by_band = {'ahead': None, 'beside': None}
-    for cluster in clusters:
-        x, y = cluster_nearest_point_world(
-            cluster, robot_x, robot_y, resolution, origin_x, origin_y)
->>>>>>> parent of c9b9310 (Revert "prioritize frontier cells ahead or beside and finally behind")
         dist = math.hypot(x - robot_x, y - robot_y)
         if dist < min_distance_m:
             continue
-        band = _bearing_band(x, y, robot_x, robot_y, robot_yaw)
-        if band == 'behind':
-            continue
-        current = best_by_band[band]
-        if current is None or dist < current[1]:
-            best_by_band[band] = ((x, y), dist)
-
-    if best_by_band['ahead'] is not None:
-        return best_by_band['ahead'][0]
-    if best_by_band['beside'] is not None:
-        return best_by_band['beside'][0]
-    return None
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_xy = (x, y)
+    return best_xy

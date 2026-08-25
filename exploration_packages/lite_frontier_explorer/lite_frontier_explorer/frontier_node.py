@@ -20,14 +20,9 @@ from tf2_ros.transform_listener import TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 
 from lite_frontier_explorer.frontier_detection import (
-<<<<<<< HEAD
     cluster_centroid_world,
-=======
-    cluster_nearest_point_world,
->>>>>>> parent of c9b9310 (Revert "prioritize frontier cells ahead or beside and finally behind")
     find_frontier_clusters,
     select_nearest_frontier,
-    yaw_from_quaternion,
 )
 
 
@@ -97,9 +92,7 @@ class LiteFrontierExplorer(Node):
                 f"failed: {exc}", throttle_duration_sec=5.0)
             return None
         t = tf.transform.translation
-        q = tf.transform.rotation
-        yaw = yaw_from_quaternion(q.x, q.y, q.z, q.w)
-        return t.x, t.y, yaw
+        return t.x, t.y
 
     def _tick(self):
         costmap = self._latest_costmap
@@ -109,14 +102,12 @@ class LiteFrontierExplorer(Node):
         robot_pose = self._lookup_robot_pose()
         if robot_pose is None:
             return
-        robot_x, robot_y, robot_yaw = robot_pose
 
         clusters = find_frontier_clusters(
             costmap.data, costmap.info.width, costmap.info.height,
             occ_threshold=self._occ_threshold, min_size=self._min_frontier_size,
         )
 
-<<<<<<< HEAD
         # Classify every detected cluster so the markers can show *why* a
         # frontier that's visible on the map isn't being driven to --
         # otherwise "no frontiers beyond min_frontier_distance_m" looks like
@@ -139,30 +130,18 @@ class LiteFrontierExplorer(Node):
         candidates = [
             cluster for cluster, status in zip(clusters, cluster_status)
             if status == 'eligible'
-=======
-        candidates = [
-            cluster for cluster in clusters
-            if not self._is_blacklisted(cluster_nearest_point_world(
-                cluster, robot_x, robot_y, costmap.info.resolution,
-                costmap.info.origin.position.x, costmap.info.origin.position.y))
->>>>>>> parent of c9b9310 (Revert "prioritize frontier cells ahead or beside and finally behind")
         ]
 
         goal = None
         if candidates:
             goal = select_nearest_frontier(
-                candidates, robot_x, robot_y,
+                candidates, robot_pose[0], robot_pose[1],
                 costmap.info.resolution,
                 costmap.info.origin.position.x, costmap.info.origin.position.y,
                 min_distance_m=self._min_frontier_distance_m,
-                robot_yaw=robot_yaw,
             )
 
-<<<<<<< HEAD
         self._publish_frontier_markers(cluster_xy, cluster_status, goal)
-=======
-        self._publish_frontier_markers(clusters, costmap, goal, robot_x, robot_y)
->>>>>>> parent of c9b9310 (Revert "prioritize frontier cells ahead or beside and finally behind")
 
         if self._goal_active:
             return  # still navigating -- _on_result() clears this when nav2 is done
@@ -192,7 +171,7 @@ class LiteFrontierExplorer(Node):
         goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
         goal_msg.pose.pose.position.x = goal_x
         goal_msg.pose.pose.position.y = goal_y
-        yaw = math.atan2(goal_y - robot_y, goal_x - robot_x)
+        yaw = math.atan2(goal_y - robot_pose[1], goal_x - robot_pose[0])
         goal_msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
         goal_msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
 
@@ -210,7 +189,6 @@ class LiteFrontierExplorer(Node):
             for bx, by in self._blacklisted_goals
         )
 
-<<<<<<< HEAD
     # Eligible reuses the configured marker color; the other two states get
     # fixed colors so they read the same regardless of what marker_color is
     # tuned to.
@@ -220,9 +198,6 @@ class LiteFrontierExplorer(Node):
     }
 
     def _publish_frontier_markers(self, cluster_xy, cluster_status, goal):
-=======
-    def _publish_frontier_markers(self, clusters, costmap, goal, robot_x, robot_y):
->>>>>>> parent of c9b9310 (Revert "prioritize frontier cells ahead or beside and finally behind")
         marker_array = MarkerArray()
         stamp = self.get_clock().now().to_msg()
 
@@ -232,17 +207,9 @@ class LiteFrontierExplorer(Node):
         delete_all.action = Marker.DELETEALL
         marker_array.markers.append(delete_all)
 
-<<<<<<< HEAD
         eligible_color = self._marker_color
         for idx, ((x, y), status) in enumerate(zip(cluster_xy, cluster_status)):
             color_r, color_g, color_b = self._STATUS_COLORS.get(status, eligible_color)
-=======
-        color_r, color_g, color_b = self._marker_color
-        for idx, cluster in enumerate(clusters):
-            x, y = cluster_nearest_point_world(
-                cluster, robot_x, robot_y, costmap.info.resolution,
-                costmap.info.origin.position.x, costmap.info.origin.position.y)
->>>>>>> parent of c9b9310 (Revert "prioritize frontier cells ahead or beside and finally behind")
             marker = Marker()
             marker.header.frame_id = self._global_frame
             marker.header.stamp = stamp
