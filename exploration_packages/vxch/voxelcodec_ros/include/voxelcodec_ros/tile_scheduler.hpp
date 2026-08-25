@@ -175,26 +175,54 @@ public:
       for (const auto & col_span : col_spans) {
         const int trow = row_span.tile_index;
         const int tcol = col_span.tile_index;
-        const int width = col_span.length;
-        const int height = row_span.length;
-        if (width <= 0 || height <= 0) {continue;}
+        // covered_w/h: how much of this tile the CALLER's array actually backs
+        // right now -- can be less than tile_size_cells_ at the array's current
+        // edge, purely because SLAM hasn't grown that far yet, not because the
+        // tile itself is smaller. Encoding (and sending) only this clipped
+        // extent used to make tile_width/tile_height fluctuate call-to-call as
+        // the array grew across a tile's boundary, which made the receiver
+        // (TileReconstructor::ingest_band, which wipes a tile's accumulated
+        // bands whenever tile_width/tile_height changes) discard and restart
+        // that tile's whole reconstruction on nearly every SLAM update near the
+        // frontier -- see project_vxch_tile_reconstructor_reset_fix follow-up.
+        // Fix: always encode/send the tile at its full nominal tile_size_cells x
+        // tile_size_cells footprint, padding whatever the array doesn't cover
+        // yet with the embedded "unknown" value. tile_width/tile_height are
+        // then constant for a tile's whole lifetime (equal to the manifest's
+        // own tile_size_cells), so this reset trigger can no longer fire from
+        // array growth alone -- only a genuine tile_size_cells (resolution)
+        // change still does, same as before.
+        const int covered_w = col_span.length;
+        const int covered_h = row_span.length;
+        if (covered_w <= 0 || covered_h <= 0) {continue;}
+
+        const int tile_dim = tile_size_cells_;
+        const int row_offset_in_tile = static_cast<int>(
+          (origin_cell_y + row_span.local_start) -
+          static_cast<long long>(trow) * tile_size_cells_);
+        const int col_offset_in_tile = static_cast<int>(
+          (origin_cell_x + col_span.local_start) -
+          static_cast<long long>(tcol) * tile_size_cells_);
 
         std::vector<std::uint32_t> tile_values(
-          static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
-        for (int r = 0; r < height; ++r) {
+          static_cast<std::size_t>(tile_dim) * static_cast<std::size_t>(tile_dim),
+          occupancy_to_embedded(-1));
+        for (int r = 0; r < covered_h; ++r) {
           const std::size_t src_off =
             static_cast<std::size_t>(row_span.local_start + r) * static_cast<std::size_t>(grid_w) +
             static_cast<std::size_t>(col_span.local_start);
-          const std::size_t dst_off = static_cast<std::size_t>(r) * static_cast<std::size_t>(width);
-          std::copy_n(values.begin() + static_cast<std::ptrdiff_t>(src_off), width,
+          const std::size_t dst_off =
+            static_cast<std::size_t>(row_offset_in_tile + r) * static_cast<std::size_t>(tile_dim) +
+            static_cast<std::size_t>(col_offset_in_tile);
+          std::copy_n(values.begin() + static_cast<std::ptrdiff_t>(src_off), covered_w,
             tile_values.begin() + static_cast<std::ptrdiff_t>(dst_off));
         }
 
         std::vector<EncodedChannel> bands;
         try {
           bands = make_haar_bands(
-            tile_values, static_cast<std::size_t>(width),
-            static_cast<std::size_t>(height), haar_levels_, compression_,
+            tile_values, static_cast<std::size_t>(tile_dim),
+            static_cast<std::size_t>(tile_dim), haar_levels_, compression_,
             varint_encoding_);
         } catch (const std::exception & e) {
           result.tile_errors.push_back(
@@ -213,8 +241,8 @@ public:
           auto & band = bands[k];
           band.descriptor.metadata["tile_row"] = std::to_string(trow);
           band.descriptor.metadata["tile_col"] = std::to_string(tcol);
-          band.descriptor.metadata["tile_width"] = std::to_string(width);
-          band.descriptor.metadata["tile_height"] = std::to_string(height);
+          band.descriptor.metadata["tile_width"] = std::to_string(tile_dim);
+          band.descriptor.metadata["tile_height"] = std::to_string(tile_dim);
           band.descriptor.metadata["tile_size_cells"] = std::to_string(tile_size_cells_);
 
           const auto & payload = band.payload;

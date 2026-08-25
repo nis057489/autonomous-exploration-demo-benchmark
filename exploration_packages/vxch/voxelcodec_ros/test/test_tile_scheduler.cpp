@@ -277,6 +277,46 @@ TEST(TileScheduler, NonTileAlignedOriginProducesNegativeAndClippedTileKeys)
   EXPECT_TRUE(tiles_seen.count(TileKey{0, 1}));
 }
 
+TEST(TileScheduler, ClippedEdgeTileReportsFullNominalWidthNotArrayClippedWidth)
+{
+  // Regression test for the reset bug this fixes: a tile straddling the
+  // array's current edge used to be encoded/sent at its clipped (array-
+  // covered) extent, so tile_width/tile_height metadata changed every time
+  // the array grew across the tile -- which made TileReconstructor::
+  // ingest_band wipe that tile's whole accumulated reconstruction on nearly
+  // every SLAM update near the frontier. Tiles must now always report the
+  // full nominal tile_size_cells footprint, regardless of how much of the
+  // array currently backs them.
+  TileScheduler scheduler(4.0, 1, "none", true, "smart");  // tile_size_cells=4
+
+  // 2-wide array: tile (0,0) (world cells [0,4)) is only half-covered.
+  const auto first = scheduler.ingest_grid(make_grid(2, 4), 2, 4, 1.0, 0.0, 0.0);
+  ASSERT_GT(first.total_changed, 0U);
+  const auto first_scheduled = scheduler.take_pending_bands(1000, -1);
+  ASSERT_FALSE(first_scheduled.empty());
+  for (const auto & item : first_scheduled) {
+    EXPECT_EQ(item.channel.descriptor.metadata.at("tile_width"), "4");
+    EXPECT_EQ(item.channel.descriptor.metadata.at("tile_height"), "4");
+  }
+
+  // Array grows to fully cover the tile -- the previously-clipped tile must
+  // report the SAME width/height as before, not a changed one.
+  auto grown = make_grid(4, 4);
+  for (int r = 0; r < 4; ++r) {
+    grown[static_cast<std::size_t>(r * 4 + 0)] = make_grid(2, 4)[static_cast<std::size_t>(r * 2 + 0)];
+    grown[static_cast<std::size_t>(r * 4 + 1)] = make_grid(2, 4)[static_cast<std::size_t>(r * 2 + 1)];
+  }
+  const auto second = scheduler.ingest_grid(grown, 4, 4, 1.0, 0.0, 0.0);
+  ASSERT_GT(second.total_changed, 0U);
+  const auto second_scheduled = scheduler.take_pending_bands(1000, -1);
+  ASSERT_FALSE(second_scheduled.empty());
+  for (const auto & item : second_scheduled) {
+    EXPECT_EQ(item.tile, (TileKey{0, 0}));
+    EXPECT_EQ(item.channel.descriptor.metadata.at("tile_width"), "4");
+    EXPECT_EQ(item.channel.descriptor.metadata.at("tile_height"), "4");
+  }
+}
+
 TEST(TileScheduler, TakePendingBandsOnEmptySchedulerReturnsEmpty)
 {
   TileScheduler scheduler(4.0, 2, "none", true, "smart");
