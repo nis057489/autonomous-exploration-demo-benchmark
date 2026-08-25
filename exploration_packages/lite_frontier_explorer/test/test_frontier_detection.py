@@ -1,3 +1,5 @@
+import math
+
 from lite_frontier_explorer.frontier_detection import (
     cluster_centroid_world,
     find_frontier_clusters,
@@ -59,15 +61,21 @@ def test_occupied_cells_are_never_frontier_cells():
     assert clusters == []
 
 
+def _free_grid(width, height):
+    return [F] * (width * height), width, height
+
+
 def test_select_nearest_frontier_picks_closest_centroid():
     near_cluster = [(0, 0), (0, 1), (0, 2)]
     far_cluster = [(9, 9), (9, 10), (9, 11)]
 
     resolution = 0.05
     origin_x, origin_y = 0.0, 0.0
+    data, width, height = _free_grid(12, 10)
 
     goal = select_nearest_frontier(
-        [far_cluster, near_cluster], robot_x=0.0, robot_y=0.0,
+        [far_cluster, near_cluster], data, width, height,
+        robot_x=0.0, robot_y=0.0,
         resolution=resolution, origin_x=origin_x, origin_y=origin_y,
     )
 
@@ -77,18 +85,21 @@ def test_select_nearest_frontier_picks_closest_centroid():
 
 
 def test_select_nearest_frontier_returns_none_for_no_clusters():
-    assert select_nearest_frontier([], 0.0, 0.0, 0.05, 0.0, 0.0) is None
+    data, width, height = _free_grid(1, 1)
+    assert select_nearest_frontier([], data, width, height, 0.0, 0.0, 0.05, 0.0, 0.0) is None
 
 
 def test_select_nearest_frontier_skips_clusters_within_min_distance():
     near_cluster = [(0, 0), (0, 1), (0, 2)]  # ~0.075m from origin
-    far_cluster = [(9, 9), (9, 10), (9, 11)]  # ~1.36m from origin
+    far_cluster = [(9, 9), (9, 10), (9, 11)]  # far along the open grid
 
     resolution = 0.1
     origin_x, origin_y = 0.0, 0.0
+    data, width, height = _free_grid(12, 10)
 
     goal = select_nearest_frontier(
-        [near_cluster, far_cluster], robot_x=0.0, robot_y=0.0,
+        [near_cluster, far_cluster], data, width, height,
+        robot_x=0.0, robot_y=0.0,
         resolution=resolution, origin_x=origin_x, origin_y=origin_y,
         min_distance_m=1.0,
     )
@@ -99,11 +110,56 @@ def test_select_nearest_frontier_skips_clusters_within_min_distance():
 
 def test_select_nearest_frontier_returns_none_when_all_clusters_too_close():
     near_cluster = [(0, 0), (0, 1), (0, 2)]
+    data, width, height = _free_grid(5, 1)
 
     goal = select_nearest_frontier(
-        [near_cluster], robot_x=0.0, robot_y=0.0,
+        [near_cluster], data, width, height,
+        robot_x=0.0, robot_y=0.0,
         resolution=0.05, origin_x=0.0, origin_y=0.0,
         min_distance_m=2.0,
     )
 
     assert goal is None
+
+
+def test_select_nearest_frontier_prefers_reachable_over_closer_but_walled_off():
+    # Column 2 (rows 0-7) is a frontier strip that LOOKS closest to the
+    # robot by straight-line distance, but it's sealed off: column 1 is a
+    # wall for rows 0-8, and row 8 walls off columns 2-5 too, so there is
+    # no known-free path into it at all. The only actual way out is down
+    # column 0, right along the open row 9, into the frontier bordering
+    # row 10. A euclidean-only picker would aim the robot at the sealed
+    # strip; the path-aware picker must skip it and pick the reachable one.
+    rows = []
+    for _ in range(8):
+        rows.append([F, O, F, U, U, U])
+    rows.append([F, O, O, O, O, O])  # row 8: separator wall
+    rows.append([F, F, F, F, F, F])  # row 9: open corridor
+    rows.append([U, U, U, U, U, U])  # row 10: unknown, borders row 9
+
+    width = len(rows[0])
+    height = len(rows)
+    data = [cell for row in rows for cell in row]
+
+    clusters = find_frontier_clusters(data, width, height, occ_threshold=50, min_size=6)
+    assert len(clusters) == 2
+
+    sealed = next(c for c in clusters if any(col == 2 for _, col in c))
+    reachable = next(c for c in clusters if c is not sealed)
+
+    resolution = 1.0
+    origin_x, origin_y = 0.0, 0.0
+    robot_x, robot_y = 0.5, 0.5  # cell (0, 0)
+
+    sealed_xy = cluster_centroid_world(sealed, resolution, origin_x, origin_y)
+    reachable_xy = cluster_centroid_world(reachable, resolution, origin_x, origin_y)
+    # Sanity check the trap: sealed cluster really is euclidean-closer.
+    assert math.hypot(sealed_xy[0] - robot_x, sealed_xy[1] - robot_y) < \
+        math.hypot(reachable_xy[0] - robot_x, reachable_xy[1] - robot_y)
+
+    goal = select_nearest_frontier(
+        clusters, data, width, height, robot_x, robot_y,
+        resolution, origin_x, origin_y, occ_threshold=50,
+    )
+
+    assert goal == reachable_xy

@@ -4,6 +4,7 @@ without a running node. Operates on a nav2-style costmap: -1 unknown,
 """
 
 import math
+from collections import deque
 
 import numpy as np
 
@@ -79,18 +80,61 @@ def cluster_centroid_world(cluster, resolution, origin_x, origin_y):
     )
 
 
-def select_nearest_frontier(clusters, robot_x, robot_y, resolution, origin_x, origin_y,
-                             min_distance_m=0.0):
-    """Return the (x, y) world centroid of the nearest cluster at least
-    min_distance_m from the robot, or None if no cluster qualifies."""
+def _free_space_distances(data, width, height, robot_x, robot_y, resolution,
+                           origin_x, origin_y, occ_threshold):
+    """BFS out from the robot's cell over 4-connected free space (cost <
+    occ_threshold; unknown/occupied cells block the walk). Returns a
+    height x width array of step counts, -1 where unreached."""
+    grid = np.asarray(data, dtype=np.int8).reshape(height, width)
+    free_mask = (grid >= 0) & (grid < occ_threshold)
+
+    dist = np.full((height, width), -1, dtype=np.int32)
+    start_row = int((robot_y - origin_y) / resolution)
+    start_col = int((robot_x - origin_x) / resolution)
+    if not (0 <= start_row < height and 0 <= start_col < width):
+        return dist
+    if not free_mask[start_row, start_col]:
+        return dist
+
+    dist[start_row, start_col] = 0
+    queue = deque([(start_row, start_col)])
+    while queue:
+        r, c = queue.popleft()
+        d = dist[r, c]
+        for dr, dc in _NEIGHBOR_OFFSETS:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < height and 0 <= nc < width and free_mask[nr, nc] and dist[nr, nc] < 0:
+                dist[nr, nc] = d + 1
+                queue.append((nr, nc))
+    return dist
+
+
+def select_nearest_frontier(clusters, data, width, height, robot_x, robot_y, resolution,
+                             origin_x, origin_y, occ_threshold=50, min_distance_m=0.0):
+    """Return the (x, y) world centroid of the cluster with the shortest
+    walkable path through known free space, at least min_distance_m away
+    (measured along that path), or None if no cluster qualifies.
+
+    Straight-line nearest can pick a frontier that's close as the crow
+    flies but behind a wall, sending the robot on a long detour (or into
+    a costmap-inflated no-path zone) instead of a farther-but-open one.
+    Ranking by BFS step count through free space avoids that.
+    """
+    dist_grid = _free_space_distances(
+        data, width, height, robot_x, robot_y, resolution, origin_x, origin_y, occ_threshold)
+
     best_xy = None
     best_dist = None
     for cluster in clusters:
-        x, y = cluster_centroid_world(cluster, resolution, origin_x, origin_y)
-        dist = math.hypot(x - robot_x, y - robot_y)
-        if dist < min_distance_m:
+        path_dist = min(
+            (dist_grid[r, c] for r, c in cluster if dist_grid[r, c] >= 0),
+            default=None,
+        )
+        if path_dist is None:
+            continue  # no known-free path from the robot to this cluster
+        if path_dist * resolution < min_distance_m:
             continue
-        if best_dist is None or dist < best_dist:
-            best_dist = dist
-            best_xy = (x, y)
+        if best_dist is None or path_dist < best_dist:
+            best_dist = path_dist
+            best_xy = cluster_centroid_world(cluster, resolution, origin_x, origin_y)
     return best_xy

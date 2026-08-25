@@ -135,9 +135,11 @@ class LiteFrontierExplorer(Node):
         goal = None
         if candidates:
             goal = select_nearest_frontier(
-                candidates, robot_pose[0], robot_pose[1],
+                candidates, costmap.data, costmap.info.width, costmap.info.height,
+                robot_pose[0], robot_pose[1],
                 costmap.info.resolution,
                 costmap.info.origin.position.x, costmap.info.origin.position.y,
+                occ_threshold=self._occ_threshold,
                 min_distance_m=self._min_frontier_distance_m,
             )
 
