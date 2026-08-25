@@ -20,9 +20,10 @@ from tf2_ros.transform_listener import TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 
 from lite_frontier_explorer.frontier_detection import (
-    cluster_goal_world,
+    cluster_nearest_point_world,
     find_frontier_clusters,
     select_nearest_frontier,
+    yaw_from_quaternion,
 )
 
 
@@ -92,7 +93,9 @@ class LiteFrontierExplorer(Node):
                 f"failed: {exc}", throttle_duration_sec=5.0)
             return None
         t = tf.transform.translation
-        return t.x, t.y
+        q = tf.transform.rotation
+        yaw = yaw_from_quaternion(q.x, q.y, q.z, q.w)
+        return t.x, t.y, yaw
 
     def _tick(self):
         costmap = self._latest_costmap
@@ -102,6 +105,7 @@ class LiteFrontierExplorer(Node):
         robot_pose = self._lookup_robot_pose()
         if robot_pose is None:
             return
+        robot_x, robot_y, robot_yaw = robot_pose
 
         clusters = find_frontier_clusters(
             costmap.data, costmap.info.width, costmap.info.height,
@@ -110,21 +114,22 @@ class LiteFrontierExplorer(Node):
 
         candidates = [
             cluster for cluster in clusters
-            if not self._is_blacklisted(cluster_goal_world(
-                cluster, costmap.info.resolution,
+            if not self._is_blacklisted(cluster_nearest_point_world(
+                cluster, robot_x, robot_y, costmap.info.resolution,
                 costmap.info.origin.position.x, costmap.info.origin.position.y))
         ]
 
         goal = None
         if candidates:
             goal = select_nearest_frontier(
-                candidates, robot_pose[0], robot_pose[1],
+                candidates, robot_x, robot_y,
                 costmap.info.resolution,
                 costmap.info.origin.position.x, costmap.info.origin.position.y,
                 min_distance_m=self._min_frontier_distance_m,
+                robot_yaw=robot_yaw,
             )
 
-        self._publish_frontier_markers(clusters, costmap, goal)
+        self._publish_frontier_markers(clusters, costmap, goal, robot_x, robot_y)
 
         if self._goal_active:
             return  # still navigating -- _on_result() clears this when nav2 is done
@@ -154,7 +159,7 @@ class LiteFrontierExplorer(Node):
         goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
         goal_msg.pose.pose.position.x = goal_x
         goal_msg.pose.pose.position.y = goal_y
-        yaw = math.atan2(goal_y - robot_pose[1], goal_x - robot_pose[0])
+        yaw = math.atan2(goal_y - robot_y, goal_x - robot_x)
         goal_msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
         goal_msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
 
@@ -172,7 +177,7 @@ class LiteFrontierExplorer(Node):
             for bx, by in self._blacklisted_goals
         )
 
-    def _publish_frontier_markers(self, clusters, costmap, goal):
+    def _publish_frontier_markers(self, clusters, costmap, goal, robot_x, robot_y):
         marker_array = MarkerArray()
         stamp = self.get_clock().now().to_msg()
 
@@ -184,8 +189,8 @@ class LiteFrontierExplorer(Node):
 
         color_r, color_g, color_b = self._marker_color
         for idx, cluster in enumerate(clusters):
-            x, y = cluster_goal_world(
-                cluster, costmap.info.resolution,
+            x, y = cluster_nearest_point_world(
+                cluster, robot_x, robot_y, costmap.info.resolution,
                 costmap.info.origin.position.x, costmap.info.origin.position.y)
             marker = Marker()
             marker.header.frame_id = self._global_frame
