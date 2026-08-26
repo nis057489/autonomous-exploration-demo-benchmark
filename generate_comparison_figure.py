@@ -104,15 +104,20 @@ def _reindexed_copy(bag_dir):
 
 
 def read_bag(robot, bag_dir, condition):
-    """Returns (received_bytes, sent_bytes, coverage, local_coverage) where
-    coverage and local_coverage are each a list of
+    """Returns (received_bytes, sent_bytes, coverage, local_coverage,
+    local_cell_series) where coverage and local_coverage are each a list of
     (seconds_since_start, known_area_m2) -- coverage from /<robot>/nav_map
     (post-fusion team map), local_coverage from /<robot>/map (this robot's
     own raw SLAM output, never touched by fusion) -- or None if the bag
     can't be read. received_bytes is traffic on /<robot>/incoming/<peer>/...
     (what peers sent this robot); sent_bytes is what this robot itself
     published for peers to pull -- /<robot>/map for baseline,
-    /<robot>/vxch/map/band_*+manifest for vxch (see module docstring)."""
+    /<robot>/vxch/map/band_*+manifest for vxch (see module docstring).
+    local_cell_series is a list of (seconds_since_start, int64 numpy array
+    of packed cell keys newly known as of that /<robot>/map message -- not
+    a full snapshot each time, see the loop below), used to union robots'
+    own observations over time without double-counting cells more than one
+    robot saw."""
     bag_dir = Path(bag_dir)
     scratch_dir = None
     try:
@@ -149,6 +154,35 @@ def read_bag(robot, bag_dir, condition):
         known = int(np.count_nonzero(np.asarray(msg.data) != -1))
         return known * (msg.info.resolution ** 2)
 
+    def known_cells(msg):
+        """Grid-cell coordinates keyed in a global, resolution-sized lattice
+        (not this message's local row/col indices) so that cells from
+        different robots -- whose grids can have different origins/extents
+        as slam_toolbox grows each robot's own map independently -- line up
+        and can be unioned. Assumes all robots share the same map frame and
+        resolution, which holds for this benchmark's shared SLAM config.
+        Returns a sorted int64 numpy array, each element packing (gx, gy)
+        into one 64-bit key (32 bits each) -- cheap to build and diff with
+        numpy's setdiff1d/isin, vs. a Python set of (int, int) tuples which
+        is much slower to hash and was the actual bottleneck here."""
+        data = np.asarray(msg.data)
+        known_idx = np.flatnonzero(data != -1)
+        if known_idx.size == 0:
+            return np.empty(0, dtype=np.int64)
+        width = msg.info.width
+        res = msg.info.resolution
+        ox = msg.info.origin.position.x
+        oy = msg.info.origin.position.y
+        xs = known_idx % width
+        ys = known_idx // width
+        gx = np.round((ox + (xs + 0.5) * res) / res).astype(np.int64)
+        gy = np.round((oy + (ys + 0.5) * res) / res).astype(np.int64)
+        keys = (gx << np.int64(32)) | (gy & np.int64(0xFFFFFFFF))
+        keys.sort()
+        return keys
+
+    local_cell_series = []
+    seen_cells = np.empty(0, dtype=np.int64)
     while reader.has_next():
         topic, data, t_ns = reader.read_next()
         if start_ns is None:
@@ -160,7 +194,20 @@ def read_bag(robot, bag_dir, condition):
             coverage.append(((t_ns - start_ns) / 1e9, known_area_m2(msg)))
         elif topic == local_map_topic:
             msg = deserialize_message(data, OccupancyGrid)
-            local_coverage.append(((t_ns - start_ns) / 1e9, known_area_m2(msg)))
+            t = (t_ns - start_ns) / 1e9
+            local_coverage.append((t, known_area_m2(msg)))
+            # Store only the cells newly known since this robot's last /map
+            # message, not a full snapshot every time -- occupancy grids are
+            # cumulative (once known, cells stay known), so a full-set
+            # snapshot per message would retain O(cells * messages) instead
+            # of O(final cell count) and OOM on longer runs. Diffs union
+            # together identically to full snapshots downstream since set
+            # union already dedupes across messages/robots.
+            cells_now = known_cells(msg)
+            new_cells = np.setdiff1d(cells_now, seen_cells, assume_unique=True)
+            if new_cells.size:
+                local_cell_series.append((t, new_cells))
+            seen_cells = cells_now
             if condition == "baseline":
                 sent_bytes += len(data)
         elif condition == "vxch" and vxch_own_re.match(topic):
@@ -174,7 +221,8 @@ def read_bag(robot, bag_dir, condition):
 
     coverage.sort(key=lambda p: p[0])
     local_coverage.sort(key=lambda p: p[0])
-    return received_bytes, sent_bytes, coverage, local_coverage
+    local_cell_series.sort(key=lambda p: p[0])
+    return received_bytes, sent_bytes, coverage, local_coverage, local_cell_series
 
 
 def style_ax(ax):
@@ -196,7 +244,7 @@ def plot_bandwidth(ax, results, conditions, byte_index, title, ylabel):
     robots = sorted({r for cond in results.values() for r in cond})
     x = np.arange(len(conditions))
     heights_by_robot = {
-        robot: np.array([results[c].get(robot, (0, 0, [], []))[byte_index] / 1024 for c in conditions])
+        robot: np.array([results[c].get(robot, (0, 0, [], [], []))[byte_index] / 1024 for c in conditions])
         for robot in robots
     }
     totals = np.sum(list(heights_by_robot.values()), axis=0) if robots else np.zeros(len(conditions))
@@ -268,6 +316,57 @@ def plot_coverage(ax, results, conditions, series_index, title, ylabel):
         ax.legend(handles=handles, frameon=False, fontsize=10, loc="lower right")
 
 
+def union_coverage_over_time(cell_series_by_robot):
+    """cell_series_by_robot is an iterable of local_cell_series lists (each
+    a (t, int64 array of packed cell keys) list, per robot, from read_bag).
+    Merges every robot's messages into one timeline in time order and
+    returns a list of (t, running_union_tile_count) as cells accumulate --
+    a cell counts once the first time ANY robot sees it, so two robots
+    re-observing the same tile doesn't inflate the curve. Uses a plain
+    Python int set for the running total (each element already a single
+    packed int64, not a tuple) since the merge is across robots'
+    already-deduped-per-robot diffs, where numpy set ops would need
+    re-sorting/re-uniquifying on every step."""
+    events = [event for series in cell_series_by_robot for event in series]
+    events.sort(key=lambda e: e[0])
+    running = set()
+    out = []
+    for t, cells in events:
+        if cells.size:
+            running.update(cells.tolist())
+        out.append((t, len(running)))
+    return out
+
+
+def plot_union_coverage(ax, results, conditions):
+    """Team-wide map coverage over time, counted as the running UNION of
+    every robot's own /<robot>/map cells (see known_cells) as messages
+    arrive -- a cell two robots both explored only counts once, unlike
+    summing each robot's local_coverage area. This is the genuine "how much
+    of the map has this team actually laid eyes on, cumulatively" curve, as
+    distinct from plot_coverage's per-robot communicated/local series."""
+    for cond in conditions:
+        merged = union_coverage_over_time(entry[4] for entry in results[cond].values())
+        if not merged:
+            continue
+        ts = [p[0] for p in merged]
+        tiles = [p[1] for p in merged]
+        ax.plot(ts, tiles, color=CONDITION_COLORS[cond], linewidth=2, solid_capstyle="round", zorder=3)
+        ax.annotate(f"{tiles[-1]:,} tiles", (ts[-1], tiles[-1]), textcoords="offset points",
+                    xytext=(6, 0), fontsize=8.5, fontweight="bold", color=CONDITION_COLORS[cond], va="center")
+
+    ax.set_xlabel("Time since run start (s)", fontsize=11, color=TEXT_SECONDARY)
+    ax.set_ylabel("Known tiles (union across robots)", fontsize=11, color=TEXT_SECONDARY)
+    ax.set_title("Team map coverage over time (union, no double-counting)", fontsize=13, fontweight="bold",
+                 color=TEXT_PRIMARY, loc="left")
+    style_ax(ax)
+
+    handles = [Line2D([0], [0], color=CONDITION_COLORS[c], lw=2, label=DISPLAY_NAMES[c])
+               for c in conditions if results[c]]
+    if handles:
+        ax.legend(handles=handles, frameon=False, fontsize=10, loc="lower right")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--baseline", nargs="+", metavar="robot=bag_dir")
@@ -298,11 +397,12 @@ def main():
             print(f"error: no readable bags for condition {condition!r}", file=sys.stderr)
             sys.exit(1)
 
-    fig, (ax_sent, ax_received, ax_coverage, ax_local) = plt.subplots(1, 4, figsize=(25, 5.5))
+    fig, (ax_sent, ax_received, ax_coverage, ax_local, ax_union) = plt.subplots(1, 5, figsize=(31, 5.5))
     plot_bandwidth(ax_sent, results, conditions, 1, "Map-sharing bandwidth (sent)", "Sent to peers (KB)")
     plot_bandwidth(ax_received, results, conditions, 0, "Map-sharing bandwidth (received)", "Received from peers (KB)")
     plot_coverage(ax_coverage, results, conditions, 2, "Communicated map coverage", "Known map area (m²)")
     plot_coverage(ax_local, results, conditions, 3, "Locally-observed coverage (self only)", "Self-observed area (m²)")
+    plot_union_coverage(ax_union, results, conditions)
     fig.suptitle("Map sharing: " + " vs. ".join(DISPLAY_NAMES[c] for c in conditions), fontsize=15, fontweight="bold",
                  color=TEXT_PRIMARY, x=0.02, ha="left")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
@@ -310,8 +410,8 @@ def main():
     args.out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.out, dpi=200, facecolor="white")
 
-    totals_received = {c: sum(r for r, _, _, _ in results[c].values()) for c in conditions}
-    totals_sent = {c: sum(s for _, s, _, _ in results[c].values()) for c in conditions}
+    totals_received = {c: sum(r for r, _, _, _, _ in results[c].values()) for c in conditions}
+    totals_sent = {c: sum(s for _, s, _, _, _ in results[c].values()) for c in conditions}
     for c in conditions:
         print(f"{DISPLAY_NAMES[c]:>10} received: {totals_received[c]} bytes ({totals_received[c] / 1024:.1f} KB), "
               f"sent: {totals_sent[c]} bytes ({totals_sent[c] / 1024:.1f} KB)")
@@ -319,11 +419,15 @@ def main():
     if len(nonzero_received) >= 2:
         print(f"received ratio (max/min): {max(nonzero_received.values()) / min(nonzero_received.values()):.2f}x")
     for condition in conditions:
-        for robot, (_, _, coverage, local_coverage) in sorted(results[condition].items()):
+        for robot, (_, _, coverage, local_coverage, _) in sorted(results[condition].items()):
             final = coverage[-1][1] if coverage else 0.0
             final_local = local_coverage[-1][1] if local_coverage else 0.0
             print(f"{DISPLAY_NAMES[condition]} {robot}: final known map area {final:.1f} m^2 (communicated, incl. peer-relayed cells), "
                   f"{final_local:.1f} m^2 self-observed")
+    for condition in conditions:
+        merged = union_coverage_over_time(entry[4] for entry in results[condition].values())
+        final_tiles = merged[-1][1] if merged else 0
+        print(f"{DISPLAY_NAMES[condition]:>10} team map coverage (union, no double-counting): {final_tiles:,} tiles")
     print(str(args.out.resolve()))
 
 
