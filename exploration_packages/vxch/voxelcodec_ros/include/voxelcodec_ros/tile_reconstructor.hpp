@@ -215,19 +215,6 @@ public:
 
       auto & tile = tiles_[key];
       if (tile.width != tile_w || tile.height != tile_h || tile.levels != haar_levels_) {
-        // A tile straddling the array's growing edge legitimately changes size
-        // often (see TileScheduler::ingest_grid's covered_w/covered_h) -- the
-        // Haar coefficients for one size aren't a valid prefix/subset of
-        // another size's, so mixing old- and new-size bands would decode to
-        // garbage, and wiping band_coeffs/received here is the only correct
-        // response. But reconstruct() below has bands_received==0 for a
-        // freshly-wiped tile until every earlier band re-arrives at the new
-        // size -- with nothing else, that's a visible blank/flicker at this
-        // tile's place on every single resize, i.e. exactly the "stripe" a
-        // moving frontier produces. reconstruct() caches the last full
-        // reconstruction it computed per tile and falls back to it whenever
-        // the live one has nothing yet, so this wipe only affects internal
-        // decode state, never what's actually shown.
         tile = TileBandState{};
         tile.width = tile_w;
         tile.height = tile_h;
@@ -294,54 +281,19 @@ public:
           break;
         }
       }
+      if (bands_received == 0) {continue;}
 
-      // tw_use/th_use describe whichever reconstruction (live or cached)
-      // actually ends up used below -- NOT necessarily tile.width/height,
-      // since a cache hit is, by construction, from before the tile's most
-      // recent resize-triggered wipe (see ingest_band) and so belongs to a
-      // different size than the live tile currently declares.
-      const HaarReconstruction * recon_ptr = nullptr;
-      int tw_use = tile.width;
-      int th_use = tile.height;
-
-      const auto cache_it = tile_cache_.find(key);
-      const int cached_bands =
-        cache_it != tile_cache_.end() ? cache_it->second.bands_received : 0;
-
-      // Only replace what's cached once the live reconstruction is at least
-      // as detailed -- otherwise a resize's fresh coarsest-band-only content
-      // would visibly *downgrade* an already-fuller cached reconstruction for
-      // however many ticks it takes the rest of that tile's bands to
-      // re-arrive (max_bands_per_update sends one band per tile per tick),
-      // which is exactly the repeating blurry-fringe-at-the-frontier "stripe"
-      // this cache exists to prevent -- a one-off blank flicker is only the
-      // most extreme case of the same underlying problem.
-      if (bands_received > 0 && bands_received >= cached_bands) {
-        HaarReconstruction fresh;
-        try {
-          fresh = reconstruct_haar_from_bands(
-            tile.band_coeffs, static_cast<std::size_t>(tile.width),
-            static_cast<std::size_t>(tile.height), tile.levels, bands_received);
-        } catch (const std::exception &) {
-          continue;
-        }
-        auto & cached = tile_cache_[key];
-        cached.recon = std::move(fresh);
-        cached.tile_w = tile.width;
-        cached.tile_h = tile.height;
-        cached.bands_received = bands_received;
-        recon_ptr = &cached.recon;
-      } else if (cache_it != tile_cache_.end()) {
-        recon_ptr = &cache_it->second.recon;
-        tw_use = cache_it->second.tile_w;
-        th_use = cache_it->second.tile_h;
-      } else {
-        continue;  // never decoded anything for this tile yet
+      HaarReconstruction recon;
+      try {
+        recon = reconstruct_haar_from_bands(
+          tile.band_coeffs, static_cast<std::size_t>(tile.width),
+          static_cast<std::size_t>(tile.height), tile.levels, bands_received);
+      } catch (const std::exception &) {
+        continue;
       }
 
-      const auto & recon = *recon_ptr;
-      const std::size_t tw = static_cast<std::size_t>(tw_use);
-      const std::size_t th = static_cast<std::size_t>(th_use);
+      const std::size_t tw = static_cast<std::size_t>(tile.width);
+      const std::size_t th = static_cast<std::size_t>(tile.height);
       const std::size_t w_prime = recon.width;
       const std::size_t h_prime = recon.height;
 
@@ -396,23 +348,6 @@ public:
   const GridGeometry & geometry() const {return geometry_;}
 
 private:
-  // Last-known-good reconstruction for one tile, kept across a resize-
-  // triggered wipe of that same key's live TileBandState (see ingest_band)
-  // purely so reconstruct() has something other than blank/unknown to show
-  // while the new size's bands re-accumulate. tile_w/tile_h are the size
-  // this recon was computed at -- generally NOT equal to the live tile's
-  // current (post-wipe) width/height.
-  struct CachedTile
-  {
-    HaarReconstruction recon;
-    int tile_w{0};
-    int tile_h{0};
-    // How many leading bands recon was built from -- lets reconstruct()
-    // refuse to replace a fuller cached reconstruction with a thinner live
-    // one just because the tile resized (see reconstruct()'s comment).
-    int bands_received{0};
-  };
-
   int haar_levels_;
   GridGeometry geometry_;
   // Not actively pruned if the grid ever shrinks below a tile's offset --
@@ -420,11 +355,6 @@ private:
   // here is a correctness no-op, only a minor unbounded-growth risk. Not observed in
   // practice (grids only grow as SLAM explores); revisit if that changes.
   std::map<TileKey, TileBandState> tiles_;
-  // Updated only from reconstruct(), which is otherwise a pure read of
-  // tiles_/geometry_ -- mutable so reconstruct() can stay const (it's called
-  // from a timer callback purely to read out the current best-available
-  // grid, not to mutate decode state).
-  mutable std::map<TileKey, CachedTile> tile_cache_;
 };
 
 }  // namespace voxelcodec_ros
