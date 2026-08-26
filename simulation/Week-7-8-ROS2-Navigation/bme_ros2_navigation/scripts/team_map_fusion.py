@@ -2,6 +2,7 @@
 import math
 from dataclasses import dataclass
 
+import numpy as np
 import rclpy
 from nav_msgs.msg import MapMetaData, OccupancyGrid
 from rclpy.node import Node
@@ -188,17 +189,13 @@ class TeamMapFusion(Node):
             )
             return None
 
-        merged_data = [-1] * (width * height)
+        # int16 headroom: cell values only ever hold [-1, 100], but the
+        # intermediate max/min priority combination in _merge_one_map briefly
+        # compares against occupied-threshold constants -- plain int8 risks
+        # silent wraparound if that ever changes, int16 costs nothing here.
+        merged = np.full((height, width), -1, dtype=np.int16)
         for state in available_states:
-            self._merge_one_map(
-                state,
-                resolution,
-                origin_x,
-                origin_y,
-                width,
-                height,
-                merged_data,
-            )
+            self._merge_one_map(state, resolution, origin_x, origin_y, width, height, merged)
 
         merged_map = OccupancyGrid()
         merged_map.header.stamp = self.get_clock().now().to_msg()
@@ -210,7 +207,7 @@ class TeamMapFusion(Node):
         merged_map.info.origin.position.x = origin_x
         merged_map.info.origin.position.y = origin_y
         merged_map.info.origin.orientation.w = 1.0
-        merged_map.data = merged_data
+        merged_map.data = merged.astype(np.int8).reshape(-1).tolist()
         return merged_map
 
     def _compute_bounds(self, states):
@@ -254,16 +251,22 @@ class TeamMapFusion(Node):
             return None
         return min_x, min_y, max_x, max_y
 
-    def _merge_one_map(
-        self,
-        state,
-        resolution,
-        origin_x,
-        origin_y,
-        width,
-        height,
-        merged_data,
-    ):
+    def _merge_one_map(self, state, resolution, origin_x, origin_y, width, height, merged):
+        # Backward/gather resampling: for every DESTINATION cell, inverse-
+        # transform its world position into this robot's own map frame and
+        # sample the nearest source cell there, then write into `merged` (a
+        # numpy array, mutated in place). The previous version scattered
+        # forward per SOURCE cell (source -> rounded destination index) --
+        # structurally prone to leaving holes wherever the source/destination
+        # resolution ratio isn't an exact integer, which in practice it never
+        # is (two SLAM instances' float resolutions are essentially never
+        # bit-identical, and `resolution` here is a min() over all robots').
+        # Gather can't leave holes: every destination cell samples exactly
+        # one source cell (or none, if outside that map's bounds), full stop.
+        # It's also the geometrically correct direction anyway -- resolution
+        # is a min() over all robots, so the destination is always at least
+        # as fine as any single source, meaning multiple destination cells
+        # legitimately share one source cell (upsampling), not the reverse.
         map_msg = state.map_msg
         map_info = map_msg.info
         map_origin_yaw = yaw_from_quaternion(map_info.origin.orientation)
@@ -273,41 +276,47 @@ class TeamMapFusion(Node):
         offset_sin = math.sin(state.offset_yaw)
         source_resolution = map_info.resolution
 
-        for row in range(map_info.height):
-            source_y = (row + 0.5) * source_resolution
-            for column in range(map_info.width):
-                source_index = row * map_info.width + column
-                value = map_msg.data[source_index]
-                if value < 0:
-                    continue
+        source_data = np.array(map_msg.data, dtype=np.int16).reshape(
+            map_info.height, map_info.width
+        )
 
-                source_x = (column + 0.5) * source_resolution
-                local_x = (
-                    map_info.origin.position.x
-                    + map_origin_cos * source_x
-                    - map_origin_sin * source_y
-                )
-                local_y = (
-                    map_info.origin.position.y
-                    + map_origin_sin * source_x
-                    + map_origin_cos * source_y
-                )
-                global_x = state.offset_x + offset_cos * local_x - offset_sin * local_y
-                global_y = state.offset_y + offset_sin * local_x + offset_cos * local_y
+        # Destination cell centers, in the shared team/global frame.
+        dest_row = np.arange(height).reshape(height, 1)
+        dest_col = np.arange(width).reshape(1, width)
+        global_x = origin_x + (dest_col + 0.5) * resolution
+        global_y = origin_y + (dest_row + 0.5) * resolution
 
-                output_column = int((global_x - origin_x) / resolution)
-                output_row = int((global_y - origin_y) / resolution)
-                if not (0 <= output_column < width and 0 <= output_row < height):
-                    continue
+        # Undo this robot's offset transform (global -> its map's local frame).
+        dx = global_x - state.offset_x
+        dy = global_y - state.offset_y
+        local_x = offset_cos * dx + offset_sin * dy
+        local_y = -offset_sin * dx + offset_cos * dy
 
-                output_index = output_row * width + output_column
-                existing_value = merged_data[output_index]
-                if existing_value < 0:
-                    merged_data[output_index] = int(value)
-                elif value >= 50 or existing_value >= 50:
-                    merged_data[output_index] = max(int(existing_value), int(value))
-                else:
-                    merged_data[output_index] = min(int(existing_value), int(value))
+        # Undo the map's own origin transform (local frame -> source pixel space).
+        ddx = local_x - map_info.origin.position.x
+        ddy = local_y - map_info.origin.position.y
+        source_x = map_origin_cos * ddx + map_origin_sin * ddy
+        source_y = -map_origin_sin * ddx + map_origin_cos * ddy
+
+        source_col = np.floor(source_x / source_resolution).astype(np.int64)
+        source_row = np.floor(source_y / source_resolution).astype(np.int64)
+
+        valid = (
+            (source_row >= 0) & (source_row < map_info.height) &
+            (source_col >= 0) & (source_col < map_info.width)
+        )
+        clipped_row = np.clip(source_row, 0, map_info.height - 1)
+        clipped_col = np.clip(source_col, 0, map_info.width - 1)
+        value = np.where(valid, source_data[clipped_row, clipped_col], -1)
+
+        has_value = value >= 0
+        existing_unknown = merged < 0
+        either_occupied = (value >= 50) | (merged >= 50)
+        combined = np.where(
+            existing_unknown, value,
+            np.where(either_occupied, np.maximum(merged, value), np.minimum(merged, value)),
+        )
+        merged[:] = np.where(has_value, combined, merged)
 
     @staticmethod
     def _apply_pose(origin_x, origin_y, yaw, point_x, point_y):
