@@ -277,6 +277,68 @@ TEST(TileReconstructor, ManifestWidthHeightGrowthPreservesAccumulatedTiles)
   EXPECT_EQ(grid->data[4 * 8 + 0], -1);  // row 4, col 0
 }
 
+TEST(TileReconstructor, TileResizeKeepsShowingLastGoodReconstructionInsteadOfBlanking)
+{
+  // A tile straddling the array's growing edge legitimately changes its own
+  // tile_width/tile_height between updates (see TileScheduler::ingest_grid's
+  // covered_w/covered_h) -- ingest_band correctly wipes that tile's
+  // accumulated band_coeffs/received on a size change, since one size's Haar
+  // coefficients aren't valid alongside another's. Without a fallback,
+  // reconstruct() then has bands_received==0 for that tile until every band
+  // re-arrives at the new size, which reads as blank/unknown at that tile's
+  // place on every single resize -- the visible "stripe" a moving frontier
+  // produces. It must instead keep showing the pre-resize reconstruction
+  // until the new size has decoded something of its own.
+  constexpr int levels = 2;
+  TileReconstructor reconstructor(levels);
+  reconstructor.ingest_manifest(manifest_metadata(8, 8, 4), Stamp{1, 0});
+
+  const auto occupancy = make_occupancy(4, 4);
+  const auto bands = encode_tile(occupancy, 4, 4, levels, 0, 0, 4);
+  for (std::size_t k = 0; k < bands.size(); ++k) {
+    reconstructor.ingest_band(static_cast<int>(k), bands[k].descriptor, bands[k].payload);
+  }
+  ASSERT_TRUE(reconstructor.reconstruct().has_value());
+
+  // Array grew across this same tile's edge -- its own covered extent is now
+  // wider (still the same tile_row/tile_col, i.e. the same world-anchored
+  // key), and only its coarsest band has arrived so far at the new size.
+  const auto occupancy_wide = make_occupancy(6, 4, /*seed=*/7);
+  const auto bands_wide = encode_tile(occupancy_wide, 6, 4, levels, 0, 0, 4);
+  const auto error = reconstructor.ingest_band(0, bands_wide[0].descriptor, bands_wide[0].payload);
+  EXPECT_FALSE(error.has_value());
+
+  const auto grid = reconstructor.reconstruct();
+  ASSERT_TRUE(grid.has_value());
+  // Still the OLD (pre-resize) content at this tile's place, not blank --
+  // the new size hasn't decoded enough yet to replace it.
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      EXPECT_EQ(
+        grid->data[static_cast<std::size_t>(r) * 8 + static_cast<std::size_t>(c)],
+        occupancy[static_cast<std::size_t>(r) * 4 + static_cast<std::size_t>(c)])
+        << "cell (" << r << "," << c << ")";
+    }
+  }
+
+  // Once the new size's bands fully arrive, the live (new) reconstruction
+  // takes over.
+  for (std::size_t k = 1; k < bands_wide.size(); ++k) {
+    reconstructor.ingest_band(
+      static_cast<int>(k), bands_wide[k].descriptor, bands_wide[k].payload);
+  }
+  const auto grid2 = reconstructor.reconstruct();
+  ASSERT_TRUE(grid2.has_value());
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 6; ++c) {
+      EXPECT_EQ(
+        grid2->data[static_cast<std::size_t>(r) * 8 + static_cast<std::size_t>(c)],
+        occupancy_wide[static_cast<std::size_t>(r) * 6 + static_cast<std::size_t>(c)])
+        << "cell (" << r << "," << c << ")";
+    }
+  }
+}
+
 TEST(TileReconstructor, SubCellOriginJitterShiftsPlacementByAtMostOneCellInsteadOfClearing)
 {
   // slam_toolbox republishes origin at full float precision and it visibly
