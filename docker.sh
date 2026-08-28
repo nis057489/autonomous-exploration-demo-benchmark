@@ -72,11 +72,23 @@ run_docker() {
 
   prepare_x11_access
 
+  # Fixed name (was previously unnamed, i.e. a fresh random name every run)
+  # so a stale container from a prior run/crash -- still holding the X11
+  # socket, GPU device, or a live gzserver -- can be reliably found and
+  # killed before starting a new one, instead of accumulating alongside it.
+  local container_name="${BENCHMARK_DOCKER_CONTAINER_NAME:-autonomous-exploration-benchmark}"
+  if docker container inspect "${container_name}" >/dev/null 2>&1; then
+    echo "Removing stale container '${container_name}' from a previous run..."
+    docker rm -f "${container_name}" >/dev/null 2>&1 || true
+  fi
+
   local -a docker_args
   docker_args=(
     run
     --rm
     -it
+    --name
+    "${container_name}"
     --shm-size=1g
     -e QT_X11_NO_MITSHM=1
     -e LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-0}"

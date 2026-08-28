@@ -140,12 +140,13 @@ SPAWN_PRESETS_FILE="${PROJECT_ROOT}/spawn_presets.yaml"
 # Empty array ("[]") means "use the default grid/line offset logic".
 SPAWN_POSITIONS_JSON="[]"
 if [[ -f "${SPAWN_PRESETS_FILE}" ]]; then
-  SPAWN_POSITIONS_JSON=$(WORLD="${WORLD}" SPAWN_PRESET="${SPAWN_PRESET}" \
+  SPAWN_POSITIONS_JSON=$(WORLD="${WORLD}" SPAWN_PRESET="${SPAWN_PRESET}" NUM_ROBOTS="${NUM_ROBOTS}" \
     SPAWN_PRESETS_FILE="${SPAWN_PRESETS_FILE}" python3 - <<'PYEOF'
 import yaml, json, os, sys
-world  = os.environ["WORLD"]
-preset = os.environ["SPAWN_PRESET"]
-path   = os.environ["SPAWN_PRESETS_FILE"]
+world      = os.environ["WORLD"]
+preset     = os.environ["SPAWN_PRESET"]
+path       = os.environ["SPAWN_PRESETS_FILE"]
+num_robots = int(os.environ["NUM_ROBOTS"])
 with open(path) as f:
     data = yaml.safe_load(f)
 positions = data.get(world, {}).get(preset)
@@ -153,6 +154,24 @@ if positions is None:
     if preset != "default":
         print(f"[spawn_presets] WARNING: preset '{preset}' not found for world '{world}'."
               " Falling back to default spawn.", file=sys.stderr)
+    positions = []
+# spawn_presets.yaml's own header comment documents this: "default" is a
+# single base position for single-robot runs, and multi-robot runs on it
+# are supposed to fall back to the automatic grid/line offset logic rather
+# than reuse that one position -- but nothing actually implemented that
+# special case, so every robot silently landed on identical coordinates
+# (spawn_positions[index % len(spawn_positions)] with len==1) and appeared
+# in Gazebo as a single stack of fully overlapping robots instead of 3
+# separate ones. Multi-robot runs on any OTHER preset with fewer positions
+# than robots still cycle through them on purpose (see the module comment
+# -- e.g. corridor's "distributed" list intentionally reused once
+# num_robots exceeds its 8 entries), so only "default" is special-cased.
+if preset == "default" and num_robots > 1 and positions:
+    print(f"[spawn_presets] NUM_ROBOTS={num_robots} with SPAWN_PRESET=default "
+          "(a single-robot position) -- using the automatic grid/line offset "
+          "instead of stacking every robot on the same spot. Set SPAWN_PRESET "
+          "to a multi-robot preset (e.g. 'distributed') to place them explicitly.",
+          file=sys.stderr)
     positions = []
 print(json.dumps(positions))
 PYEOF
@@ -299,6 +318,18 @@ if [[ "${RECORD_METRICS}" == true ]]; then
           (( j == i )) && continue
           peer="robot${j}"
           BAG_TOPICS+=("/${name}/incoming/${peer}/zstd_map")
+        done
+      fi
+      if [[ "${MAP_TRANSPORT}" != "vxch" && "${MAP_TRANSPORT}" != "zstd" ]]; then
+        # baseline: ddil_proxy relays /{peer}/map straight to
+        # /{name}/incoming/{peer}/map (see multi_robot_vxch_experiment.launch.py's
+        # "else" branch) -- record it too, or generate_comparison_figure.py's
+        # received-bandwidth reading for baseline is always 0 even though
+        # team_map_fusion is genuinely receiving and fusing this topic live.
+        for ((j = 1; j <= NUM_ROBOTS; j++)); do
+          (( j == i )) && continue
+          peer="robot${j}"
+          BAG_TOPICS+=("/${name}/incoming/${peer}/map")
         done
       fi
     done

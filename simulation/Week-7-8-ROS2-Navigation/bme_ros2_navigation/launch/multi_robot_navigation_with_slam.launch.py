@@ -12,10 +12,13 @@ from launch.actions import (
     EmitEvent,
     GroupAction,
     IncludeLaunchDescription,
+    LogInfo,
     OpaqueFunction,
+    RegisterEventHandler,
     TimerAction,
 )
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.events import matches_action
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration
@@ -621,6 +624,84 @@ def _rviz_config(output_dir, namespaces):
     return _write_yaml(output_dir, "multi_robot_navigation.rviz", config)
 
 
+def _spawn_robot_actions(namespace, robot_x, robot_y, robot_z, robot_yaw, use_sim_time, attempts_left=6):
+    """ros_gz_sim's `create` is a one-shot process that calls the
+    `/world/<world>/create` service and exits -- it does not itself wait for
+    that service (or for robot_description to be published on its `-topic`)
+    to become available, and nothing here previously retried it. Under
+    load, with world.launch.py's gz sim server and this robot's
+    robot_state_publisher starting concurrently with `create` rather than
+    strictly before it, `create` can lose that race, fail once, and exit --
+    silently leaving this robot un-spawned for the rest of the run, which is
+    what "gazebo sometimes doesn't spawn one of the robots" actually was.
+    Retries the same spawn (fresh `create` process, 2s apart) up to
+    attempts_left times on nonzero exit, and logs loudly -- instead of
+    silently -- if every attempt fails.
+
+    A plain exit-code retry isn't enough on its own, though: `create -topic
+    robot_description` blocks forever waiting for a message on that ROS
+    topic (see its own "Waiting messages on topic [robot_description]" log
+    line), and if it loses the DDS discovery race against this robot's own
+    robot_state_publisher (started in the same batch of actions, no
+    ordering between them), it just hangs -- no nonzero exit ever happens,
+    so the exit-triggered retry above never fires either, and this robot
+    silently never joins for the rest of the run. `prefix="timeout 12"`
+    forces that hang itself to become a nonzero exit after 12s, which is
+    what actually feeds the retry loop below in that case."""
+    spawn_node = Node(
+        package="ros_gz_sim",
+        executable="create",
+        name=f"{namespace}_create",
+        namespace=namespace,
+        prefix="timeout 12",
+        arguments=[
+            "-name",
+            namespace,
+            "-topic",
+            "robot_description",
+            "-x",
+            f"{robot_x:.3f}",
+            "-y",
+            f"{robot_y:.3f}",
+            "-z",
+            f"{robot_z:.3f}",
+            "-Y",
+            f"{robot_yaw:.4f}",
+        ],
+        output="screen",
+        parameters=[{"use_sim_time": use_sim_time}],
+    )
+
+    def _on_exit(event, _context):
+        if event.returncode == 0:
+            return None
+        if attempts_left <= 1:
+            return [
+                LogInfo(
+                    msg=f"{namespace}_create: giving up spawning '{namespace}' after "
+                        f"repeated failures (exit code {event.returncode}) -- the gz "
+                        "world service likely never became available in time."
+                )
+            ]
+        return [
+            LogInfo(
+                msg=f"{namespace}_create: spawn failed (exit code {event.returncode}), "
+                    f"retrying in 2s ({attempts_left - 1} attempt(s) left)..."
+            ),
+            TimerAction(
+                period=2.0,
+                actions=_spawn_robot_actions(
+                    namespace, robot_x, robot_y, robot_z, robot_yaw, use_sim_time, attempts_left - 1
+                ),
+            ),
+        ]
+
+    return [
+        spawn_node,
+        RegisterEventHandler(OnProcessExit(target_action=spawn_node, on_exit=_on_exit)),
+    ]
+
+
 def _create_multi_robot_actions(context):
     pkg_bme_ros2_navigation = get_package_share_directory("bme_ros2_navigation")
     nav2_navigation_launch_path = os.path.join(
@@ -658,8 +739,23 @@ def _create_multi_robot_actions(context):
     ekf_params_path = os.path.join(pkg_bme_ros2_navigation, "config", "ekf.yaml")
 
     actions = []
-    slam_actions = []
-    nav2_actions = []
+
+    # Every robot's spawn/bridges/EKF used to start at t=0 for all robots at
+    # once, then every robot's SLAM at a single shared t=5s, then every
+    # robot's nav2 at a single shared t=12s -- three simultaneous herds of
+    # N robots' worth of process launches, DDS discovery, and CPU load
+    # landing in the same instant. On a loaded machine that's exactly the
+    # kind of pile-up that starves a control loop's real-time deadline
+    # (ekf_filter_node "Failed to meet update rate", controller_server
+    # "Controller patience exceeded") for whichever robot's threads happen
+    # to lose the scheduling race, intermittently and differently each run.
+    # ROBOT_STAGGER_S offsets each robot's whole startup sequence (spawn ->
+    # SLAM -> nav2) by index, so the 3 robots start in a deterministic,
+    # staged sequence instead of 3-wide simultaneous bursts -- same total
+    # work, spread out instead of piled up.
+    ROBOT_STAGGER_S = 4.0
+    SLAM_BASE_S = 5.0
+    NAV2_BASE_S = 12.0
 
     clock_bridge_path = _clock_bridge_config(output_dir)
     actions.append(
@@ -729,8 +825,7 @@ def _create_multi_robot_actions(context):
             ]
         )
 
-        actions.extend(
-            [
+        actions.append(TimerAction(period=index * ROBOT_STAGGER_S, actions=[
                 Node(
                     package="topic_tools",
                     executable="relay",
@@ -777,28 +872,7 @@ def _create_multi_robot_actions(context):
                     ],
                     remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
                 ),
-                Node(
-                    package="ros_gz_sim",
-                    executable="create",
-                    name=f"{namespace}_create",
-                    namespace=namespace,
-                    arguments=[
-                        "-name",
-                        namespace,
-                        "-topic",
-                        "robot_description",
-                        "-x",
-                        f"{robot_x:.3f}",
-                        "-y",
-                        f"{robot_y:.3f}",
-                        "-z",
-                        f"{robot_z:.3f}",
-                        "-Y",
-                        f"{robot_yaw:.4f}",
-                    ],
-                    output="screen",
-                    parameters=[{"use_sim_time": use_sim_time}],
-                ),
+                *_spawn_robot_actions(namespace, robot_x, robot_y, robot_z, robot_yaw, use_sim_time),
                 Node(
                     package="ros_gz_bridge",
                     executable="parameter_bridge",
@@ -838,8 +912,7 @@ def _create_multi_robot_actions(context):
                     parameters=[ekf_params, {"use_sim_time": use_sim_time}],
                     remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
                 ),
-            ]
-        )
+        ]))
 
         slam_node = LifecycleNode(
             package="slam_toolbox",
@@ -856,24 +929,30 @@ def _create_multi_robot_actions(context):
                 ("/map_updates", "map_updates"),
             ],
         )
-        slam_actions.extend(_autostart_lifecycle_node(slam_node))
-        nav2_actions.append(
-            GroupAction(
-                actions=[
-                    PushROSNamespace(namespace),
-                    IncludeLaunchDescription(
-                        PythonLaunchDescriptionSource(nav2_navigation_launch_path),
-                        launch_arguments={
-                            "namespace": "",
-                            "use_namespace": "False",
-                            "use_sim_time": use_sim_time_text,
-                            "params_file": navigation_params,
-                            "autostart": "True",
-                        }.items(),
-                    ),
-                ]
-            )
-        )
+        actions.append(TimerAction(
+            period=SLAM_BASE_S + index * ROBOT_STAGGER_S,
+            actions=_autostart_lifecycle_node(slam_node),
+        ))
+        actions.append(TimerAction(
+            period=NAV2_BASE_S + index * ROBOT_STAGGER_S,
+            actions=[
+                GroupAction(
+                    actions=[
+                        PushROSNamespace(namespace),
+                        IncludeLaunchDescription(
+                            PythonLaunchDescriptionSource(nav2_navigation_launch_path),
+                            launch_arguments={
+                                "namespace": "",
+                                "use_namespace": "False",
+                                "use_sim_time": use_sim_time_text,
+                                "params_file": navigation_params,
+                                "autostart": "True",
+                            }.items(),
+                        ),
+                    ]
+                )
+            ],
+        ))
 
     for namespace in namespaces:
         actions.append(
@@ -902,8 +981,9 @@ def _create_multi_robot_actions(context):
     # where each robot fuses its own view of the team locally from whatever peer
     # maps its own DDIL links delivered. See multi_robot_vxch_experiment.launch.py's
     # per-robot, per-peer relay + team_map_fusion_{robot} instances.
-    actions.append(TimerAction(period=5.0, actions=slam_actions))
-    actions.append(TimerAction(period=12.0, actions=nav2_actions))
+    # (SLAM/nav2 startup per robot is scheduled inline above, staggered by
+    # ROBOT_STAGGER_S per robot instead of one shared TimerAction firing for
+    # every robot at once -- see the comment on ROBOT_STAGGER_S.)
 
     rviz_config_path = _rviz_config(output_dir, namespaces)
 
@@ -923,6 +1003,13 @@ def _create_multi_robot_actions(context):
     # succeed, unlike the reverse direction. ROS_AUTOMATIC_DISCOVERY_RANGE
     # is deliberately left at its default here so rviz2 still discovers
     # every ordinary main-netns node (nav2, SLAM, etc.) exactly as before.
+    #
+    # Must stay after every robot's staged nav2 start (see ROBOT_STAGGER_S
+    # above) to keep the "started last of everything" invariant this relies
+    # on -- with per-robot staggering, the last robot's nav2 now starts at
+    # NAV2_BASE_S + (num_robots - 1) * ROBOT_STAGGER_S, later than the old
+    # fixed 14s once there are more than ~2 robots.
+    rviz_period = NAV2_BASE_S + num_robots * ROBOT_STAGGER_S + 2.0
     rviz_additional_env = {}
     if is_tc:
         rviz_additional_env["ROS_STATIC_PEERS"] = ";".join(
@@ -931,7 +1018,7 @@ def _create_multi_robot_actions(context):
 
     actions.append(
         TimerAction(
-            period=14.0,
+            period=rviz_period,
             actions=[
                 Node(
                     package="rviz2",
