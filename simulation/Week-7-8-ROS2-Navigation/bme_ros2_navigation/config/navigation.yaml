@@ -398,7 +398,16 @@ collision_monitor:
     scan:
       type: "scan"
       topic: "scan"
-      min_height: 0.15
+      # mogi_bot's lidar sits at z=0.15 in base_footprint (scan_joint in
+      # urdf/mogi_bot.urdf), so a 2D LaserScan's points all land at
+      # z=0.15 exactly once converted to a cloud -- min_height set to
+      # that same 0.15 put every real point precisely on this filter's
+      # lower boundary, one float-rounding error away from being
+      # silently dropped and collision_monitor missing an obstacle it's
+      # driving into. 0.05 matches the lidar's own physical range.min
+      # (urdf/mogi_bot.gazebo) and gives real margin below the scan
+      # plane without letting spurious near-ground returns back in.
+      min_height: 0.05
       max_height: 2.0
       enabled: True
 
