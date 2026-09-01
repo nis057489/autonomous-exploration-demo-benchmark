@@ -80,56 +80,6 @@ def cluster_centroid_world(cluster, resolution, origin_x, origin_y):
     )
 
 
-def partition_frontiers_by_ownership(cluster_world_xys, nav_map_data, nav_map_width,
-                                      nav_map_height, nav_map_resolution,
-                                      nav_map_origin_x, nav_map_origin_y,
-                                      self_id, self_x, self_y, peer_poses):
-    """Return a boolean list, aligned with cluster_world_xys, marking which
-    frontier centroids "self" owns in a local Manhattan-distance Voronoi
-    partition over self + peers.
-
-    peer_poses: dict[peer_id, (x, y)] world poses, e.g. {"robot2": (1.2, -0.4)}.
-    Ownership: self's L1 distance |dx|+|dy| to a point must be strictly
-    less than every peer's, or tied with self_id sorting lower (plain str
-    comparison) among tied ids -- so every robot computing this
-    independently agrees on the same winner without communicating.
-    peer_poses={} (no peers known this tick) makes every point owned by
-    self -- the no-op / single-robot / degraded-peer-visibility default.
-
-    A point that nav_map still shows as unknown (-1) at its own location is
-    excluded regardless of distance -- claiming ownership of a point this
-    robot doesn't yet know about via its own (locally-observed + relayed
-    teammate) map is meaningless, and this is the deliberate hook for
-    making territory assignment sensitive to how well the active
-    map_transport (baseline/vxch/zstd) has actually communicated the
-    shared map: a robot with a lagged/degraded nav_map gates out more
-    candidates here. A point outside nav_map's current bounds is treated
-    the same way (unknown).
-    """
-    def _is_known(x, y):
-        row = int((y - nav_map_origin_y) / nav_map_resolution)
-        col = int((x - nav_map_origin_x) / nav_map_resolution)
-        if not (0 <= row < nav_map_height and 0 <= col < nav_map_width):
-            return False
-        return nav_map_data[row * nav_map_width + col] != -1
-
-    owned = []
-    for x, y in cluster_world_xys:
-        if not _is_known(x, y):
-            owned.append(False)
-            continue
-
-        self_dist = abs(x - self_x) + abs(y - self_y)
-        is_owned = True
-        for peer_id, (px, py) in peer_poses.items():
-            peer_dist = abs(x - px) + abs(y - py)
-            if peer_dist < self_dist or (peer_dist == self_dist and peer_id < self_id):
-                is_owned = False
-                break
-        owned.append(is_owned)
-    return owned
-
-
 def _free_space_distances(data, width, height, robot_x, robot_y, resolution,
                            origin_x, origin_y, path_occ_threshold):
     """BFS out from the robot's cell over 4-connected passable space (cost <
@@ -232,37 +182,6 @@ def _count_path_turns(parent_r, parent_c, start_row, start_col, target_row, targ
             turns += 1
         prev_dir = d
     return turns
-
-
-def _count_path_unknown_exposure(parent_r, parent_c, start_row, start_col, target_row,
-                                  target_col, unknown_mask, height, width):
-    """Walk the BFS parent chain back from target to start and count how
-    many cells along that route border at least one unknown cell.
-
-    A destination's own gain (estimate_frontier_region_sizes) only scores
-    what's unknown right at the frontier -- it gives zero credit to a
-    route that spends its whole trip skirting a big unexplored area versus
-    one of identical length that cuts straight through territory that's
-    already fully mapped. This is a cheap per-cell proxy for "how much
-    currently-unknown space would the robot's sensors sweep past just by
-    driving this route," used to bias selection toward tours that reveal
-    new area along the way, not just at the endpoint.
-    """
-    exposure = 0
-    r, c = target_row, target_col
-    while True:
-        for dr, dc in _NEIGHBOR_OFFSETS:
-            nr, nc = r + dr, c + dc
-            if 0 <= nr < height and 0 <= nc < width and unknown_mask[nr, nc]:
-                exposure += 1
-                break
-        if (r, c) == (start_row, start_col):
-            break
-        pr, pc = parent_r[r, c], parent_c[r, c]
-        if pr < 0:
-            break  # disconnected -- shouldn't happen for a reachable target
-        r, c = int(pr), int(pc)
-    return exposure
 
 
 def estimate_frontier_gains(clusters, data, width, height, resolution, sensor_range_m):
@@ -434,7 +353,7 @@ def select_nearest_high_gain_frontier(clusters, data, width, height, robot_x, ro
                                        origin_x, origin_y, path_occ_threshold=99, min_distance_m=0.0,
                                        gain_region_cap=2000, gain_threshold_ratio=0.75,
                                        turn_penalty_m=0.0, preferred_direction=None,
-                                       hysteresis_bonus_m=0.0, path_exposure_bonus_m=0.0):
+                                       hysteresis_bonus_m=0.0):
     """Return the (x, y) world centroid of the "nearest" cluster among
     those whose gain is within gain_threshold_ratio of the best gain seen,
     or None if no cluster qualifies.
@@ -469,21 +388,10 @@ def select_nearest_high_gain_frontier(clusters, data, width, height, robot_x, ro
     candidate is with that direction, so the robot favors continuing the
     way it was already going over backtracking for a marginally better
     option.
-
-    path_exposure_bonus_m discounts cost by this amount per path cell
-    that borders unknown space (_count_path_unknown_exposure), so a route
-    that skirts an unexplored area on the way to its frontier beats an
-    equal-length, equal-turn route that cuts through territory that's
-    already fully mapped. Gain (above) only scores what's unknown at the
-    destination -- this is what makes the *trip itself* worth more when
-    it will sweep past more new area, not just the endpoint.
     """
     dist_grid, parent_r, parent_c = _free_space_distances_with_parents(
         data, width, height, robot_x, robot_y, resolution, origin_x, origin_y, path_occ_threshold)
     gains = estimate_frontier_region_sizes(clusters, data, width, height, cap=gain_region_cap)
-    unknown_mask = None
-    if path_exposure_bonus_m:
-        unknown_mask = np.asarray(data, dtype=np.int8).reshape(height, width) == -1
 
     start_row = int((robot_y - origin_y) / resolution)
     start_col = int((robot_x - origin_x) / resolution)
@@ -512,11 +420,6 @@ def select_nearest_high_gain_frontier(clusters, data, width, height, robot_x, ro
         if turn_penalty_m:
             turns = _count_path_turns(parent_r, parent_c, start_row, start_col, target_row, target_col)
             cost_m += turn_penalty_m * turns
-        if path_exposure_bonus_m:
-            exposure = _count_path_unknown_exposure(
-                parent_r, parent_c, start_row, start_col, target_row, target_col,
-                unknown_mask, height, width)
-            cost_m -= path_exposure_bonus_m * exposure
 
         goal_xy = cluster_centroid_world(cluster, resolution, origin_x, origin_y)
         if pref_unit is not None and hysteresis_bonus_m:

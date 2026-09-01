@@ -14,7 +14,6 @@ from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
@@ -23,7 +22,6 @@ from visualization_msgs.msg import Marker, MarkerArray
 from lite_frontier_explorer.frontier_detection import (
     cluster_centroid_world,
     find_frontier_clusters,
-    partition_frontiers_by_ownership,
     select_best_frontier,
     select_nearest_frontier,
     select_nearest_high_gain_frontier,
@@ -64,26 +62,6 @@ class LiteFrontierExplorer(Node):
         # robot favors continuing the way it was already heading over
         # backtracking for a marginally-better frontier.
         self.declare_parameter('hysteresis_bonus_m', 1.5)
-        # Cost discount per path cell that borders unknown space, so a route
-        # that skirts unexplored territory on the way to its frontier beats
-        # an equal-length route through already-fully-mapped ground -- gain
-        # (above) only scores what's unknown at the destination, this is what
-        # makes the trip itself count for something.
-        self.declare_parameter('path_exposure_bonus_m', 0.5)
-        # nav_map is the fused map -- own SLAM observations blended with
-        # teammates' data relayed in by the active map_transport
-        # (baseline/vxch/zstd) -- used ONLY for territory partitioning
-        # below, not for frontier detection or this robot's own goal
-        # selection (both of which stay on costmap_topic).
-        self.declare_parameter('nav_map_topic', 'nav_map')
-        # Peers to partition territory against, as two parallel lists:
-        # base TF frame to look up each peer's pose, and its id (used for
-        # the deterministic tie-break). Fully resolved by the launch file,
-        # same convention as robot_base_frame -- this node has no notion
-        # of "robotN" naming itself.
-        self.declare_parameter('peer_base_frames', [''])
-        self.declare_parameter('peer_ids', [''])
-        self.declare_parameter('enable_territory_partitioning', True)
         self.declare_parameter('replan_period_s', 3.0)
         self.declare_parameter('navigate_to_pose_action_name', 'navigate_to_pose')
         self.declare_parameter('frontier_marker_topic', 'explore/frontiers')
@@ -107,20 +85,6 @@ class LiteFrontierExplorer(Node):
         self._gain_region_cap = self.get_parameter('gain_region_cap').value
         self._turn_penalty_m = self.get_parameter('turn_penalty_m').value
         self._hysteresis_bonus_m = self.get_parameter('hysteresis_bonus_m').value
-        self._path_exposure_bonus_m = self.get_parameter('path_exposure_bonus_m').value
-        self._nav_map_topic = self.get_parameter('nav_map_topic').value
-        peer_base_frames = [f for f in self.get_parameter('peer_base_frames').value if f]
-        peer_ids = [i for i in self.get_parameter('peer_ids').value if i]
-        if len(peer_base_frames) != len(peer_ids):
-            self.get_logger().warn(
-                f"peer_base_frames ({len(peer_base_frames)}) and peer_ids "
-                f"({len(peer_ids)}) lengths don't match -- ignoring peers "
-                "(territory partitioning disabled for this run).")
-            peer_base_frames, peer_ids = [], []
-        self._peer_base_frames = peer_base_frames
-        self._peer_ids = peer_ids
-        self._own_id = self.get_namespace().strip('/')
-        self._enable_territory_partitioning = self.get_parameter('enable_territory_partitioning').value
         replan_period_s = self.get_parameter('replan_period_s').value
         action_name = self.get_parameter('navigate_to_pose_action_name').value
         self._marker_scale = self.get_parameter('frontier_marker_scale').value
@@ -131,7 +95,6 @@ class LiteFrontierExplorer(Node):
         )
 
         self._latest_costmap = None
-        self._latest_nav_map = None
         self._goal_active = False
         self._pending_goal_xy = None
         self._blacklisted_goals = []
@@ -145,18 +108,6 @@ class LiteFrontierExplorer(Node):
 
         self.create_subscription(
             OccupancyGrid, self._costmap_topic, self._on_costmap, 1)
-        # Transient-local to match nav2's own static_layer subscription to
-        # this same topic (map_subscribe_transient_local: True in
-        # navigation.yaml) -- nav_map is latched/published infrequently, so
-        # a volatile subscription risks permanently missing it if it was
-        # published before this node subscribed.
-        nav_map_qos = QoSProfile(
-            depth=1,
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-        )
-        self.create_subscription(
-            OccupancyGrid, self._nav_map_topic, self._on_nav_map, nav_map_qos)
         self.create_timer(replan_period_s, self._tick)
 
         self.get_logger().info(
@@ -164,9 +115,6 @@ class LiteFrontierExplorer(Node):
 
     def _on_costmap(self, msg):
         self._latest_costmap = msg
-
-    def _on_nav_map(self, msg):
-        self._latest_nav_map = msg
 
     def _lookup_robot_pose(self):
         try:
@@ -179,29 +127,6 @@ class LiteFrontierExplorer(Node):
             return None
         t = tf.transform.translation
         return t.x, t.y
-
-    def _lookup_peer_poses(self):
-        # Per-peer failures are caught individually here (continue, not
-        # abort) so one peer being down/not-yet-localized never blocks
-        # self's own tick -- unlike _lookup_robot_pose, where failing to
-        # find self's own pose correctly aborts the whole tick, a peer
-        # simply not being known right now is routine (startup, restart)
-        # and must degrade to "that peer doesn't compete this tick," not
-        # stall self's exploration.
-        peer_poses = {}
-        for peer_id, peer_frame in zip(self._peer_ids, self._peer_base_frames):
-            try:
-                tf = self._tf_buffer.lookup_transform(
-                    self._global_frame, peer_frame, rclpy.time.Time())
-            except (LookupException, ConnectivityException, ExtrapolationException) as exc:
-                self.get_logger().debug(
-                    f"Peer TF lookup {self._global_frame} -> {peer_frame} failed "
-                    f"(peer not up / not localized yet, skipping this tick): {exc}",
-                    throttle_duration_sec=15.0)
-                continue
-            t = tf.transform.translation
-            peer_poses[peer_id] = (t.x, t.y)
-        return peer_poses
 
     def _tick(self):
         costmap = self._latest_costmap
@@ -250,38 +175,6 @@ class LiteFrontierExplorer(Node):
             cluster for cluster, status in zip(clusters, cluster_status)
             if status == 'eligible'
         ]
-        candidate_xy = [
-            xy for xy, status in zip(cluster_xy, cluster_status)
-            if status == 'eligible'
-        ]
-
-        # Territory partitioning: narrow candidates down to frontiers this
-        # robot "owns" (nearer to it than to any peer, on nav_map -- the
-        # fused/communicated map, not costmap) before selection runs, so
-        # every selection strategy below gets a pre-partitioned candidate
-        # set automatically. Never blocks self's own tick on peer state --
-        # any missing prerequisite (partitioning disabled, no peers
-        # configured, nav_map not yet received, no peer TF resolved) just
-        # skips filtering for this tick and falls back to the full
-        # eligible set.
-        if self._enable_territory_partitioning and self._peer_ids:
-            if self._latest_nav_map is None:
-                self.get_logger().warn(
-                    f"Territory partitioning enabled but no message received yet "
-                    f"on '{self._nav_map_topic}' -- skipping ownership filtering "
-                    "this tick (using all eligible candidates).",
-                    throttle_duration_sec=15.0)
-            else:
-                peer_poses = self._lookup_peer_poses()
-                if peer_poses:
-                    nav_map = self._latest_nav_map
-                    owned_mask = partition_frontiers_by_ownership(
-                        candidate_xy, nav_map.data, nav_map.info.width, nav_map.info.height,
-                        nav_map.info.resolution, nav_map.info.origin.position.x,
-                        nav_map.info.origin.position.y,
-                        self._own_id, robot_pose[0], robot_pose[1], peer_poses,
-                    )
-                    candidates = [c for c, owned in zip(candidates, owned_mask) if owned]
 
         goal = None
         if candidates:
@@ -298,7 +191,6 @@ class LiteFrontierExplorer(Node):
                     turn_penalty_m=self._turn_penalty_m,
                     preferred_direction=self._last_goal_direction,
                     hysteresis_bonus_m=self._hysteresis_bonus_m,
-                    path_exposure_bonus_m=self._path_exposure_bonus_m,
                 )
             elif self._selection_strategy == 'best_gain':
                 goal = select_best_frontier(

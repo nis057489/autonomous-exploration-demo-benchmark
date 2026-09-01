@@ -57,7 +57,6 @@ _LITE_PARAM_KEYS = (
     "replan_period_s",
     "navigate_to_pose_action_name",
     "frontier_marker_scale",
-    "enable_territory_partitioning",
 )
 
 # Matches _PATH_COLORS in multi_robot_navigation_with_slam.launch.py (values in 0-255)
@@ -70,24 +69,18 @@ _MARKER_COLORS_255 = [
 ]
 
 
-def _frontier_params(base_path, namespace, all_namespaces, use_sim_time, color_255):
+def _frontier_params(base_path, namespace, use_sim_time, color_255):
     data = _load_yaml(base_path)
     source = data.get("frontier_explorer", {}).get("ros__parameters", {})
     params = {k: source[k] for k in _LITE_PARAM_KEYS if k in source}
     params["use_sim_time"] = use_sim_time
     params["costmap_topic"] = f"/{namespace}/global_costmap/costmap"
-    params["nav_map_topic"] = f"/{namespace}/nav_map"
     params["global_frame"] = "map"
     params["robot_base_frame"] = f"{namespace}/base_footprint"
     params["frontier_marker_topic"] = f"/{namespace}/explore/frontiers"
     params["frontier_marker_color_r"] = color_255[0] / 255.0
     params["frontier_marker_color_g"] = color_255[1] / 255.0
     params["frontier_marker_color_b"] = color_255[2] / 255.0
-
-    peers = [ns for ns in all_namespaces if ns != namespace]
-    if peers:
-        params["peer_ids"] = peers
-        params["peer_base_frames"] = [f"{ns}/base_footprint" for ns in peers]
     return params
 
 
@@ -101,13 +94,11 @@ def _create_explorer_actions(context):
     if num_robots < 1:
         raise RuntimeError("num_robots must be at least 1")
 
-    namespaces = [f"robot{index + 1}" for index in range(num_robots)]
-
     actions = []
-    for index, namespace in enumerate(namespaces):
+    for index in range(num_robots):
+        namespace = f"robot{index + 1}"
         color_255 = _MARKER_COLORS_255[min(index, len(_MARKER_COLORS_255) - 1)]
-        generated_params = _frontier_params(
-            params_file, namespace, namespaces, use_sim_time, color_255)
+        generated_params = _frontier_params(params_file, namespace, use_sim_time, color_255)
         actions.append(
             Node(
                 package="lite_frontier_explorer",
