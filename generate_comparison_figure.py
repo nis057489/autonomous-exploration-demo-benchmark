@@ -43,6 +43,21 @@ Usage:
       --zstd     robot1=<bag_dir> robot2=<bag_dir> \\
       --out figures/compare.png
   (any 2 of --baseline/--vxch/--zstd also works, e.g. just --baseline --zstd)
+
+  Add --max-duration <seconds> to clip each bag to that much time since its
+  start (e.g. to match a replay clipped with REPLAY_MAX_DURATION).
+
+  Repeat --baseline/--vxch/--zstd to average a condition over several runs,
+  each occurrence being one run's robot=bag_dir set:
+    ./generate_comparison_figure.py \\
+        --baseline robot1=<run1_bag_dir> robot2=<run1_bag_dir> \\
+        --baseline robot1=<run2_bag_dir> robot2=<run2_bag_dir> \\
+        --vxch     robot1=<run1_bag_dir> robot2=<run1_bag_dir> \\
+        --vxch     robot1=<run2_bag_dir> robot2=<run2_bag_dir> \\
+        --out figures/compare.png
+  With more than one run for a condition, bar charts show mean +/- std
+  error bars and time-series plots show a mean line with a +/- std band,
+  computed across those runs.
 """
 import argparse
 import re
@@ -103,7 +118,7 @@ def _reindexed_copy(bag_dir):
     return scratch
 
 
-def read_bag(robot, bag_dir, condition):
+def read_bag(robot, bag_dir, condition, max_duration=None):
     """Returns (received_bytes, sent_bytes, coverage, local_coverage,
     local_cell_series, nav_cell_series) where coverage and local_coverage
     are each a list of (seconds_since_start, known_area_m2) -- coverage
@@ -194,6 +209,8 @@ def read_bag(robot, bag_dir, condition):
         topic, data, t_ns = reader.read_next()
         if start_ns is None:
             start_ns = t_ns
+        if max_duration is not None and (t_ns - start_ns) / 1e9 > max_duration:
+            break
         if incoming_re.match(topic):
             received_bytes += len(data)
         elif topic == nav_map_topic:
@@ -249,19 +266,50 @@ def style_ax(ax):
     ax.set_axisbelow(True)
 
 
+def resample_step(series, grid):
+    """Sample a cumulative (t, value) series -- known-area or known-cell-
+    count, both non-decreasing over a bag -- onto arbitrary grid times via
+    step-hold (the value as of the last message at or before each grid
+    time; 0 before the first message). Used to line up runs of slightly
+    different length/sampling onto a shared x-axis so mean/std can be
+    computed pointwise across them."""
+    if not series:
+        return np.zeros(len(grid))
+    ts = np.array([p[0] for p in series])
+    ys = np.array([p[1] for p in series], dtype=float)
+    idx = np.searchsorted(ts, grid, side="right") - 1
+    return np.where(idx >= 0, ys[np.clip(idx, 0, None)], 0.0)
+
+
 def plot_bandwidth(ax, results, conditions, byte_index, title, ylabel):
     """byte_index selects which per-robot byte count to plot out of the
-    (received_bytes, sent_bytes, coverage, local_coverage) tuple in results
-    -- 0 for received (what peers sent this robot), 1 for sent (what this
+    (received_bytes, sent_bytes, coverage, local_coverage, ...) tuple --
+    0 for received (what peers sent this robot), 1 for sent (what this
     robot itself published for peers to pull). conditions fixes the
-    left-to-right bar order; results may hold any subset/superset of it."""
-    robots = sorted({r for cond in results.values() for r in cond})
+    left-to-right bar order. results[c] is a list of per-run {robot: entry}
+    dicts -- with more than one run, bars show the mean total across runs
+    with a +/- std error bar; per-robot stack segments use each robot's mean
+    across runs (a robot missing from a run counts as 0 bytes that run, so
+    the segments still sum to the mean total)."""
+    robots = sorted({r for run in results.values() for entry in run for r in entry})
     x = np.arange(len(conditions))
+
+    def robot_bytes(run, robot):
+        entry = run.get(robot)
+        return entry[byte_index] / 1024 if entry is not None else 0.0
+
     heights_by_robot = {
-        robot: np.array([results[c].get(robot, (0, 0, [], [], [], []))[byte_index] / 1024 for c in conditions])
+        robot: np.array([
+            np.mean([robot_bytes(run, robot) for run in results[c]]) if results[c] else 0.0
+            for c in conditions
+        ])
         for robot in robots
     }
     totals = np.sum(list(heights_by_robot.values()), axis=0) if robots else np.zeros(len(conditions))
+    totals_std = np.array([
+        np.std([sum(robot_bytes(run, r) for r in robots) for run in results[c]]) if len(results[c]) > 1 else 0.0
+        for c in conditions
+    ])
 
     bottoms = np.zeros(len(conditions))
     for robot in robots:
@@ -277,8 +325,11 @@ def plot_bandwidth(ax, results, conditions, byte_index, title, ylabel):
                             fontsize=8.5, fontweight="bold", color="white", zorder=4)
         bottoms += heights_kb
 
-    for xi, total in zip(x, totals):
-        ax.annotate(f"{total:,.0f} KB", xy=(xi, total), xytext=(0, 6),
+    ax.errorbar(x, totals, yerr=totals_std, fmt="none", ecolor=TEXT_PRIMARY, elinewidth=1.5, capsize=5, zorder=5)
+
+    for xi, total, std, n in zip(x, totals, totals_std, (len(results[c]) for c in conditions)):
+        label = f"{total:,.0f} KB" + (f" ± {std:,.0f}" if n > 1 else "")
+        ax.annotate(label, xy=(xi, total + std), xytext=(0, 6),
                     textcoords="offset points", ha="center", va="bottom",
                     fontsize=11, fontweight="bold", color=TEXT_PRIMARY)
 
@@ -291,7 +342,7 @@ def plot_bandwidth(ax, results, conditions, byte_index, title, ylabel):
                     transform=ax.transAxes, ha="center", va="top",
                     fontsize=10.5, color=TEXT_SECONDARY, style="italic")
 
-    ax.set_ylim(0, max(totals) * 1.25 if max(totals) > 0 else 1)
+    ax.set_ylim(0, max(totals + totals_std) * 1.25 if max(totals) > 0 else 1)
 
     ax.set_xticks(x)
     ax.set_xticklabels([DISPLAY_NAMES[c] for c in conditions], fontsize=11, color=TEXT_PRIMARY, fontweight="bold")
@@ -302,21 +353,34 @@ def plot_bandwidth(ax, results, conditions, byte_index, title, ylabel):
 
 def plot_coverage(ax, results, conditions, series_index, title, ylabel):
     """series_index selects which per-robot coverage series to plot out of
-    the (received_bytes, sent_bytes, coverage, local_coverage) tuple in
-    results -- 2 for communicated (nav_map), 3 for locally-observed (map)."""
-    robots = sorted({r for cond in results.values() for r in cond})
+    the (received_bytes, sent_bytes, coverage, local_coverage, ...) tuple --
+    2 for communicated (nav_map), 3 for locally-observed (map). results[c]
+    is a list of per-run {robot: entry} dicts; each robot's line is the
+    mean of that robot's series across the runs it appears in, resampled
+    onto a shared time grid (resample_step) -- with a +/- std shaded band
+    when more than one run contributes."""
+    robots = sorted({r for run in results.values() for entry in run for r in entry})
     robot_style = {r: LINESTYLES[i % len(LINESTYLES)] for i, r in enumerate(robots)}
 
     for cond in conditions:
-        for robot, entry in sorted(results[cond].items()):
-            coverage = entry[series_index]
-            if not coverage:
+        runs = results[cond]
+        max_ts = [entry[series_index][-1][0] for run in runs for entry in run.values() if entry[series_index]]
+        if not max_ts:
+            continue
+        grid = np.linspace(0, min(max_ts), 200)
+        for robot in robots:
+            series_per_run = [run[robot][series_index] for run in runs if robot in run and run[robot][series_index]]
+            if not series_per_run:
                 continue
-            ts = [p[0] for p in coverage]
-            areas = [p[1] for p in coverage]
-            ax.plot(ts, areas, color=CONDITION_COLORS[cond], linestyle=robot_style[robot],
+            sampled = np.array([resample_step(s, grid) for s in series_per_run])
+            mean = sampled.mean(axis=0)
+            ax.plot(grid, mean, color=CONDITION_COLORS[cond], linestyle=robot_style[robot],
                      linewidth=2, solid_capstyle="round", zorder=3)
-            ax.annotate(robot, (ts[-1], areas[-1]), textcoords="offset points",
+            if sampled.shape[0] > 1:
+                std = sampled.std(axis=0)
+                ax.fill_between(grid, mean - std, mean + std, color=CONDITION_COLORS[cond], alpha=0.15,
+                                 linewidth=0, zorder=2)
+            ax.annotate(robot, (grid[-1], mean[-1]), textcoords="offset points",
                         xytext=(6, 0), fontsize=8.5, color=TEXT_SECONDARY, va="center")
 
     ax.set_xlabel("Time since run start (s)", fontsize=11, color=TEXT_SECONDARY)
@@ -352,6 +416,82 @@ def union_coverage_over_time(cell_series_by_robot):
     return out
 
 
+def cumulative_count_series(cell_series):
+    """Turn one robot's local_cell_series ((t, new_cells) diffs, already
+    deduped against that robot's own earlier observations) into a running
+    (t, cumulative_count) series -- how many cells *this robot alone* has
+    now seen, ignoring what any teammate has seen."""
+    total = 0
+    out = []
+    for t, cells in cell_series:
+        total += cells.size
+        out.append((t, total))
+    return out
+
+
+def run_redundant_series(run, cell_index):
+    """For one run, (t, redundant_cell_count) over time: the sum of every
+    robot's own cumulative cell count minus the team union
+    (union_coverage_over_time) at the same instant. Both quantities are
+    non-decreasing and the union can never exceed the sum (a cell known
+    team-wide is known by at least one robot), so this difference is
+    itself non-decreasing -- it only grows when a robot observes a cell
+    some teammate already claimed, i.e. genuinely wasted, redundant
+    physical exploration of ground someone else already covered. cell_index
+    should be 4 (local_cell_series, self-observed only) -- redundancy in
+    the fused/nav_map series (5) would count peer-relayed knowledge as
+    "coverage" too, which was never independently (re)observed and isn't
+    wasted effort."""
+    cell_series_by_robot = {r: entry[cell_index] for r, entry in run.items()}
+    merged_union = union_coverage_over_time(cell_series_by_robot.values())
+    if not merged_union:
+        return []
+    grid = np.array([p[0] for p in merged_union])
+    union_vals = np.array([p[1] for p in merged_union], dtype=float)
+    total = np.zeros(len(grid))
+    for series in cell_series_by_robot.values():
+        total += resample_step(cumulative_count_series(series), grid)
+    redundant_vals = total - union_vals
+    return list(zip(grid.tolist(), redundant_vals.tolist()))
+
+
+def plot_redundant_coverage(ax, results, conditions, cell_index, title):
+    """Redundant physical coverage over time: cells more than one robot
+    independently drove to and observed with its own sensors, i.e. wasted
+    territory-overlap effort (see run_redundant_series). results[c] is a
+    list of per-run {robot: entry} dicts -- each run's redundant series is
+    resampled (resample_step) onto a shared time grid and averaged, with a
+    +/- std band across runs when more than one is given."""
+    for cond in conditions:
+        runs = results[cond]
+        redundant_per_run = [run_redundant_series(run, cell_index) for run in runs]
+        max_ts = [m[-1][0] for m in redundant_per_run if m]
+        if not max_ts:
+            continue
+        grid = np.linspace(0, min(max_ts), 200)
+        sampled = np.array([resample_step(m, grid) for m in redundant_per_run if m])
+        mean = sampled.mean(axis=0)
+        ax.plot(grid, mean, color=CONDITION_COLORS[cond], linewidth=2, solid_capstyle="round", zorder=3)
+        label = f"{mean[-1]:,.0f} cells"
+        if sampled.shape[0] > 1:
+            std = sampled.std(axis=0)
+            ax.fill_between(grid, np.maximum(mean - std, 0), mean + std, color=CONDITION_COLORS[cond],
+                             alpha=0.15, linewidth=0, zorder=2)
+            label += f" ± {std[-1]:,.0f}"
+        ax.annotate(label, (grid[-1], mean[-1]), textcoords="offset points",
+                    xytext=(6, 0), fontsize=8.5, fontweight="bold", color=CONDITION_COLORS[cond], va="center")
+
+    ax.set_xlabel("Time since run start (s)", fontsize=11, color=TEXT_SECONDARY)
+    ax.set_ylabel("Redundant tiles (seen by >1 robot)", fontsize=11, color=TEXT_SECONDARY)
+    ax.set_title(title, fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
+    style_ax(ax)
+
+    handles = [Line2D([0], [0], color=CONDITION_COLORS[c], lw=2, label=DISPLAY_NAMES[c])
+               for c in conditions if results[c]]
+    if handles:
+        ax.legend(handles=handles, frameon=False, fontsize=10, loc="lower right")
+
+
 def plot_union_coverage(ax, results, conditions, cell_index, title):
     """Team-wide map coverage over time, counted as the running UNION of
     every robot's cells (see known_cells) as messages arrive -- a cell two
@@ -362,15 +502,28 @@ def plot_union_coverage(ax, results, conditions, cell_index, title):
     (/<robot>/nav_map, post-fusion -- "how much does the team collectively
     know", including peer-relayed cells. This is the one that actually
     moves when communication improves, since local_cell_series structurally
-    excludes anything a robot only learned from a peer)."""
+    excludes anything a robot only learned from a peer). results[c] is a
+    list of per-run {robot: entry} dicts -- the union is computed per run,
+    then those per-run curves are resampled (resample_step) onto a shared
+    time grid and averaged, with a +/- std band when more than one run
+    contributes."""
     for cond in conditions:
-        merged = union_coverage_over_time(entry[cell_index] for entry in results[cond].values())
-        if not merged:
+        runs = results[cond]
+        merged_per_run = [union_coverage_over_time(entry[cell_index] for entry in run.values()) for run in runs]
+        max_ts = [m[-1][0] for m in merged_per_run if m]
+        if not max_ts:
             continue
-        ts = [p[0] for p in merged]
-        tiles = [p[1] for p in merged]
-        ax.plot(ts, tiles, color=CONDITION_COLORS[cond], linewidth=2, solid_capstyle="round", zorder=3)
-        ax.annotate(f"{tiles[-1]:,} tiles", (ts[-1], tiles[-1]), textcoords="offset points",
+        grid = np.linspace(0, min(max_ts), 200)
+        sampled = np.array([resample_step(m, grid) for m in merged_per_run if m])
+        mean = sampled.mean(axis=0)
+        ax.plot(grid, mean, color=CONDITION_COLORS[cond], linewidth=2, solid_capstyle="round", zorder=3)
+        label = f"{mean[-1]:,.0f} tiles"
+        if sampled.shape[0] > 1:
+            std = sampled.std(axis=0)
+            ax.fill_between(grid, mean - std, mean + std, color=CONDITION_COLORS[cond], alpha=0.15,
+                             linewidth=0, zorder=2)
+            label += f" ± {std[-1]:,.0f}"
+        ax.annotate(label, (grid[-1], mean[-1]), textcoords="offset points",
                     xytext=(6, 0), fontsize=8.5, fontweight="bold", color=CONDITION_COLORS[cond], va="center")
 
     ax.set_xlabel("Time since run start (s)", fontsize=11, color=TEXT_SECONDARY)
@@ -386,35 +539,50 @@ def plot_union_coverage(ax, results, conditions, cell_index, title):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--baseline", nargs="+", metavar="robot=bag_dir")
-    parser.add_argument("--vxch", nargs="+", metavar="robot=bag_dir")
-    parser.add_argument("--zstd", nargs="+", metavar="robot=bag_dir")
+    parser.add_argument("--baseline", nargs="+", metavar="robot=bag_dir", action="append",
+                         help="One run's robot=bag_dir set. Repeat --baseline for additional runs to average.")
+    parser.add_argument("--vxch", nargs="+", metavar="robot=bag_dir", action="append",
+                         help="One run's robot=bag_dir set. Repeat --vxch for additional runs to average.")
+    parser.add_argument("--zstd", nargs="+", metavar="robot=bag_dir", action="append",
+                         help="One run's robot=bag_dir set. Repeat --zstd for additional runs to average.")
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--max-duration", type=float, default=None,
+                         help="Clip each bag to this many seconds of bag time since its start.")
     args = parser.parse_args()
 
+    # Each condition's runs (from repeated --<condition> occurrences), each
+    # a {robot: bag_dir} dict for one run.
     robot_paths = {}
     for condition in ALL_CONDITIONS:
-        pairs = getattr(args, condition)
-        if pairs:
-            robot_paths[condition] = parse_robot_paths(pairs)
+        runs = getattr(args, condition)
+        if runs:
+            robot_paths[condition] = [parse_robot_paths(pairs) for pairs in runs]
     if len(robot_paths) < 2:
         print("error: need at least 2 of --baseline/--vxch/--zstd to compare", file=sys.stderr)
         sys.exit(1)
     conditions = tuple(c for c in ALL_CONDITIONS if c in robot_paths)
 
-    results = {c: {} for c in conditions}
-    for condition, robots in robot_paths.items():
-        for robot, bag_dir in sorted(robots.items()):
-            r = read_bag(robot, bag_dir, condition)
-            if r is not None:
-                results[condition][robot] = r
+    # results[c] is a list of per-run {robot: read_bag() result} dicts, one
+    # per --<condition> occurrence -- more than one run per condition drives
+    # the mean +/- std error bars/bands in the plot_* functions below.
+    results = {c: [] for c in conditions}
+    for condition, runs in robot_paths.items():
+        for run_robots in runs:
+            run_results = {}
+            for robot, bag_dir in sorted(run_robots.items()):
+                r = read_bag(robot, bag_dir, condition, max_duration=args.max_duration)
+                if r is not None:
+                    run_results[robot] = r
+            if run_results:
+                results[condition].append(run_results)
 
     for condition in conditions:
         if not results[condition]:
             print(f"error: no readable bags for condition {condition!r}", file=sys.stderr)
             sys.exit(1)
 
-    fig, (ax_sent, ax_received, ax_coverage, ax_local, ax_union, ax_union_nav) = plt.subplots(1, 6, figsize=(37, 5.5))
+    fig, (ax_sent, ax_received, ax_coverage, ax_local, ax_union, ax_union_nav, ax_redundant) = plt.subplots(
+        1, 7, figsize=(43, 5.5))
     plot_bandwidth(ax_sent, results, conditions, 1, "Map-sharing bandwidth (sent)", "Sent to peers (KB)")
     plot_bandwidth(ax_received, results, conditions, 0, "Map-sharing bandwidth (received)", "Received from peers (KB)")
     plot_coverage(ax_coverage, results, conditions, 2, "Communicated map coverage", "Known map area (m²)")
@@ -423,6 +591,8 @@ def main():
                          "Team physical coverage over time (union, self-observed only)")
     plot_union_coverage(ax_union_nav, results, conditions, 5,
                          "Team known coverage over time (union, incl. peer-relayed)")
+    plot_redundant_coverage(ax_redundant, results, conditions, 4,
+                             "Redundant physical coverage (territory overlap)")
     fig.suptitle("Map sharing: " + " vs. ".join(DISPLAY_NAMES[c] for c in conditions), fontsize=15, fontweight="bold",
                  color=TEXT_PRIMARY, x=0.02, ha="left")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
@@ -430,27 +600,55 @@ def main():
     args.out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.out, dpi=200, facecolor="white")
 
-    totals_received = {c: sum(r for r, _, _, _, _, _ in results[c].values()) for c in conditions}
-    totals_sent = {c: sum(s for _, s, _, _, _, _ in results[c].values()) for c in conditions}
+    # Per-run totals (summed across robots), then mean/std across runs.
+    run_received = {c: [sum(r for r, _, _, _, _, _ in run.values()) for run in results[c]] for c in conditions}
+    run_sent = {c: [sum(s for _, s, _, _, _, _ in run.values()) for run in results[c]] for c in conditions}
+    totals_received = {c: float(np.mean(run_received[c])) for c in conditions}
+    totals_sent = {c: float(np.mean(run_sent[c])) for c in conditions}
     for c in conditions:
-        print(f"{DISPLAY_NAMES[c]:>10} received: {totals_received[c]} bytes ({totals_received[c] / 1024:.1f} KB), "
-              f"sent: {totals_sent[c]} bytes ({totals_sent[c] / 1024:.1f} KB)")
+        n = len(results[c])
+        recv_std = f" ± {np.std(run_received[c]):.0f}" if n > 1 else ""
+        sent_std = f" ± {np.std(run_sent[c]):.0f}" if n > 1 else ""
+        print(f"{DISPLAY_NAMES[c]:>10} received: {totals_received[c]:.0f}{recv_std} bytes "
+              f"({totals_received[c] / 1024:.1f} KB), sent: {totals_sent[c]:.0f}{sent_std} bytes "
+              f"({totals_sent[c] / 1024:.1f} KB) across {n} run(s)")
     nonzero_received = {c: v for c, v in totals_received.items() if v > 0}
     if len(nonzero_received) >= 2:
         print(f"received ratio (max/min): {max(nonzero_received.values()) / min(nonzero_received.values()):.2f}x")
     for condition in conditions:
-        for robot, (_, _, coverage, local_coverage, _, _) in sorted(results[condition].items()):
-            final = coverage[-1][1] if coverage else 0.0
-            final_local = local_coverage[-1][1] if local_coverage else 0.0
-            print(f"{DISPLAY_NAMES[condition]} {robot}: final known map area {final:.1f} m^2 (communicated, incl. peer-relayed cells), "
-                  f"{final_local:.1f} m^2 self-observed")
+        robots = sorted({r for run in results[condition] for r in run})
+        for robot in robots:
+            finals = [run[robot][2][-1][1] for run in results[condition] if robot in run and run[robot][2]]
+            finals_local = [run[robot][3][-1][1] for run in results[condition] if robot in run and run[robot][3]]
+            final = np.mean(finals) if finals else 0.0
+            final_local = np.mean(finals_local) if finals_local else 0.0
+            std_suffix = f" ± {np.std(finals):.1f}" if len(finals) > 1 else ""
+            std_local_suffix = f" ± {np.std(finals_local):.1f}" if len(finals_local) > 1 else ""
+            print(f"{DISPLAY_NAMES[condition]} {robot}: final known map area {final:.1f}{std_suffix} m^2 "
+                  f"(communicated, incl. peer-relayed cells), {final_local:.1f}{std_local_suffix} m^2 self-observed")
     for condition in conditions:
-        merged_local = union_coverage_over_time(entry[4] for entry in results[condition].values())
-        merged_nav = union_coverage_over_time(entry[5] for entry in results[condition].values())
-        final_local_tiles = merged_local[-1][1] if merged_local else 0
-        final_nav_tiles = merged_nav[-1][1] if merged_nav else 0
-        print(f"{DISPLAY_NAMES[condition]:>10} team physical coverage (union, self-observed only): {final_local_tiles:,} tiles; "
-              f"team known coverage (union, incl. peer-relayed): {final_nav_tiles:,} tiles")
+        local_finals = [union_coverage_over_time(entry[4] for entry in run.values()) for run in results[condition]]
+        nav_finals = [union_coverage_over_time(entry[5] for entry in run.values()) for run in results[condition]]
+        local_tiles = [m[-1][1] for m in local_finals if m]
+        nav_tiles = [m[-1][1] for m in nav_finals if m]
+        final_local_tiles = np.mean(local_tiles) if local_tiles else 0
+        final_nav_tiles = np.mean(nav_tiles) if nav_tiles else 0
+        local_suffix = f" ± {np.std(local_tiles):.0f}" if len(local_tiles) > 1 else ""
+        nav_suffix = f" ± {np.std(nav_tiles):.0f}" if len(nav_tiles) > 1 else ""
+        print(f"{DISPLAY_NAMES[condition]:>10} team physical coverage (union, self-observed only): "
+              f"{final_local_tiles:,.0f}{local_suffix} tiles; "
+              f"team known coverage (union, incl. peer-relayed): {final_nav_tiles:,.0f}{nav_suffix} tiles")
+    for condition in conditions:
+        local_finals = [union_coverage_over_time(entry[4] for entry in run.values()) for run in results[condition]]
+        local_tiles = [m[-1][1] for m in local_finals if m]
+        final_local_tiles = np.mean(local_tiles) if local_tiles else 0
+        redundant_finals = [run_redundant_series(run, 4) for run in results[condition]]
+        redundant_tiles = [m[-1][1] for m in redundant_finals if m]
+        final_redundant = np.mean(redundant_tiles) if redundant_tiles else 0
+        redundant_suffix = f" ± {np.std(redundant_tiles):.0f}" if len(redundant_tiles) > 1 else ""
+        pct = f" ({100 * final_redundant / final_local_tiles:.1f}% of physical coverage)" if final_local_tiles else ""
+        print(f"{DISPLAY_NAMES[condition]:>10} redundant physical coverage (territory overlap): "
+              f"{final_redundant:,.0f}{redundant_suffix} tiles{pct}")
     print(str(args.out.resolve()))
 
 

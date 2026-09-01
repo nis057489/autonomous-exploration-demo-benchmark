@@ -17,6 +17,10 @@ set -euo pipefail
 # Usage: ./replay_compare.sh [rate]
 #   rate   Playback speed multiplier (default 8).
 #
+# Set REPLAY_MAX_DURATION to a number of seconds (of bag time) to clip
+# playback to, e.g. REPLAY_MAX_DURATION=150 -- each loop iteration stops
+# after that much bag time instead of playing the whole recording.
+#
 # Each side's bag playback loops automatically (ros2 bag play --loop) so it
 # restarts from the beginning once it reaches the end, until the rviz window
 # is closed.
@@ -268,11 +272,16 @@ run_side() {
     mount_args+=(-v "${host_bag}:/bags/${robot}:ro")
   done
 
+  local duration_args=()
+  if [[ -n "${REPLAY_MAX_DURATION:-}" ]]; then
+    duration_args=(--playback-duration "${REPLAY_MAX_DURATION}")
+  fi
+
   local inner
   inner="$(build_inner_cmd bags_ref)"
   inner+="
 echo 'playing back ${#bags_ref[@]} bag(s) for ${condition} at ${RATE}x...'
-ros2 bag play \"\${inputs[@]}\" -r ${RATE} --loop &
+ros2 bag play \"\${inputs[@]}\" -r ${RATE} --loop ${duration_args[@]+"${duration_args[@]}"} &
 PLAY_PID=\$!
 rviz2 -d /rviz/real.rviz -t '${condition}' -qwindowgeometry '${geometry}' &
 RVIZ_PID=\$!

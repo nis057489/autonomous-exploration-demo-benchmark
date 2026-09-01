@@ -17,9 +17,9 @@ has_tkinter() {
 
 for candidate in python3 /home/linuxbrew/.linuxbrew/bin/python3; do
   if command -v "${candidate}" >/dev/null 2>&1 && has_tkinter "${candidate}"; then
-    exec "${candidate}" "${SCRIPT_DIR}/replay_gui.py"
+    exec "${candidate}" "${SCRIPT_DIR}/replay_gui.py" "$@"
   fi
 done
 
 echo "No host Python with tkinter found -- falling back to jazzy_env distrobox." >&2
-exec distrobox enter jazzy_env -- python3 "${SCRIPT_DIR}/replay_gui.py"
+exec distrobox enter jazzy_env -- python3 "${SCRIPT_DIR}/replay_gui.py" "$@"

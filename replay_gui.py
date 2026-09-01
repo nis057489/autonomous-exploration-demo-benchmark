@@ -14,6 +14,7 @@ distrobox this GUI runs in (tkinter isn't installed on the host Python). So
 when running inside a container, the compare script is launched on the host
 via `distrobox-host-exec`.
 """
+import argparse
 import glob
 import os
 import re
@@ -190,7 +191,12 @@ class RunPicker(ttk.Frame):
         ttk.Label(self, text=title, font=("", 11, "bold")).pack(anchor="w")
 
         columns = ("timestamp", "robots")
-        self.tree = ttk.Treeview(self, columns=columns, show="headings", selectmode="browse", height=14)
+        # "extended" (ctrl/shift-click multi-select) rather than "browse" --
+        # generate_figure() uses multiple selected runs per condition to
+        # plot mean +/- std error bars across runs; launch() (live replay)
+        # still only plays one run per condition, so it errors out if more
+        # than one is selected there.
+        self.tree = ttk.Treeview(self, columns=columns, show="headings", selectmode="extended", height=14)
         self.tree.heading("timestamp", text="Timestamp")
         self.tree.heading("robots", text="Robots included")
         self.tree.column("timestamp", width=160, anchor="w")
@@ -216,15 +222,15 @@ class RunPicker(ttk.Frame):
             self.tree.selection_set("0")
             self.tree.focus("0")
 
-    def selected_session(self):
-        sel = self.tree.selection()
-        if not sel:
-            return None
-        return self.sessions[int(sel[0])]
+    def selected_sessions(self):
+        """All currently-selected sessions, in tree order (not selection
+        order -- ttk.Treeview.selection() already returns iids in tree
+        order)."""
+        return [self.sessions[int(iid)] for iid in self.tree.selection()]
 
 
 class ReplayGUI(tk.Tk):
-    def __init__(self):
+    def __init__(self, initial_max_duration=""):
         super().__init__()
         self.title("Replay Compare")
         self.geometry("1080x560")
@@ -242,6 +248,15 @@ class ReplayGUI(tk.Tk):
             for session in condition_sessions
             for robot in session["runs"]
         })
+
+        ttk.Label(
+            self,
+            text="Ctrl/Shift-click to select several runs per condition -- "
+                 "Generate Figure will then plot mean ± std error bars across them "
+                 "(Launch Compare still needs exactly one).",
+            padding=(10, 6, 10, 0),
+            foreground="#555",
+        ).pack(fill="x")
 
         picker_frame = ttk.Frame(self, padding=10)
         picker_frame.pack(fill="both", expand=True)
@@ -271,6 +286,10 @@ class ReplayGUI(tk.Tk):
         self.rate_var = tk.StringVar(value="8")
         ttk.Entry(controls, textvariable=self.rate_var, width=6).pack(side="left", padx=(4, 12))
 
+        ttk.Label(controls, text="Max duration (s):").pack(side="left")
+        self.max_duration_var = tk.StringVar(value=initial_max_duration)
+        ttk.Entry(controls, textvariable=self.max_duration_var, width=6).pack(side="left", padx=(4, 12))
+
         self.launch_btn = ttk.Button(controls, text="Launch Compare", command=self.launch)
         self.launch_btn.pack(side="left")
 
@@ -296,9 +315,10 @@ class ReplayGUI(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def refresh(self):
+        max_duration = self.max_duration_var.get()
         for child in list(self.children.values()):
             child.destroy()
-        self.__init__()
+        self.__init__(initial_max_duration=max_duration)
 
     def append_log(self, text):
         self.log.configure(state="normal")
@@ -307,14 +327,17 @@ class ReplayGUI(tk.Tk):
         self.log.configure(state="disabled")
 
     def _selected_sessions(self):
-        """{condition: session} for every condition with a picker selection
-        (a condition with no runs at all has an empty picker, so
-        selected_session() returns None for it and it's simply omitted)."""
+        """{condition: [session, ...]} for every condition with at least one
+        picker selection (a condition with no runs at all has an empty
+        picker, so selected_sessions() returns [] for it and it's simply
+        omitted). Pickers allow multi-select so generate_figure() can
+        average over several runs per condition; launch() below still
+        requires exactly one."""
         selected = {}
         for condition, picker in self.pickers.items():
-            session = picker.selected_session()
-            if session is not None:
-                selected[condition] = session
+            sessions = picker.selected_sessions()
+            if sessions:
+                selected[condition] = sessions
         return selected
 
     def launch(self):
@@ -322,10 +345,19 @@ class ReplayGUI(tk.Tk):
             messagebox.showinfo("Already running", "A replay is already running. Stop it first.")
             return
 
-        selected = self._selected_sessions()
-        if len(selected) < 2:
+        selected_multi = self._selected_sessions()
+        if len(selected_multi) < 2:
             messagebox.showerror("No selection", "Select runs for at least 2 conditions first.")
             return
+        multi = {c: s for c, s in selected_multi.items() if len(s) > 1}
+        if multi:
+            messagebox.showerror(
+                "Multiple runs selected",
+                "Live replay only plays one run per condition. Select a single run for: "
+                + ", ".join(sorted(multi)) + ".",
+            )
+            return
+        selected = {c: s[0] for c, s in selected_multi.items()}
 
         rate = self.rate_var.get().strip() or "8"
         try:
@@ -334,8 +366,19 @@ class ReplayGUI(tk.Tk):
             messagebox.showerror("Invalid rate", f"'{rate}' is not a number.")
             return
 
+        max_duration = self.max_duration_var.get().strip()
+        if max_duration:
+            try:
+                float(max_duration)
+            except ValueError:
+                messagebox.showerror("Invalid max duration", f"'{max_duration}' is not a number.")
+                return
+
         env = os.environ.copy()
         env_args = []
+        if max_duration:
+            env["REPLAY_MAX_DURATION"] = max_duration
+            env_args.append(f"REPLAY_MAX_DURATION={max_duration}")
         for condition, session in selected.items():
             override = ",".join(f"{robot}:{name}" for robot, name in session["runs"].items())
             var_name = f"{condition.upper()}_RUN_OVERRIDE"
@@ -353,7 +396,8 @@ class ReplayGUI(tk.Tk):
             cmd = [REPLAY_SCRIPT, rate]
 
         labels = ", ".join(f"{c}={s['label']}" for c, s in selected.items())
-        self.append_log(f"$ {labels} rate={rate}\n")
+        duration_suffix = f" max_duration={max_duration}s" if max_duration else ""
+        self.append_log(f"$ {labels} rate={rate}{duration_suffix}\n")
         self.status_var.set("Launching...")
         self.launch_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
@@ -395,7 +439,11 @@ class ReplayGUI(tk.Tk):
         """Produce the bandwidth/coverage comparison figure for whichever
         sessions are currently selected in the pickers (any 2 or all 3
         conditions; defaults to the latest of each, since each RunPicker
-        preselects row 0 and sessions are sorted newest first)."""
+        preselects row 0 and sessions are sorted newest first). Selecting
+        several runs for a condition (ctrl/shift-click) plots that
+        condition's mean +/- std across those runs instead of a single
+        run's values -- see generate_comparison_figure.py's --max-duration
+        docstring update for the --<condition> repeat-per-run CLI shape."""
         if self.fig_proc is not None:
             messagebox.showinfo("Already running", "A figure is already being generated.")
             return
@@ -404,6 +452,14 @@ class ReplayGUI(tk.Tk):
         if len(selected) < 2:
             messagebox.showerror("No selection", "Select runs for at least 2 conditions first.")
             return
+
+        max_duration = self.max_duration_var.get().strip()
+        if max_duration:
+            try:
+                float(max_duration)
+            except ValueError:
+                messagebox.showerror("Invalid max duration", f"'{max_duration}' is not a number.")
+                return
 
         def bag_args(session):
             args = []
@@ -420,7 +476,8 @@ class ReplayGUI(tk.Tk):
 
         os.makedirs(FIGURES_DIR, exist_ok=True)
         out_name = "compare_" + "_vs_".join(
-            f"{c}-{s['ts'].strftime('%Y%m%d_%H%M%S')}" for c, s in selected.items()
+            c + "-" + "+".join(s["ts"].strftime("%Y%m%d_%H%M%S") for s in sessions)
+            for c, sessions in selected.items()
         ) + ".png"
         out_path = os.path.join(FIGURES_DIR, out_name)
 
@@ -432,9 +489,14 @@ class ReplayGUI(tk.Tk):
         # which can shadow the system interpreter that actually has
         # matplotlib/rosbag2_py installed).
         py_cmd = ["/usr/bin/python3", FIGURE_SCRIPT]
-        for condition, session in selected.items():
-            py_cmd += [f"--{condition}"] + bag_args(session)
+        for condition, sessions in selected.items():
+            # One --<condition> flag per selected run -- generate_comparison_figure.py
+            # treats each occurrence as a separate run to average over.
+            for session in sessions:
+                py_cmd += [f"--{condition}"] + bag_args(session)
         py_cmd += ["--out", out_path]
+        if max_duration:
+            py_cmd += ["--max-duration", max_duration]
 
         if in_container():
             cmd = py_cmd
@@ -445,7 +507,9 @@ class ReplayGUI(tk.Tk):
             quoted = " ".join(shlex.quote(part) for part in py_cmd)
             cmd = ["distrobox", "enter", "jazzy_env", "--", "bash", "-lc", quoted]
 
-        labels = ", ".join(f"{c}={s['label']}" for c, s in selected.items())
+        labels = ", ".join(
+            f"{c}=[{', '.join(s['label'] for s in sessions)}]" for c, sessions in selected.items()
+        )
         self.append_log(f"$ generate figure: {labels}\n")
         self.figure_btn.configure(state="disabled")
 
@@ -487,10 +551,18 @@ class ReplayGUI(tk.Tk):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--max-duration", type=float, default=None,
+        help="Clip both playback and the generated figure to this many seconds of bag time.",
+    )
+    args = parser.parse_args()
+
     if not os.path.isdir(RUNS_DIR):
         print(f"No experiment_runs/ directory found at {RUNS_DIR}", file=sys.stderr)
         sys.exit(1)
-    ReplayGUI().mainloop()
+    initial_max_duration = "" if args.max_duration is None else str(args.max_duration)
+    ReplayGUI(initial_max_duration=initial_max_duration).mainloop()
 
 
 if __name__ == "__main__":
