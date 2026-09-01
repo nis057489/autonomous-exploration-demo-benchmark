@@ -299,6 +299,11 @@ class ReplayGUI(tk.Tk):
         self.figure_btn = ttk.Button(controls, text="Generate Figure", command=self.generate_figure)
         self.figure_btn.pack(side="left", padx=(12, 0))
 
+        self.separate_figures_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            controls, text="Each panel as its own image", variable=self.separate_figures_var,
+        ).pack(side="left", padx=(8, 0))
+
         ttk.Button(controls, text="Refresh runs", command=self.refresh).pack(side="right")
 
         self.status_var = tk.StringVar(value="Ready.")
@@ -497,6 +502,9 @@ class ReplayGUI(tk.Tk):
         py_cmd += ["--out", out_path]
         if max_duration:
             py_cmd += ["--max-duration", max_duration]
+        separate_figures = self.separate_figures_var.get()
+        if separate_figures:
+            py_cmd += ["--separate-figures"]
 
         if in_container():
             cmd = py_cmd
@@ -513,29 +521,45 @@ class ReplayGUI(tk.Tk):
         self.append_log(f"$ generate figure: {labels}\n")
         self.figure_btn.configure(state="disabled")
 
-        threading.Thread(target=self._run_figure_process, args=(cmd, out_path), daemon=True).start()
+        threading.Thread(
+            target=self._run_figure_process, args=(cmd, out_path, separate_figures), daemon=True,
+        ).start()
 
-    def _run_figure_process(self, cmd, out_path):
+    def _run_figure_process(self, cmd, out_path, separate_figures):
         try:
             self.fig_proc = subprocess.Popen(
                 cmd, cwd=PROJECT_ROOT,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
             )
         except FileNotFoundError as e:
-            self.after(0, lambda: self._finish_figure(f"Failed to launch: {e}\n", None))
+            self.after(0, lambda: self._finish_figure(f"Failed to launch: {e}\n", None, separate_figures))
             return
 
         for line in self.fig_proc.stdout:
             self.after(0, self.append_log, line)
         returncode = self.fig_proc.wait()
         message = f"[figure generation exited with code {returncode}]\n"
-        self.after(0, lambda: self._finish_figure(message, out_path if returncode == 0 else None))
+        self.after(0, lambda: self._finish_figure(message, out_path if returncode == 0 else None, separate_figures))
 
-    def _finish_figure(self, message, out_path):
+    def _finish_figure(self, message, out_path, separate_figures):
         self.append_log(message)
         self.figure_btn.configure(state="normal")
         self.fig_proc = None
-        if out_path and os.path.isfile(out_path):
+        if not out_path:
+            return
+        if separate_figures:
+            # --separate-figures writes <stem>_<panel><suffix> per panel
+            # instead of out_path itself -- see generate_comparison_figure.py.
+            stem, suffix = os.path.splitext(out_path)
+            panel_paths = sorted(glob.glob(f"{stem}_*{suffix}"))
+            for panel_path in panel_paths:
+                self.append_log(f"Figure saved to {panel_path}\n")
+            for panel_path in panel_paths:
+                try:
+                    subprocess.Popen(["xdg-open", panel_path])
+                except FileNotFoundError:
+                    break
+        elif os.path.isfile(out_path):
             self.append_log(f"Figure saved to {out_path}\n")
             try:
                 subprocess.Popen(["xdg-open", out_path])

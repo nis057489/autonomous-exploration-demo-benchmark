@@ -548,6 +548,9 @@ def main():
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--max-duration", type=float, default=None,
                          help="Clip each bag to this many seconds of bag time since its start.")
+    parser.add_argument("--separate-figures", action="store_true",
+                         help="Save each panel as its own image file (named <out stem>_<panel>.<out suffix>) "
+                              "instead of one combined multi-panel image.")
     args = parser.parse_args()
 
     # Each condition's runs (from repeated --<condition> occurrences), each
@@ -581,24 +584,35 @@ def main():
             print(f"error: no readable bags for condition {condition!r}", file=sys.stderr)
             sys.exit(1)
 
-    fig, (ax_sent, ax_received, ax_coverage, ax_local, ax_union, ax_union_nav, ax_redundant) = plt.subplots(
-        1, 7, figsize=(43, 5.5))
-    plot_bandwidth(ax_sent, results, conditions, 1, "Map-sharing bandwidth (sent)", "Sent to peers (KB)")
-    plot_bandwidth(ax_received, results, conditions, 0, "Map-sharing bandwidth (received)", "Received from peers (KB)")
-    plot_coverage(ax_coverage, results, conditions, 2, "Communicated map coverage", "Known map area (m²)")
-    plot_coverage(ax_local, results, conditions, 3, "Locally-observed coverage (self only)", "Self-observed area (m²)")
-    plot_union_coverage(ax_union, results, conditions, 4,
-                         "Team physical coverage over time (union, self-observed only)")
-    plot_union_coverage(ax_union_nav, results, conditions, 5,
-                         "Team known coverage over time (union, incl. peer-relayed)")
-    plot_redundant_coverage(ax_redundant, results, conditions, 4,
-                             "Redundant physical coverage (territory overlap)")
-    fig.suptitle("Map sharing: " + " vs. ".join(DISPLAY_NAMES[c] for c in conditions), fontsize=15, fontweight="bold",
-                 color=TEXT_PRIMARY, x=0.02, ha="left")
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    # (panel name, plot function, args) -- shared between the combined
+    # multi-panel layout and --separate-figures' one-file-per-panel layout.
+    panels = [
+        ("sent", plot_bandwidth, (results, conditions, 1, "Map-sharing bandwidth (sent)", "Sent to peers (KB)")),
+        ("received", plot_bandwidth, (results, conditions, 0, "Map-sharing bandwidth (received)", "Received from peers (KB)")),
+        ("coverage", plot_coverage, (results, conditions, 2, "Communicated map coverage", "Known map area (m²)")),
+        ("local", plot_coverage, (results, conditions, 3, "Locally-observed coverage (self only)", "Self-observed area (m²)")),
+        ("union", plot_union_coverage, (results, conditions, 4, "Team physical coverage over time (union, self-observed only)")),
+        ("union_nav", plot_union_coverage, (results, conditions, 5, "Team known coverage over time (union, incl. peer-relayed)")),
+        ("redundant", plot_redundant_coverage, (results, conditions, 4, "Redundant physical coverage (territory overlap)")),
+    ]
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(args.out, dpi=200, facecolor="white")
+    if args.separate_figures:
+        for name, plot_fn, plot_args in panels:
+            panel_fig, ax = plt.subplots(figsize=(7, 5.5))
+            plot_fn(ax, *plot_args)
+            panel_fig.tight_layout()
+            panel_out = args.out.with_name(f"{args.out.stem}_{name}{args.out.suffix}")
+            panel_fig.savefig(panel_out, dpi=200, facecolor="white")
+            plt.close(panel_fig)
+    else:
+        fig, axes = plt.subplots(1, len(panels), figsize=(43, 5.5))
+        for ax, (name, plot_fn, plot_args) in zip(axes, panels):
+            plot_fn(ax, *plot_args)
+        fig.suptitle("Map sharing: " + " vs. ".join(DISPLAY_NAMES[c] for c in conditions), fontsize=15,
+                     fontweight="bold", color=TEXT_PRIMARY, x=0.02, ha="left")
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        fig.savefig(args.out, dpi=200, facecolor="white")
 
     # Per-run totals (summed across robots), then mean/std across runs.
     run_received = {c: [sum(r for r, _, _, _, _, _ in run.values()) for run in results[c]] for c in conditions}
