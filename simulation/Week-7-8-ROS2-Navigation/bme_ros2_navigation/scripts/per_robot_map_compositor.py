@@ -64,8 +64,10 @@ class PerRobotMapCompositor(Node):
         # step, regardless of source. Sized a bit past the footprint's
         # circumscribed radius (~0.29m for the current 0.22x0.19 footprint,
         # see config/navigation.yaml) so it covers the whole body, not just
-        # its center cell.
-        self.declare_parameter("self_clear_radius_m", 0.35)
+        # its center cell. Default is padded well past that (~1m) so that
+        # any peer-sourced obstacle anywhere near the robot's own body is
+        # forced clear, rather than trying to match the footprint exactly.
+        self.declare_parameter("self_clear_radius_m", 1.0)
 
         robot_name = self.get_parameter("robot_name").value
         if not robot_name:
@@ -140,8 +142,19 @@ class PerRobotMapCompositor(Node):
                 tf2_ros.ExtrapolationException):
             return
 
-        robot_x = transform.transform.translation.x
-        robot_y = transform.transform.translation.y
+        # This TF lookup is "map" -> base_footprint in the ROBOT'S OWN local
+        # SLAM frame, not the shared canvas frame (canvas uses origin_x/
+        # origin_y in the globally-offset frame built from this robot's
+        # spawn offset, same as every other geometry conversion in this
+        # file -- see _local_to_global / _local_global_bounds). Skipping
+        # this transform means the cleared disc lands at the wrong spot on
+        # the canvas whenever offset_x/offset_y/offset_yaw is non-zero
+        # (i.e. any real multi-robot run), leaving the true obstacle under
+        # the robot's footprint uncleared -- which is the exact bug this
+        # method exists to prevent.
+        robot_x, robot_y = _apply_pose(
+            self._offset_x, self._offset_y, self._offset_yaw,
+            transform.transform.translation.x, transform.transform.translation.y)
 
         out_h, out_w = canvas.shape
         radius_cells = self._self_clear_radius_m / res
