@@ -5,6 +5,7 @@ from lite_frontier_explorer.frontier_detection import (
     estimate_frontier_gain,
     estimate_frontier_region_size,
     find_frontier_clusters,
+    partition_frontiers_by_ownership,
     select_best_frontier,
     select_nearest_frontier,
     select_nearest_high_gain_frontier,
@@ -442,3 +443,155 @@ def test_estimate_frontier_region_size_respects_cap():
     size = estimate_frontier_region_size(cluster, data, width, height, cap=20)
 
     assert size == 20
+
+
+def test_partition_no_peers_returns_all_owned():
+    nav_map_data, width, height = _free_grid(10, 10)
+    points = [(1.0, 1.0), (8.0, 8.0)]
+
+    owned = partition_frontiers_by_ownership(
+        points, nav_map_data, width, height, 1.0,
+        0.0, 0.0,
+        self_id="robot1", self_x=0.0, self_y=0.0, peer_poses={},
+    )
+
+    assert owned == [True, True]
+
+
+def test_partition_self_owns_nearer_peer_owns_farther():
+    nav_map_data, width, height = _free_grid(20, 1)
+    near_point = (2.0, 0.5)
+    far_point = (18.0, 0.5)
+
+    owned = partition_frontiers_by_ownership(
+        [near_point, far_point], nav_map_data, width, height, 1.0,
+        0.0, 0.0,
+        self_id="robot1", self_x=0.0, self_y=0.5,
+        peer_poses={"robot2": (20.0, 0.5)},
+    )
+
+    assert owned == [True, False]
+
+
+def test_partition_excludes_unknown_nav_map_point_even_when_nearest():
+    rows = [[F, F, U]]
+    nav_map_data, width, height = _grid(rows)
+    # The point at column 2 sits on an unknown nav_map cell -- excluded
+    # even though self is trivially the closest (only) robot to it.
+    unknown_point = (2.5, 0.5)
+
+    owned = partition_frontiers_by_ownership(
+        [unknown_point], nav_map_data, width, height, 1.0,
+        0.0, 0.0,
+        self_id="robot1", self_x=0.0, self_y=0.5, peer_poses={},
+    )
+
+    assert owned == [False]
+
+
+def test_partition_excludes_point_outside_nav_map_bounds():
+    nav_map_data, width, height = _free_grid(5, 5)
+    outside_point = (100.0, 100.0)
+
+    owned = partition_frontiers_by_ownership(
+        [outside_point], nav_map_data, width, height, 1.0,
+        0.0, 0.0,
+        self_id="robot1", self_x=0.0, self_y=0.0, peer_poses={},
+    )
+
+    assert owned == [False]
+
+
+def test_partition_tie_break_deterministic_by_id():
+    nav_map_data, width, height = _free_grid(11, 1)
+    midpoint = (5.5, 0.5)  # equidistant from x=0 and x=11
+
+    owned_as_robot1 = partition_frontiers_by_ownership(
+        [midpoint], nav_map_data, width, height, 1.0,
+        0.0, 0.0,
+        self_id="robot1", self_x=0.0, self_y=0.5,
+        peer_poses={"robot2": (11.0, 0.5)},
+    )
+    owned_as_robot2 = partition_frontiers_by_ownership(
+        [midpoint], nav_map_data, width, height, 1.0,
+        0.0, 0.0,
+        self_id="robot2", self_x=11.0, self_y=0.5,
+        peer_poses={"robot1": (0.0, 0.5)},
+    )
+
+    assert owned_as_robot1 == [True]   # "robot1" < "robot2" wins the tie
+    assert owned_as_robot2 == [False]  # symmetric: robot2 defers to robot1
+
+
+def test_partition_three_robots_split_three_points():
+    nav_map_data, width, height = _free_grid(30, 1)
+    points = [(1.0, 0.5), (15.0, 0.5), (28.0, 0.5)]
+    poses = {"robot1": (0.0, 0.5), "robot2": (15.0, 0.5), "robot3": (29.0, 0.5)}
+
+    for self_id in poses:
+        peer_poses = {pid: p for pid, p in poses.items() if pid != self_id}
+        owned = partition_frontiers_by_ownership(
+            points, nav_map_data, width, height, 1.0,
+            0.0, 0.0,
+            self_id=self_id, self_x=poses[self_id][0], self_y=poses[self_id][1],
+            peer_poses=peer_poses,
+        )
+        # Each robot should own exactly the point nearest to its own pose.
+        expected_index = {"robot1": 0, "robot2": 1, "robot3": 2}[self_id]
+        assert owned == [i == expected_index for i in range(3)]
+
+
+def test_partition_empty_points_returns_empty():
+    nav_map_data, width, height = _free_grid(5, 5)
+
+    owned = partition_frontiers_by_ownership(
+        [], nav_map_data, width, height, 1.0,
+        0.0, 0.0,
+        self_id="robot1", self_x=0.0, self_y=0.0,
+        peer_poses={"robot2": (1.0, 1.0)},
+    )
+
+    assert owned == []
+
+
+def test_select_nearest_high_gain_frontier_path_exposure_prefers_route_past_unknown():
+    # Two routes tie exactly on distance (10 steps), turns (1 each), and
+    # destination gain (an isolated 1-cell pocket each) -- the only
+    # difference is that the "exposed" route runs directly under a long
+    # unknown strip the whole way, while the "sheltered" route is fully
+    # boxed in by already-known ground. Corridor cells use cost 60 (not
+    # plain free/0) so they stay traversable (path_occ_threshold=99
+    # default) without themselves being classified as frontier cells
+    # (occ_threshold=50 default) -- keeps this down to exactly the two
+    # intended single-cell frontier clusters.
+    C = 60
+    rows = [
+        [U, U, U, U, U, U, U, U, U, U, O],  # row0: long unknown strip above the exposed route
+        [C, C, C, C, C, C, C, C, C, F, U],  # row1: exposed corridor, frontier pocket at col9
+        [F, O, O, O, O, O, O, O, O, O, O],  # row2: doorway at col0 only
+        [F, F, F, F, F, F, F, F, F, F, U],  # row3: sheltered corridor, frontier pocket at col9
+        [F, F, F, F, F, F, F, F, F, F, O],  # row4: known ground below -- keeps row3 unexposed
+    ]
+    data, width, height = _grid(rows)
+
+    clusters = find_frontier_clusters(data, width, height, occ_threshold=50, min_size=1)
+    assert len(clusters) == 2
+
+    exposed = next(c for c in clusters if any(r == 1 for r, _ in c))
+    sheltered = next(c for c in clusters if c is not exposed)
+    assert exposed == [(1, 9)]
+    assert sheltered == [(3, 9)]
+
+    resolution = 1.0
+    origin_x, origin_y = 0.0, 0.0
+    robot_x, robot_y = 0.5, 2.5  # cell (2, 0), the doorway
+
+    exposed_xy = cluster_centroid_world(exposed, resolution, origin_x, origin_y)
+
+    goal = select_nearest_high_gain_frontier(
+        clusters, data, width, height, robot_x, robot_y,
+        resolution, origin_x, origin_y,
+        gain_threshold_ratio=0.5, turn_penalty_m=0.0, path_exposure_bonus_m=1.0,
+    )
+
+    assert goal == exposed_xy
