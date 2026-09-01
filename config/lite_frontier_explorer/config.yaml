@@ -15,10 +15,21 @@ frontier_explorer:
 
     # Occupancy threshold applied to the global costmap during frontier validation.
     # Cells at or above this cost are treated as blocked. Value between 0-100.
-    occ_threshold: 100
+    # Was 100 -- nav2's own lethal cutoff, which let frontier cells (and
+    # therefore goal centroids, via cluster_centroid_world's cell-average) sit
+    # deep inside the inflation gradient right next to a wall. That's a likely
+    # cause of robots getting physically stuck/wedged near walls: the sent goal
+    # required the footprint to sit in high-cost, steep-falloff territory
+    # (local_costmap's inflation_radius 0.32 / cost_scaling_factor 8.0 in
+    # navigation.yaml) to be considered "reached".
+    occ_threshold: 65
 
-    # Minimum connected frontier size accepted by frontier detection, measured in cells.
-    min_frontier_size_cells: 3
+    # Minimum connected frontier size accepted by frontier detection, measured in
+    # cells. Was 3 -- tiny enough that a frontier could be a single wall-hugging
+    # sliver in a corner, which is exactly the shape most likely to produce a
+    # goal centroid the robot can't cleanly reach. Matches frontier_node.py's
+    # own hardcoded default (10) for the same reason.
+    min_frontier_size_cells: 10
 
     # Minimum distance in meters between the robot and a candidate frontier.
     min_frontier_distance_m: 2.0

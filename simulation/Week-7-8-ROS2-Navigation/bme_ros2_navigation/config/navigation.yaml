@@ -50,20 +50,33 @@ controller_server:
     use_realtime_priority: false
 
     # Progress checker parameters
+    # movement_time_allowance was 20.0 -- a robot wedged/oscillating near a
+    # frontier goal placed close to a wall (see occ_threshold discussion in
+    # lite_frontier_explorer's config) could sit there up to 20s per attempt
+    # before nav2 gives up and fails the goal, which is what lets this repo's
+    # goal-blacklist-and-retry logic (frontier_node.py) take over. Lower value
+    # means a truly stuck robot recovers faster; required_movement_radius left
+    # as-is since it's already a reasonably small bar to clear.
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.2
-      movement_time_allowance: 20.0
+      movement_time_allowance: 8.0
     # Goal checker parameters
     #precise_goal_checker:
     #  plugin: "nav2_controller::SimpleGoalChecker"
     #  xy_goal_tolerance: 0.25
     #  yaw_goal_tolerance: 0.25
     #  stateful: True
+    # xy_goal_tolerance was 0.15 -- tight relative to local_costmap's inflation
+    # falloff (inflation_radius 0.32, cost_scaling_factor 8.0 below), so a
+    # frontier goal sitting near a wall could require the footprint to keep
+    # fine-maneuvering inside costly territory to satisfy tolerance instead of
+    # cleanly registering as reached. Loosened slightly so "close enough" near
+    # a wall counts as success.
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.15
+      xy_goal_tolerance: 0.25
       yaw_goal_tolerance: 0.12
     # DWB parameters
     FollowPathDWB:
