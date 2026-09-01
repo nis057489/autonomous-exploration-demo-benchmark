@@ -35,7 +35,14 @@ class LiteFrontierExplorer(Node):
         self.declare_parameter('costmap_topic', 'global_costmap/costmap')
         self.declare_parameter('global_frame', 'map')
         self.declare_parameter('robot_base_frame', 'base_footprint')
-        self.declare_parameter('min_frontier_size_cells', 10)
+        # 1 cell = no size filtering: at mission start (small/fragmented
+        # initial costmap) a >1 threshold can discard every detected
+        # cluster, which _tick() then misreads as "no frontiers left --
+        # exploration complete" even though frontier cells exist. Selection
+        # strategies already rank by gain/distance, so the best frontier
+        # wins regardless of cluster size -- there's no need to also gate
+        # on a minimum to avoid picking a "bad" one.
+        self.declare_parameter('min_frontier_size_cells', 1)
         self.declare_parameter('min_frontier_distance_m', 0.5)
         self.declare_parameter('goal_blacklist_radius_m', 1.0)
         self.declare_parameter('occ_threshold', 50)

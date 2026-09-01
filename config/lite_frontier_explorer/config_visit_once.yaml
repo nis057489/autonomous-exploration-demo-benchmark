@@ -27,12 +27,15 @@ frontier_explorer:
     # mogi_bot's longer-range sensor.
     occ_threshold: 50
 
-    # Minimum connected frontier size accepted by frontier detection, measured in
-    # cells. Was 3 -- tiny enough that a frontier could be a single wall-hugging
-    # sliver in a corner, which is exactly the shape most likely to produce a
-    # goal centroid the robot can't cleanly reach. Matches frontier_node.py's
-    # own hardcoded default (10) for the same reason.
-    min_frontier_size_cells: 10
+    # Minimum connected frontier size accepted by frontier detection, measured
+    # in cells. No filtering (1): a >1 floor can discard every cluster on a
+    # small/fragmented mission-start costmap, which _tick() then misreports
+    # as "no frontiers left -- exploration complete" even though frontier
+    # cells exist. Selection strategies already rank candidates by
+    # gain/distance and drop unreachable ones via the BFS path check, so a
+    # tiny sliver frontier only gets driven to if it's genuinely the best
+    # (or only) reachable option -- no separate size gate needed to avoid it.
+    min_frontier_size_cells: 1
 
     # Minimum distance in meters between the robot and a candidate frontier.
     min_frontier_distance_m: 2.0

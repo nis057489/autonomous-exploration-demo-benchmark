@@ -172,6 +172,15 @@ class PerRobotMapCompositor(Node):
         cols = np.arange(col0, col1).reshape(1, -1)
         within_radius = (rows - center_row) ** 2 + (cols - center_col) ** 2 <= radius_cells ** 2
         region = canvas[row0:row1, col0:col1]
+        # Only clear cells the merge actually marked occupied (>0) --
+        # never touch unknown (-1) cells. Clearing unconditionally
+        # fabricates a disc of "known free" space out of genuinely
+        # unmapped territory (e.g. right at mission start, or wherever
+        # the disc extends past what's actually been sensed), and the
+        # boundary of that fake free disc against real unknown space then
+        # gets detected as a frontier -- a phantom ring around the robot
+        # that doesn't correspond to anything in the real map.
+        within_radius &= region > 0
         region[within_radius] = 0
 
     def _local_callback(self, msg: OccupancyGrid):
