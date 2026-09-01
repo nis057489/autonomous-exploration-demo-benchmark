@@ -22,7 +22,9 @@ from visualization_msgs.msg import Marker, MarkerArray
 from lite_frontier_explorer.frontier_detection import (
     cluster_centroid_world,
     find_frontier_clusters,
+    select_best_frontier,
     select_nearest_frontier,
+    select_nearest_high_gain_frontier,
 )
 
 
@@ -38,6 +40,28 @@ class LiteFrontierExplorer(Node):
         self.declare_parameter('goal_blacklist_radius_m', 1.0)
         self.declare_parameter('occ_threshold', 50)
         self.declare_parameter('path_occ_threshold', 99)
+        # 'nearest', 'best_gain' (global argmax gain/cost -- tends to send every
+        # robot at the same richest frontier), or 'nearest_high_gain' (nearest
+        # frontier whose gain clears gain_threshold_ratio * best gain seen).
+        self.declare_parameter('selection_strategy', 'nearest_high_gain')
+        self.declare_parameter('sensor_range_m', 3.0)  # used by 'best_gain' only
+        self.declare_parameter('gain_distance_weight', 1.0)
+        self.declare_parameter('gain_threshold_ratio', 0.75)
+        # Cap on the connected-unknown-region flood fill used by
+        # 'nearest_high_gain' to size how much unexplored area a frontier
+        # opens onto -- unlike sensor_range_m's fixed window, this scales
+        # with the real size of the area behind the frontier, so it stops
+        # small nearby frontiers from outscoring big distant ones just
+        # because both fill up the same small window.
+        self.declare_parameter('gain_region_cap', 2000)
+        # Cost per direction change along the candidate path -- penalizes a
+        # zig-zag route over a straight one of the same step count.
+        self.declare_parameter('turn_penalty_m', 0.3)
+        # Bonus/penalty (scaled by directional alignment) applied to a
+        # candidate relative to the direction of the last goal sent, so the
+        # robot favors continuing the way it was already heading over
+        # backtracking for a marginally-better frontier.
+        self.declare_parameter('hysteresis_bonus_m', 1.5)
         self.declare_parameter('replan_period_s', 3.0)
         self.declare_parameter('navigate_to_pose_action_name', 'navigate_to_pose')
         self.declare_parameter('frontier_marker_topic', 'explore/frontiers')
@@ -54,6 +78,13 @@ class LiteFrontierExplorer(Node):
         self._goal_blacklist_radius_m = self.get_parameter('goal_blacklist_radius_m').value
         self._occ_threshold = self.get_parameter('occ_threshold').value
         self._path_occ_threshold = self.get_parameter('path_occ_threshold').value
+        self._selection_strategy = self.get_parameter('selection_strategy').value
+        self._sensor_range_m = self.get_parameter('sensor_range_m').value
+        self._gain_distance_weight = self.get_parameter('gain_distance_weight').value
+        self._gain_threshold_ratio = self.get_parameter('gain_threshold_ratio').value
+        self._gain_region_cap = self.get_parameter('gain_region_cap').value
+        self._turn_penalty_m = self.get_parameter('turn_penalty_m').value
+        self._hysteresis_bonus_m = self.get_parameter('hysteresis_bonus_m').value
         replan_period_s = self.get_parameter('replan_period_s').value
         action_name = self.get_parameter('navigate_to_pose_action_name').value
         self._marker_scale = self.get_parameter('frontier_marker_scale').value
@@ -67,6 +98,7 @@ class LiteFrontierExplorer(Node):
         self._goal_active = False
         self._pending_goal_xy = None
         self._blacklisted_goals = []
+        self._last_goal_direction = None  # (dx, dy) of the most recently sent goal
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -99,6 +131,16 @@ class LiteFrontierExplorer(Node):
     def _tick(self):
         costmap = self._latest_costmap
         if costmap is None:
+            # A stuck nav2 lifecycle bringup (e.g. a change_state RPC
+            # timeout during simultaneous multi-robot startup) can leave
+            # global_costmap configured but never activated, so it never
+            # publishes -- this node would otherwise sit completely
+            # silent forever with nothing in its own log to say why.
+            self.get_logger().warn(
+                f"Still waiting for first costmap on '{self._costmap_topic}' -- "
+                "nav2's global_costmap may not have activated (check its "
+                "lifecycle_manager for a stuck/timed-out change_state call).",
+                throttle_duration_sec=15.0)
             return
 
         robot_pose = self._lookup_robot_pose()
@@ -136,14 +178,40 @@ class LiteFrontierExplorer(Node):
 
         goal = None
         if candidates:
-            goal = select_nearest_frontier(
-                candidates, costmap.data, costmap.info.width, costmap.info.height,
-                robot_pose[0], robot_pose[1],
-                costmap.info.resolution,
-                costmap.info.origin.position.x, costmap.info.origin.position.y,
-                path_occ_threshold=self._path_occ_threshold,
-                min_distance_m=self._min_frontier_distance_m,
-            )
+            if self._selection_strategy == 'nearest_high_gain':
+                goal = select_nearest_high_gain_frontier(
+                    candidates, costmap.data, costmap.info.width, costmap.info.height,
+                    robot_pose[0], robot_pose[1],
+                    costmap.info.resolution,
+                    costmap.info.origin.position.x, costmap.info.origin.position.y,
+                    path_occ_threshold=self._path_occ_threshold,
+                    min_distance_m=self._min_frontier_distance_m,
+                    gain_region_cap=self._gain_region_cap,
+                    gain_threshold_ratio=self._gain_threshold_ratio,
+                    turn_penalty_m=self._turn_penalty_m,
+                    preferred_direction=self._last_goal_direction,
+                    hysteresis_bonus_m=self._hysteresis_bonus_m,
+                )
+            elif self._selection_strategy == 'best_gain':
+                goal = select_best_frontier(
+                    candidates, costmap.data, costmap.info.width, costmap.info.height,
+                    robot_pose[0], robot_pose[1],
+                    costmap.info.resolution,
+                    costmap.info.origin.position.x, costmap.info.origin.position.y,
+                    path_occ_threshold=self._path_occ_threshold,
+                    min_distance_m=self._min_frontier_distance_m,
+                    sensor_range_m=self._sensor_range_m,
+                    distance_weight=self._gain_distance_weight,
+                )
+            else:
+                goal = select_nearest_frontier(
+                    candidates, costmap.data, costmap.info.width, costmap.info.height,
+                    robot_pose[0], robot_pose[1],
+                    costmap.info.resolution,
+                    costmap.info.origin.position.x, costmap.info.origin.position.y,
+                    path_occ_threshold=self._path_occ_threshold,
+                    min_distance_m=self._min_frontier_distance_m,
+                )
 
         self._publish_frontier_markers(cluster_xy, cluster_status, goal)
 
@@ -169,6 +237,7 @@ class LiteFrontierExplorer(Node):
             return
 
         goal_x, goal_y = goal
+        self._last_goal_direction = (goal_x - robot_pose[0], goal_y - robot_pose[1])
 
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = self._global_frame

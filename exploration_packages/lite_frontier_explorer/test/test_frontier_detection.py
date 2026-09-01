@@ -2,8 +2,12 @@ import math
 
 from lite_frontier_explorer.frontier_detection import (
     cluster_centroid_world,
+    estimate_frontier_gain,
+    estimate_frontier_region_size,
     find_frontier_clusters,
+    select_best_frontier,
     select_nearest_frontier,
+    select_nearest_high_gain_frontier,
 )
 
 U, F, O = -1, 0, 100  # unknown, free, occupied
@@ -222,3 +226,219 @@ def test_select_nearest_frontier_prefers_reachable_over_closer_but_walled_off():
     )
 
     assert goal == reachable_xy
+
+
+def test_estimate_frontier_gain_counts_unknown_cells_in_sensor_range():
+    # Frontier centroid at (0, 2); unknown cells fill columns 3-6 on row 0
+    # (4 cells) plus a stray unknown cell far away that must not count.
+    rows = [
+        [F, F, F, U, U, U, U],
+    ]
+    data, width, height = _grid(rows)
+    cluster = [(0, 2)]
+
+    gain = estimate_frontier_gain(cluster, data, width, height, resolution=1.0, sensor_range_m=3.0)
+
+    # Unknown cells at columns 3, 4, 5 are within 3.0 of column 2; column 6 (dist 4) is not.
+    assert gain == 3
+
+
+def test_estimate_frontier_gain_zero_when_no_unknown_in_range():
+    rows = [[F, F, F, F, F]]
+    data, width, height = _grid(rows)
+    cluster = [(0, 2)]
+
+    gain = estimate_frontier_gain(cluster, data, width, height, resolution=1.0, sensor_range_m=3.0)
+
+    assert gain == 0
+
+
+def test_select_best_frontier_prefers_higher_gain_over_nearest():
+    # A small pocket frontier (opens onto a single unknown cell) sits
+    # closer to the robot than a wide frontier (opens onto five unknown
+    # cells). A pure-nearest picker takes the closer pocket; the
+    # gain-aware picker should take the farther, wider one instead since
+    # its gain-per-cost utility wins even after the distance penalty.
+    rows = [
+        [F, F, F, F, F, F, F, F, F, F, F, F, F],
+        [F, F, F, F, F, F, F, F, F, F, F, F, F],
+        [F, F, F, F, F, F, F, F, F, F, F, F, F],
+        [O, O, U, O, O, O, O, O, U, U, U, U, U],
+    ]
+    data, width, height = _grid(rows)
+
+    clusters = find_frontier_clusters(data, width, height, occ_threshold=50, min_size=1)
+    assert len(clusters) == 2
+
+    resolution = 1.0
+    origin_x, origin_y = 0.0, 0.0
+    robot_x, robot_y = 3.5, 0.5  # cell (0, 3): closer to the pocket than the wide frontier
+
+    goal = select_best_frontier(
+        clusters, data, width, height, robot_x, robot_y,
+        resolution, origin_x, origin_y,
+        sensor_range_m=4.0, distance_weight=0.1,
+    )
+    nearest_goal = select_nearest_frontier(
+        clusters, data, width, height, robot_x, robot_y,
+        resolution, origin_x, origin_y,
+    )
+
+    pocket_xy = cluster_centroid_world([(2, 2)], resolution, origin_x, origin_y)
+    wide_xy = cluster_centroid_world([(2, c) for c in range(8, 13)], resolution, origin_x, origin_y)
+
+    assert nearest_goal == pocket_xy
+    assert goal == wide_xy
+
+
+def test_select_best_frontier_returns_none_for_no_clusters():
+    data, width, height = _free_grid(1, 1)
+    assert select_best_frontier([], data, width, height, 0.0, 0.0, 0.05, 0.0, 0.0) is None
+
+
+def test_select_nearest_high_gain_frontier_picks_nearer_of_two_equally_rich_frontiers():
+    # Three frontiers: a nearby pocket (gain 1, too low to clear the gain
+    # floor), and two wide frontiers (gain 5 each) at different distances.
+    # select_best_frontier's raw gain/cost utility would tend toward
+    # whichever wide frontier has the better utility -- often the single
+    # global best -- which is what sends every robot on the team to the
+    # same spot. select_nearest_high_gain_frontier should instead treat
+    # both wide frontiers as "high gain" and pick the nearer one.
+    row3 = (
+        [O, O, U] + [O] * 4 + [U] * 5 + [O] * 4 + [U] * 5
+    )
+    rows = [
+        [F] * len(row3),
+        [F] * len(row3),
+        [F] * len(row3),
+        row3,
+    ]
+    data, width, height = _grid(rows)
+
+    clusters = find_frontier_clusters(data, width, height, occ_threshold=50, min_size=1)
+    assert len(clusters) == 3
+
+    resolution = 1.0
+    origin_x, origin_y = 0.0, 0.0
+    robot_x, robot_y = 3.5, 0.5  # cell (0, 3): near the pocket, closer to the first wide frontier
+
+    goal = select_nearest_high_gain_frontier(
+        clusters, data, width, height, robot_x, robot_y,
+        resolution, origin_x, origin_y,
+        gain_threshold_ratio=0.75,
+    )
+
+    near_wide = next(c for c in clusters if any(7 <= col <= 11 for _, col in c))
+    near_wide_xy = cluster_centroid_world(near_wide, resolution, origin_x, origin_y)
+
+    assert goal == near_wide_xy
+
+
+def test_select_nearest_high_gain_frontier_returns_none_for_no_clusters():
+    data, width, height = _free_grid(1, 1)
+    assert select_nearest_high_gain_frontier([], data, width, height, 0.0, 0.0, 0.05, 0.0, 0.0) is None
+
+
+def test_select_nearest_high_gain_frontier_turn_penalty_prefers_straight_route():
+    # Two frontiers exactly 6 steps from the robot: a straight corridor
+    # along row 0 (0 turns), and an L-shaped route -- forced by walls,
+    # since rows 1-2 are only passable at column 0 -- down 3 then right 3
+    # (1 turn). Equal step count, equal (single-cell) gain: without a
+    # turn penalty the tie is broken by whichever the loop happens to
+    # visit last with a strictly-lower cost; with turn_penalty_m > 0 the
+    # straight route must win since the L-shaped one now costs strictly
+    # more.
+    rows = [
+        [F, F, F, F, F, F, F, U],  # row 0: straight corridor, frontier at (0, 6)
+        [F, O, O, O, O, O, O, O],  # row 1: only col 0 passable -- forces the L route down
+        [F, O, O, O, O, O, O, O],  # row 2: only col 0 passable
+        [F, F, F, F, U, O, O, O],  # row 3: L route turns right here, frontier at (3, 3)
+    ]
+    data, width, height = _grid(rows)
+
+    clusters = find_frontier_clusters(data, width, height, occ_threshold=50, min_size=1)
+    assert len(clusters) == 2
+
+    straight = next(c for c in clusters if any(r == 0 for r, _ in c))
+    dogleg = next(c for c in clusters if c is not straight)
+
+    resolution = 1.0
+    origin_x, origin_y = 0.0, 0.0
+    robot_x, robot_y = 0.5, 0.5  # cell (0, 0)
+
+    straight_xy = cluster_centroid_world(straight, resolution, origin_x, origin_y)
+
+    goal_with_penalty = select_nearest_high_gain_frontier(
+        clusters, data, width, height, robot_x, robot_y,
+        resolution, origin_x, origin_y,
+        gain_threshold_ratio=0.5, turn_penalty_m=2.0,
+    )
+
+    assert goal_with_penalty == straight_xy
+
+
+def test_select_nearest_high_gain_frontier_hysteresis_favors_preferred_direction():
+    # Two equally-good frontiers to the left and right of the robot. With
+    # a preferred_direction pointing right and a hysteresis bonus, the
+    # picker should favor the right-hand frontier over the left even
+    # though both are otherwise identical.
+    rows = [
+        [U, U, F, F, F, F, F, U, U],
+    ]
+    data, width, height = _grid(rows)
+
+    clusters = find_frontier_clusters(data, width, height, occ_threshold=50, min_size=1)
+    assert len(clusters) == 2
+
+    left = next(c for c in clusters if any(col < 4 for _, col in c))
+    right = next(c for c in clusters if c is not left)
+
+    resolution = 1.0
+    origin_x, origin_y = 0.0, 0.0
+    robot_x, robot_y = 4.5, 0.5  # cell (0, 4), centered between both frontiers
+
+    left_xy = cluster_centroid_world(left, resolution, origin_x, origin_y)
+    right_xy = cluster_centroid_world(right, resolution, origin_x, origin_y)
+
+    goal = select_nearest_high_gain_frontier(
+        clusters, data, width, height, robot_x, robot_y,
+        resolution, origin_x, origin_y,
+        gain_threshold_ratio=0.5,
+        preferred_direction=(1.0, 0.0), hysteresis_bonus_m=5.0,
+    )
+
+    assert goal == right_xy
+    assert goal != left_xy
+
+
+def test_estimate_frontier_region_size_scales_with_actual_unknown_area():
+    # A 1-cell pocket vs. a 6x6 open unknown block, both bordered by a
+    # single-cell-wide frontier gap. estimate_frontier_gain (fixed-radius
+    # window) would score these similarly once the window is bigger than
+    # the pocket; region size should reflect that the block is genuinely
+    # much bigger, with no radius cap involved.
+    pocket_rows = [
+        [F, F, U],
+        [F, F, F],
+    ]
+    data, width, height = _grid(pocket_rows)
+    pocket_cluster = [(0, 1)]  # borders (0, 2) which is unknown
+    pocket_size = estimate_frontier_region_size(pocket_cluster, data, width, height)
+    assert pocket_size == 1
+
+    block_rows = [[F] * 7] + [[F] + [U] * 6 for _ in range(6)]
+    data, width, height = _grid(block_rows)
+    block_cluster = [(0, i) for i in range(1, 7)]  # row 0 borders the unknown block below
+    block_size = estimate_frontier_region_size(block_cluster, data, width, height)
+    assert block_size == 36  # the full 6x6 unknown block
+    assert block_size > pocket_size
+
+
+def test_estimate_frontier_region_size_respects_cap():
+    rows = [[F] * 11] + [[F] + [U] * 10 for _ in range(10)]
+    data, width, height = _grid(rows)
+    cluster = [(0, i) for i in range(1, 11)]
+
+    size = estimate_frontier_region_size(cluster, data, width, height, cap=20)
+
+    assert size == 20

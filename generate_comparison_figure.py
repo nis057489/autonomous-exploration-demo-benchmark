@@ -105,19 +105,24 @@ def _reindexed_copy(bag_dir):
 
 def read_bag(robot, bag_dir, condition):
     """Returns (received_bytes, sent_bytes, coverage, local_coverage,
-    local_cell_series) where coverage and local_coverage are each a list of
-    (seconds_since_start, known_area_m2) -- coverage from /<robot>/nav_map
-    (post-fusion team map), local_coverage from /<robot>/map (this robot's
-    own raw SLAM output, never touched by fusion) -- or None if the bag
-    can't be read. received_bytes is traffic on /<robot>/incoming/<peer>/...
-    (what peers sent this robot); sent_bytes is what this robot itself
-    published for peers to pull -- /<robot>/map for baseline,
-    /<robot>/vxch/map/band_*+manifest for vxch (see module docstring).
-    local_cell_series is a list of (seconds_since_start, int64 numpy array
-    of packed cell keys newly known as of that /<robot>/map message -- not
-    a full snapshot each time, see the loop below), used to union robots'
-    own observations over time without double-counting cells more than one
-    robot saw."""
+    local_cell_series, nav_cell_series) where coverage and local_coverage
+    are each a list of (seconds_since_start, known_area_m2) -- coverage
+    from /<robot>/nav_map (post-fusion team map), local_coverage from
+    /<robot>/map (this robot's own raw SLAM output, never touched by
+    fusion) -- or None if the bag can't be read. received_bytes is traffic
+    on /<robot>/incoming/<peer>/... (what peers sent this robot);
+    sent_bytes is what this robot itself published for peers to pull --
+    /<robot>/map for baseline, /<robot>/vxch/map/band_*+manifest for vxch
+    (see module docstring). local_cell_series is a list of
+    (seconds_since_start, int64 numpy array of packed cell keys newly known
+    as of that /<robot>/map message -- not a full snapshot each time, see
+    the loop below), used to union robots' own observations over time
+    without double-counting cells more than one robot saw.
+    nav_cell_series is the same shape but diffed off /<robot>/nav_map, i.e.
+    it includes peer-relayed cells -- unioning it across robots shows what
+    the team collectively knows, which is where communication's effect is
+    actually visible (unioning local_cell_series instead structurally can't
+    show it, since that series never receives fused/peer-relayed cells)."""
     bag_dir = Path(bag_dir)
     scratch_dir = None
     try:
@@ -182,7 +187,9 @@ def read_bag(robot, bag_dir, condition):
         return keys
 
     local_cell_series = []
+    nav_cell_series = []
     seen_cells = np.empty(0, dtype=np.int64)
+    seen_nav_cells = np.empty(0, dtype=np.int64)
     while reader.has_next():
         topic, data, t_ns = reader.read_next()
         if start_ns is None:
@@ -191,7 +198,13 @@ def read_bag(robot, bag_dir, condition):
             received_bytes += len(data)
         elif topic == nav_map_topic:
             msg = deserialize_message(data, OccupancyGrid)
-            coverage.append(((t_ns - start_ns) / 1e9, known_area_m2(msg)))
+            t = (t_ns - start_ns) / 1e9
+            coverage.append((t, known_area_m2(msg)))
+            cells_now = known_cells(msg)
+            new_cells = np.setdiff1d(cells_now, seen_nav_cells, assume_unique=True)
+            if new_cells.size:
+                nav_cell_series.append((t, new_cells))
+            seen_nav_cells = cells_now
         elif topic == local_map_topic:
             msg = deserialize_message(data, OccupancyGrid)
             t = (t_ns - start_ns) / 1e9
@@ -222,7 +235,8 @@ def read_bag(robot, bag_dir, condition):
     coverage.sort(key=lambda p: p[0])
     local_coverage.sort(key=lambda p: p[0])
     local_cell_series.sort(key=lambda p: p[0])
-    return received_bytes, sent_bytes, coverage, local_coverage, local_cell_series
+    nav_cell_series.sort(key=lambda p: p[0])
+    return received_bytes, sent_bytes, coverage, local_coverage, local_cell_series, nav_cell_series
 
 
 def style_ax(ax):
@@ -244,7 +258,7 @@ def plot_bandwidth(ax, results, conditions, byte_index, title, ylabel):
     robots = sorted({r for cond in results.values() for r in cond})
     x = np.arange(len(conditions))
     heights_by_robot = {
-        robot: np.array([results[c].get(robot, (0, 0, [], [], []))[byte_index] / 1024 for c in conditions])
+        robot: np.array([results[c].get(robot, (0, 0, [], [], [], []))[byte_index] / 1024 for c in conditions])
         for robot in robots
     }
     totals = np.sum(list(heights_by_robot.values()), axis=0) if robots else np.zeros(len(conditions))
@@ -338,15 +352,19 @@ def union_coverage_over_time(cell_series_by_robot):
     return out
 
 
-def plot_union_coverage(ax, results, conditions):
+def plot_union_coverage(ax, results, conditions, cell_index, title):
     """Team-wide map coverage over time, counted as the running UNION of
-    every robot's own /<robot>/map cells (see known_cells) as messages
-    arrive -- a cell two robots both explored only counts once, unlike
-    summing each robot's local_coverage area. This is the genuine "how much
-    of the map has this team actually laid eyes on, cumulatively" curve, as
-    distinct from plot_coverage's per-robot communicated/local series."""
+    every robot's cells (see known_cells) as messages arrive -- a cell two
+    robots both know about only counts once, unlike summing each robot's
+    coverage area. cell_index picks which per-robot cell series to union:
+    4 for local_cell_series (/<robot>/map, self-observed only -- "how much
+    has the team physically laid eyes on"), 5 for nav_cell_series
+    (/<robot>/nav_map, post-fusion -- "how much does the team collectively
+    know", including peer-relayed cells. This is the one that actually
+    moves when communication improves, since local_cell_series structurally
+    excludes anything a robot only learned from a peer)."""
     for cond in conditions:
-        merged = union_coverage_over_time(entry[4] for entry in results[cond].values())
+        merged = union_coverage_over_time(entry[cell_index] for entry in results[cond].values())
         if not merged:
             continue
         ts = [p[0] for p in merged]
@@ -357,8 +375,7 @@ def plot_union_coverage(ax, results, conditions):
 
     ax.set_xlabel("Time since run start (s)", fontsize=11, color=TEXT_SECONDARY)
     ax.set_ylabel("Known tiles (union across robots)", fontsize=11, color=TEXT_SECONDARY)
-    ax.set_title("Team map coverage over time (union, no double-counting)", fontsize=13, fontweight="bold",
-                 color=TEXT_PRIMARY, loc="left")
+    ax.set_title(title, fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
     style_ax(ax)
 
     handles = [Line2D([0], [0], color=CONDITION_COLORS[c], lw=2, label=DISPLAY_NAMES[c])
@@ -397,12 +414,15 @@ def main():
             print(f"error: no readable bags for condition {condition!r}", file=sys.stderr)
             sys.exit(1)
 
-    fig, (ax_sent, ax_received, ax_coverage, ax_local, ax_union) = plt.subplots(1, 5, figsize=(31, 5.5))
+    fig, (ax_sent, ax_received, ax_coverage, ax_local, ax_union, ax_union_nav) = plt.subplots(1, 6, figsize=(37, 5.5))
     plot_bandwidth(ax_sent, results, conditions, 1, "Map-sharing bandwidth (sent)", "Sent to peers (KB)")
     plot_bandwidth(ax_received, results, conditions, 0, "Map-sharing bandwidth (received)", "Received from peers (KB)")
     plot_coverage(ax_coverage, results, conditions, 2, "Communicated map coverage", "Known map area (m²)")
     plot_coverage(ax_local, results, conditions, 3, "Locally-observed coverage (self only)", "Self-observed area (m²)")
-    plot_union_coverage(ax_union, results, conditions)
+    plot_union_coverage(ax_union, results, conditions, 4,
+                         "Team physical coverage over time (union, self-observed only)")
+    plot_union_coverage(ax_union_nav, results, conditions, 5,
+                         "Team known coverage over time (union, incl. peer-relayed)")
     fig.suptitle("Map sharing: " + " vs. ".join(DISPLAY_NAMES[c] for c in conditions), fontsize=15, fontweight="bold",
                  color=TEXT_PRIMARY, x=0.02, ha="left")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
@@ -410,8 +430,8 @@ def main():
     args.out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.out, dpi=200, facecolor="white")
 
-    totals_received = {c: sum(r for r, _, _, _, _ in results[c].values()) for c in conditions}
-    totals_sent = {c: sum(s for _, s, _, _, _ in results[c].values()) for c in conditions}
+    totals_received = {c: sum(r for r, _, _, _, _, _ in results[c].values()) for c in conditions}
+    totals_sent = {c: sum(s for _, s, _, _, _, _ in results[c].values()) for c in conditions}
     for c in conditions:
         print(f"{DISPLAY_NAMES[c]:>10} received: {totals_received[c]} bytes ({totals_received[c] / 1024:.1f} KB), "
               f"sent: {totals_sent[c]} bytes ({totals_sent[c] / 1024:.1f} KB)")
@@ -419,15 +439,18 @@ def main():
     if len(nonzero_received) >= 2:
         print(f"received ratio (max/min): {max(nonzero_received.values()) / min(nonzero_received.values()):.2f}x")
     for condition in conditions:
-        for robot, (_, _, coverage, local_coverage, _) in sorted(results[condition].items()):
+        for robot, (_, _, coverage, local_coverage, _, _) in sorted(results[condition].items()):
             final = coverage[-1][1] if coverage else 0.0
             final_local = local_coverage[-1][1] if local_coverage else 0.0
             print(f"{DISPLAY_NAMES[condition]} {robot}: final known map area {final:.1f} m^2 (communicated, incl. peer-relayed cells), "
                   f"{final_local:.1f} m^2 self-observed")
     for condition in conditions:
-        merged = union_coverage_over_time(entry[4] for entry in results[condition].values())
-        final_tiles = merged[-1][1] if merged else 0
-        print(f"{DISPLAY_NAMES[condition]:>10} team map coverage (union, no double-counting): {final_tiles:,} tiles")
+        merged_local = union_coverage_over_time(entry[4] for entry in results[condition].values())
+        merged_nav = union_coverage_over_time(entry[5] for entry in results[condition].values())
+        final_local_tiles = merged_local[-1][1] if merged_local else 0
+        final_nav_tiles = merged_nav[-1][1] if merged_nav else 0
+        print(f"{DISPLAY_NAMES[condition]:>10} team physical coverage (union, self-observed only): {final_local_tiles:,} tiles; "
+              f"team known coverage (union, incl. peer-relayed): {final_nav_tiles:,} tiles")
     print(str(args.out.resolve()))
 
 

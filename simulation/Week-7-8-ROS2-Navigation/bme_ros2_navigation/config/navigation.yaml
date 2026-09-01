@@ -1,3 +1,14 @@
+# Default bond_timeout (4.0s) can trip during multi-robot bringup: if a
+# node is still busy activating under simultaneous-startup CPU/executor
+# contention, the manager's bond watchdog can decide it's dead and tear it
+# down before it ever finishes coming up. Widening it gives a slow-but-alive
+# node room to finish instead of being killed for being late.
+lifecycle_manager_navigation:
+  ros__parameters:
+    bond_timeout: 20.0
+    bond_respawn_max_duration: 20.0
+    attempt_respawn_reconnection: True
+
 bt_navigator:
   ros__parameters:
     global_frame: map

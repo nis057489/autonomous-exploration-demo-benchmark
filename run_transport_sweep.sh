@@ -12,11 +12,11 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF_FILE="${SCRIPT_DIR}/experiment.conf"
 
-WORLD="warehouse"
+WORLD="bookstore"
 ROBOT="turtlebot3_waffle"
-METHODS=(baseline vxch zstd)
-RUNS_PER_METHOD=5
-RUN_DURATION_S=1500
+METHODS=(baseline vxch)
+RUNS_PER_METHOD=1
+RUN_DURATION_S=200
 KILL_AFTER_S=30
 LOG_DIR="${SCRIPT_DIR}/sweep_logs/$(date +%Y%m%d_%H%M%S)"
 

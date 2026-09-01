@@ -756,6 +756,21 @@ def _create_multi_robot_actions(context):
     ROBOT_STAGGER_S = 4.0
     SLAM_BASE_S = 5.0
     NAV2_BASE_S = 12.0
+    # nav2's own bringup is the heaviest phase per robot -- bt_navigator,
+    # controller_server, planner_server, behavior_server, waypoint_follower,
+    # velocity_smoother, collision_monitor, docking_server, two costmaps, and
+    # a lifecycle_manager, all autostarted (configure+activate) together the
+    # moment this robot's group starts. Reusing ROBOT_STAGGER_S (4.0s) here
+    # wasn't enough headroom: that burst was still landing while the
+    # previous robot's own burst was mid-activation, and under that
+    # contention a robot's lifecycle_manager change_state call to its
+    # global_costmap could time out server-side ("failed to send response
+    # to .../change_state (timeout)"), leaving global_costmap stuck short of
+    # active and never publishing -- so lite_frontier_explorer, which
+    # subscribes to that costmap, would sit waiting forever and never send a
+    # single goal for that robot. Giving nav2 its own wider stagger spreads
+    # each robot's heavy burst further from its neighbors'.
+    NAV2_STAGGER_S = 8.0
 
     clock_bridge_path = _clock_bridge_config(output_dir)
     actions.append(
@@ -934,7 +949,7 @@ def _create_multi_robot_actions(context):
             actions=_autostart_lifecycle_node(slam_node),
         ))
         actions.append(TimerAction(
-            period=NAV2_BASE_S + index * ROBOT_STAGGER_S,
+            period=NAV2_BASE_S + index * NAV2_STAGGER_S,
             actions=[
                 GroupAction(
                     actions=[
