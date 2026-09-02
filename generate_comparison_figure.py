@@ -60,6 +60,8 @@ Usage:
   computed across those runs.
 """
 import argparse
+import csv
+import io
 import re
 import shutil
 import subprocess
@@ -120,8 +122,8 @@ def _reindexed_copy(bag_dir):
 
 def read_bag(robot, bag_dir, condition, max_duration=None):
     """Returns (received_bytes, sent_bytes, coverage, local_coverage,
-    local_cell_series, nav_cell_series) where coverage and local_coverage
-    are each a list of (seconds_since_start, known_area_m2) -- coverage
+    local_cell_series, nav_cell_series, resolution) where coverage and
+    local_coverage are each a list of (seconds_since_start, known_area_m2) -- coverage
     from /<robot>/nav_map (post-fusion team map), local_coverage from
     /<robot>/map (this robot's own raw SLAM output, never touched by
     fusion) -- or None if the bag can't be read. received_bytes is traffic
@@ -137,7 +139,11 @@ def read_bag(robot, bag_dir, condition, max_duration=None):
     it includes peer-relayed cells -- unioning it across robots shows what
     the team collectively knows, which is where communication's effect is
     actually visible (unioning local_cell_series instead structurally can't
-    show it, since that series never receives fused/peer-relayed cells)."""
+    show it, since that series never receives fused/peer-relayed cells).
+    resolution is the grid resolution (m/cell) behind local_cell_series' and
+    nav_cell_series' packed keys, for converting union "tile" counts back to
+    m^2 downstream -- 0.0 if this robot never published a /map or /nav_map
+    message with any known cells."""
     bag_dir = Path(bag_dir)
     scratch_dir = None
     try:
@@ -169,6 +175,17 @@ def read_bag(robot, bag_dir, condition, max_duration=None):
     coverage = []
     local_coverage = []
     start_ns = None
+    # First grid resolution actually seen on either /map or /nav_map for
+    # this robot -- lets callers convert union "tile" counts (built from
+    # known_cells' packed keys, one per cell at THIS resolution) into m^2,
+    # so union/redundant coverage can be compared on the same units as
+    # known_area_m2's m^2 figures instead of raw, resolution-dependent
+    # tile counts. A single scalar, not per-message, because a mismatch
+    # between /map's and /nav_map's resolution would silently break
+    # known_cells' cross-message key comparability too -- if that ever
+    # happens the tile counts themselves are already wrong, not just their
+    # unit label.
+    resolution_seen = []
 
     def known_area_m2(msg):
         known = int(np.count_nonzero(np.asarray(msg.data) != -1))
@@ -191,6 +208,8 @@ def read_bag(robot, bag_dir, condition, max_duration=None):
             return np.empty(0, dtype=np.int64)
         width = msg.info.width
         res = msg.info.resolution
+        if not resolution_seen:
+            resolution_seen.append(res)
         ox = msg.info.origin.position.x
         oy = msg.info.origin.position.y
         xs = known_idx % width
@@ -198,8 +217,14 @@ def read_bag(robot, bag_dir, condition, max_duration=None):
         gx = np.round((ox + (xs + 0.5) * res) / res).astype(np.int64)
         gy = np.round((oy + (ys + 0.5) * res) / res).astype(np.int64)
         keys = (gx << np.int64(32)) | (gy & np.int64(0xFFFFFFFF))
-        keys.sort()
-        return keys
+        # np.unique, not just sort: two cells of ONE message can land on the
+        # same key when the grid's real row/column spacing disagrees with the
+        # resolution it declares (seen on /nav_map -- consecutive rows
+        # collapsing onto one world cell, ~70% of a message's cells duplicated).
+        # setdiff1d(assume_unique=True) downstream has undefined behaviour on
+        # a non-unique input, so leaving duplicates in silently corrupts every
+        # diff built from this.
+        return np.unique(keys)
 
     local_cell_series = []
     nav_cell_series = []
@@ -253,7 +278,8 @@ def read_bag(robot, bag_dir, condition, max_duration=None):
     local_coverage.sort(key=lambda p: p[0])
     local_cell_series.sort(key=lambda p: p[0])
     nav_cell_series.sort(key=lambda p: p[0])
-    return received_bytes, sent_bytes, coverage, local_coverage, local_cell_series, nav_cell_series
+    resolution = resolution_seen[0] if resolution_seen else 0.0
+    return received_bytes, sent_bytes, coverage, local_coverage, local_cell_series, nav_cell_series, resolution
 
 
 def style_ax(ax):
@@ -416,6 +442,64 @@ def union_coverage_over_time(cell_series_by_robot):
     return out
 
 
+def run_resolution(run):
+    """Grid resolution (m/cell) for one run's tile counts -- the first
+    nonzero resolution reported by any robot's read_bag entry (index 6; see
+    read_bag's docstring). All robots share one SLAM config so these should
+    agree; 0.0 (tile counts left unconverted to area) if no robot in the
+    run reported one."""
+    return next((entry[6] for entry in run.values() if entry[6]), 0.0)
+
+
+def to_area_m2(series, resolution):
+    """Rescale a (t, tile_count) series (union_coverage_over_time or
+    run_redundant_series output) into (t, area_m2), so it's on the same
+    units as known_area_m2's coverage/local_coverage figures instead of a
+    raw, resolution-dependent tile count."""
+    return [(t, v * resolution ** 2) for t, v in series]
+
+
+def local_physical_union_series(run):
+    """Team physical coverage for one run, in m^2: a true keyed union of
+    every robot's self-observed cells, so ground two robots both drove over
+    counts once. Trustworthy because /map's cells key cleanly -- summing
+    local_cell_series' per-message diffs lands within ~2% of the final
+    /map snapshot's own known_area_m2, i.e. the keys really are 1:1 with
+    distinct grid cells (unlike /nav_map's, see team_known_coverage_series)."""
+    return to_area_m2(union_coverage_over_time(entry[4] for entry in run.values()), run_resolution(run))
+
+
+def team_known_coverage_series(run):
+    """Team-wide known coverage for one run, in m^2, as the MAX over robots
+    of each robot's own /nav_map known_area_m2 -- deliberately NOT a keyed
+    union across robots like local_physical_union_series.
+
+    /nav_map's cells cannot be keyed to world positions reliably: within a
+    single message, consecutive rows collapse onto the same computed world
+    cell (~70% of a message's cells are duplicates of another cell in that
+    same message), because the grid's real row spacing disagrees with the
+    resolution it advertises. That aliasing is lossy and irreversible here
+    -- two genuinely different patches of ground arrive sharing one key, so
+    unioning by key undercounts by ~4x (67.6 m^2 built from the cell series
+    vs. 263.8 m^2 in that same robot's own final /nav_map snapshot). The
+    real fix belongs upstream in per_robot_map_compositor.py, which builds
+    /nav_map; this is the best the plotting side can do until then.
+
+    known_area_m2 just counts non-unknown cells in one message and never
+    derives world positions, so it is immune to that aliasing. Taking the
+    max across robots (rather than a sum) keeps the number honest: fusion
+    is supposed to converge every robot's nav_map onto the same team-wide
+    picture, so the best-informed robot's own map is a sound stand-in for
+    what the team collectively knows, and no cell is ever counted twice."""
+    series_by_robot = [entry[2] for entry in run.values() if entry[2]]
+    if not series_by_robot:
+        return []
+    max_t = max(s[-1][0] for s in series_by_robot)
+    grid = np.linspace(0, max_t, 200)
+    sampled = np.array([resample_step(s, grid) for s in series_by_robot])
+    return list(zip(grid.tolist(), sampled.max(axis=0).tolist()))
+
+
 def cumulative_count_series(cell_series):
     """Turn one robot's local_cell_series ((t, new_cells) diffs, already
     deduped against that robot's own earlier observations) into a running
@@ -464,7 +548,7 @@ def plot_redundant_coverage(ax, results, conditions, cell_index, title):
     +/- std band across runs when more than one is given."""
     for cond in conditions:
         runs = results[cond]
-        redundant_per_run = [run_redundant_series(run, cell_index) for run in runs]
+        redundant_per_run = [to_area_m2(run_redundant_series(run, cell_index), run_resolution(run)) for run in runs]
         max_ts = [m[-1][0] for m in redundant_per_run if m]
         if not max_ts:
             continue
@@ -472,17 +556,17 @@ def plot_redundant_coverage(ax, results, conditions, cell_index, title):
         sampled = np.array([resample_step(m, grid) for m in redundant_per_run if m])
         mean = sampled.mean(axis=0)
         ax.plot(grid, mean, color=CONDITION_COLORS[cond], linewidth=2, solid_capstyle="round", zorder=3)
-        label = f"{mean[-1]:,.0f} cells"
+        label = f"{mean[-1]:,.1f} m²"
         if sampled.shape[0] > 1:
             std = sampled.std(axis=0)
             ax.fill_between(grid, np.maximum(mean - std, 0), mean + std, color=CONDITION_COLORS[cond],
                              alpha=0.15, linewidth=0, zorder=2)
-            label += f" ± {std[-1]:,.0f}"
+            label += f" ± {std[-1]:,.1f}"
         ax.annotate(label, (grid[-1], mean[-1]), textcoords="offset points",
                     xytext=(6, 0), fontsize=8.5, fontweight="bold", color=CONDITION_COLORS[cond], va="center")
 
     ax.set_xlabel("Time since run start (s)", fontsize=11, color=TEXT_SECONDARY)
-    ax.set_ylabel("Redundant tiles (seen by >1 robot)", fontsize=11, color=TEXT_SECONDARY)
+    ax.set_ylabel("Redundant coverage (m², seen by >1 robot)", fontsize=11, color=TEXT_SECONDARY)
     ax.set_title(title, fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
     style_ax(ax)
 
@@ -492,24 +576,130 @@ def plot_redundant_coverage(ax, results, conditions, cell_index, title):
         ax.legend(handles=handles, frameon=False, fontsize=10, loc="lower right")
 
 
-def plot_union_coverage(ax, results, conditions, cell_index, title):
-    """Team-wide map coverage over time, counted as the running UNION of
-    every robot's cells (see known_cells) as messages arrive -- a cell two
-    robots both know about only counts once, unlike summing each robot's
-    coverage area. cell_index picks which per-robot cell series to union:
-    4 for local_cell_series (/<robot>/map, self-observed only -- "how much
-    has the team physically laid eyes on"), 5 for nav_cell_series
-    (/<robot>/nav_map, post-fusion -- "how much does the team collectively
-    know", including peer-relayed cells. This is the one that actually
-    moves when communication improves, since local_cell_series structurally
-    excludes anything a robot only learned from a peer). results[c] is a
-    list of per-run {robot: entry} dicts -- the union is computed per run,
-    then those per-run curves are resampled (resample_step) onto a shared
-    time grid and averaged, with a +/- std band when more than one run
-    contributes."""
+def summarize(results, conditions):
+    """Per-condition end-of-run numbers, computed once and shared by every
+    output format (the per-condition lines below and --table's renderers,
+    which used to recompute the same unions separately). Each entry is
+    {metric: (mean, std)} across that condition's runs, std 0.0 for a single
+    run, plus "runs". Bytes are raw bytes, areas m^2, percentages relative
+    to that condition's own physical coverage."""
+    def mean_std(values):
+        if not values:
+            return 0.0, 0.0
+        return float(np.mean(values)), float(np.std(values))
+
+    summary = {}
     for cond in conditions:
         runs = results[cond]
-        merged_per_run = [union_coverage_over_time(entry[cell_index] for entry in run.values()) for run in runs]
+        physical = [m[-1][1] for m in (local_physical_union_series(run) for run in runs) if m]
+        known = [m[-1][1] for m in (team_known_coverage_series(run) for run in runs) if m]
+        redundant = [m[-1][1] for m in
+                     (to_area_m2(run_redundant_series(run, 4), run_resolution(run)) for run in runs) if m]
+        physical_mean, physical_std = mean_std(physical)
+        known_mean, known_std = mean_std(known)
+        redundant_mean, redundant_std = mean_std(redundant)
+        summary[cond] = {
+            "runs": len(runs),
+            "received": mean_std([sum(entry[0] for entry in run.values()) for run in runs]),
+            "sent": mean_std([sum(entry[1] for entry in run.values()) for run in runs]),
+            "physical": (physical_mean, physical_std),
+            "known": (known_mean, known_std),
+            "redundant": (redundant_mean, redundant_std),
+            # Share of what the team physically covered that reached the
+            # rest of the team, and share that was re-covered ground -- both
+            # meaningless without a denominator, hence 0.0 when there is none.
+            "propagated_pct": (100 * known_mean / physical_mean if physical_mean else 0.0, 0.0),
+            "redundant_pct": (100 * redundant_mean / physical_mean if physical_mean else 0.0, 0.0),
+        }
+    return summary
+
+
+# (metric key, display header, csv column name, scale applied to the stored
+# value, decimal places). One spec drives all three --table styles so they
+# can't drift apart. The csv name carries the unit, since a spreadsheet
+# column has no header row to explain itself the way the display table does.
+SUMMARY_COLUMNS = (
+    ("runs", "Runs", "runs", 1.0, 0),
+    ("sent", "Sent (KB)", "sent_kb", 1 / 1024, 1),
+    ("received", "Received (KB)", "received_kb", 1 / 1024, 1),
+    ("physical", "Physical (m²)", "physical_m2", 1.0, 1),
+    ("known", "Known (m²)", "known_m2", 1.0, 1),
+    ("propagated_pct", "Propagated (%)", "propagated_pct", 1.0, 1),
+    ("redundant", "Redundant (m²)", "redundant_m2", 1.0, 1),
+    ("redundant_pct", "Redundant (%)", "redundant_pct", 1.0, 1),
+)
+
+
+def format_summary_table(summary, conditions, style):
+    """Render summarize()'s numbers as a table. style is "text" (aligned
+    columns for a terminal), "markdown" (a pipe table to paste into notes or
+    a PR), or "csv" (a spreadsheet-ready flat form: every mean gets its own
+    column plus a <name>_std sibling, so nothing has to parse a ± back out
+    of a cell). text and markdown fold std into the cell as "mean ± std",
+    and omit it where a condition has only one run or the metric is a ratio
+    of means with no spread of its own."""
+    def cell(cond, key, scale, places):
+        if key == "runs":
+            return f"{summary[cond]['runs']}"
+        mean, std = summary[cond][key]
+        text = f"{mean * scale:,.{places}f}"
+        if std and summary[cond]["runs"] > 1:
+            text += f" ± {std * scale:,.{places}f}"
+        return text
+
+    if style == "csv":
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        header = ["condition"]
+        for _, _, csv_name, _, _ in SUMMARY_COLUMNS:
+            header.append(csv_name)
+            if csv_name != "runs":
+                header.append(f"{csv_name}_std")
+        writer.writerow(header)
+        for cond in conditions:
+            row = [DISPLAY_NAMES[cond]]
+            for key, _, _, scale, places in SUMMARY_COLUMNS:
+                if key == "runs":
+                    row.append(summary[cond]["runs"])
+                    continue
+                mean, std = summary[cond][key]
+                row.append(f"{mean * scale:.{places}f}")
+                row.append(f"{std * scale:.{places}f}")
+            writer.writerow(row)
+        return buf.getvalue().rstrip("\n")
+
+    headers = ["Condition"] + [h for _, h, _, _, _ in SUMMARY_COLUMNS]
+    rows = [[DISPLAY_NAMES[c]] + [cell(c, k, s, p) for k, _, _, s, p in SUMMARY_COLUMNS] for c in conditions]
+    widths = [max(len(str(r[i])) for r in [headers] + rows) for i in range(len(headers))]
+
+    def line(values, pad=" "):
+        # First column left-aligned (labels), numbers right-aligned.
+        cells = [str(v).ljust(widths[0], pad) if i == 0 else str(v).rjust(widths[i], pad)
+                 for i, v in enumerate(values)]
+        return ("| " + " | ".join(cells) + " |") if style == "markdown" else "  ".join(cells).rstrip()
+
+    if style == "markdown":
+        rule = "| " + " | ".join(
+            (":" + "-" * (w - 1)) if i == 0 else ("-" * (w - 1) + ":") for i, w in enumerate(widths)) + " |"
+        return "\n".join([line(headers), rule] + [line(r) for r in rows])
+    return "\n".join([line(headers), "  ".join("-" * w for w in widths)] + [line(r) for r in rows])
+
+
+def plot_union_coverage(ax, results, conditions, series_fn, title, ylabel):
+    """Team-wide map coverage over time, in m^2. series_fn turns one run's
+    {robot: entry} dict into that run's (t, area_m2) curve -- pass
+    local_physical_union_series for "how much ground has the team
+    physically laid eyes on" (a real keyed union across robots, so a patch
+    two robots both drove over counts once), or team_known_coverage_series
+    for "how much does the team collectively know", including peer-relayed
+    cells -- the one that moves when communication improves, since
+    self-observed coverage structurally can't show it. results[c] is a list
+    of per-run {robot: entry} dicts -- each run's curve is resampled
+    (resample_step) onto a shared time grid and averaged, with a +/- std
+    band when more than one run contributes."""
+    for cond in conditions:
+        runs = results[cond]
+        merged_per_run = [series_fn(run) for run in runs]
         max_ts = [m[-1][0] for m in merged_per_run if m]
         if not max_ts:
             continue
@@ -517,17 +707,17 @@ def plot_union_coverage(ax, results, conditions, cell_index, title):
         sampled = np.array([resample_step(m, grid) for m in merged_per_run if m])
         mean = sampled.mean(axis=0)
         ax.plot(grid, mean, color=CONDITION_COLORS[cond], linewidth=2, solid_capstyle="round", zorder=3)
-        label = f"{mean[-1]:,.0f} tiles"
+        label = f"{mean[-1]:,.1f} m²"
         if sampled.shape[0] > 1:
             std = sampled.std(axis=0)
             ax.fill_between(grid, mean - std, mean + std, color=CONDITION_COLORS[cond], alpha=0.15,
                              linewidth=0, zorder=2)
-            label += f" ± {std[-1]:,.0f}"
+            label += f" ± {std[-1]:,.1f}"
         ax.annotate(label, (grid[-1], mean[-1]), textcoords="offset points",
                     xytext=(6, 0), fontsize=8.5, fontweight="bold", color=CONDITION_COLORS[cond], va="center")
 
     ax.set_xlabel("Time since run start (s)", fontsize=11, color=TEXT_SECONDARY)
-    ax.set_ylabel("Known tiles (union across robots)", fontsize=11, color=TEXT_SECONDARY)
+    ax.set_ylabel(ylabel, fontsize=11, color=TEXT_SECONDARY)
     ax.set_title(title, fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
     style_ax(ax)
 
@@ -551,6 +741,13 @@ def main():
     parser.add_argument("--separate-figures", action="store_true",
                          help="Save each panel as its own image file (named <out stem>_<panel>.<out suffix>) "
                               "instead of one combined multi-panel image.")
+    parser.add_argument("--table", nargs="?", const="text", choices=("text", "markdown", "csv"),
+                         help="Also print a one-row-per-condition summary table (sent/received bandwidth, "
+                              "team physical and known coverage, redundant overlap). Default style 'text'; "
+                              "'markdown' to paste into notes, 'csv' for a spreadsheet.")
+    parser.add_argument("--table-file", type=Path,
+                         help="Also write the summary table to this path, in the style its extension implies "
+                              "(.csv, .md, else text) regardless of --table. Use it to keep stdout pipe-clean.")
     args = parser.parse_args()
 
     # Each condition's runs (from repeated --<condition> occurrences), each
@@ -577,6 +774,17 @@ def main():
                 if r is not None:
                     run_results[robot] = r
             if run_results:
+                # A bag can open fine and still hold no map messages at all
+                # (an aborted recording -- a few tens of KB, no /map, no
+                # /nav_map). Its coverage series drop out of the averages on
+                # their own, but its zero bytes do NOT: they average in and
+                # silently halve the condition's reported bandwidth. Say so
+                # rather than let a dead run quietly move every number.
+                if not any(entry[2] or entry[3] for entry in run_results.values()):
+                    paths = ", ".join(str(p) for p in sorted(run_robots.values()))
+                    print(f"warning: {condition} run has no /map or /nav_map messages, so it contributes "
+                          f"0 bytes to that condition's mean -- drop it or check the recording: {paths}",
+                          file=sys.stderr)
                 results[condition].append(run_results)
 
     for condition in conditions:
@@ -591,8 +799,12 @@ def main():
         ("received", plot_bandwidth, (results, conditions, 0, "Map-sharing bandwidth (received)", "Received from peers (KB)")),
         ("coverage", plot_coverage, (results, conditions, 2, "Communicated map coverage", "Known map area (m²)")),
         ("local", plot_coverage, (results, conditions, 3, "Locally-observed coverage (self only)", "Self-observed area (m²)")),
-        ("union", plot_union_coverage, (results, conditions, 4, "Team physical coverage over time (union, self-observed only)")),
-        ("union_nav", plot_union_coverage, (results, conditions, 5, "Team known coverage over time (union, incl. peer-relayed)")),
+        ("union", plot_union_coverage, (results, conditions, local_physical_union_series,
+                                        "Team physical coverage over time (union, self-observed only)",
+                                        "Known area (m², union across robots)")),
+        ("union_nav", plot_union_coverage, (results, conditions, team_known_coverage_series,
+                                            "Team known coverage over time (incl. peer-relayed)",
+                                            "Known area (m², best-informed robot)")),
         ("redundant", plot_redundant_coverage, (results, conditions, 4, "Redundant physical coverage (territory overlap)")),
     ]
 
@@ -614,19 +826,18 @@ def main():
         fig.tight_layout(rect=(0, 0, 1, 0.94))
         fig.savefig(args.out, dpi=200, facecolor="white")
 
-    # Per-run totals (summed across robots), then mean/std across runs.
-    run_received = {c: [sum(r for r, _, _, _, _, _ in run.values()) for run in results[c]] for c in conditions}
-    run_sent = {c: [sum(s for _, s, _, _, _, _ in run.values()) for run in results[c]] for c in conditions}
-    totals_received = {c: float(np.mean(run_received[c])) for c in conditions}
-    totals_sent = {c: float(np.mean(run_sent[c])) for c in conditions}
+    # Per-condition totals, computed once for both the lines below and --table.
+    summary = summarize(results, conditions)
     for c in conditions:
-        n = len(results[c])
-        recv_std = f" ± {np.std(run_received[c]):.0f}" if n > 1 else ""
-        sent_std = f" ± {np.std(run_sent[c]):.0f}" if n > 1 else ""
-        print(f"{DISPLAY_NAMES[c]:>10} received: {totals_received[c]:.0f}{recv_std} bytes "
-              f"({totals_received[c] / 1024:.1f} KB), sent: {totals_sent[c]:.0f}{sent_std} bytes "
-              f"({totals_sent[c] / 1024:.1f} KB) across {n} run(s)")
-    nonzero_received = {c: v for c, v in totals_received.items() if v > 0}
+        n = summary[c]["runs"]
+        recv_mean, recv_std_val = summary[c]["received"]
+        sent_mean, sent_std_val = summary[c]["sent"]
+        recv_std = f" ± {recv_std_val:.0f}" if n > 1 else ""
+        sent_std = f" ± {sent_std_val:.0f}" if n > 1 else ""
+        print(f"{DISPLAY_NAMES[c]:>10} received: {recv_mean:.0f}{recv_std} bytes "
+              f"({recv_mean / 1024:.1f} KB), sent: {sent_mean:.0f}{sent_std} bytes "
+              f"({sent_mean / 1024:.1f} KB) across {n} run(s)")
+    nonzero_received = {c: summary[c]["received"][0] for c in conditions if summary[c]["received"][0] > 0}
     if len(nonzero_received) >= 2:
         print(f"received ratio (max/min): {max(nonzero_received.values()) / min(nonzero_received.values()):.2f}x")
     for condition in conditions:
@@ -641,28 +852,39 @@ def main():
             print(f"{DISPLAY_NAMES[condition]} {robot}: final known map area {final:.1f}{std_suffix} m^2 "
                   f"(communicated, incl. peer-relayed cells), {final_local:.1f}{std_local_suffix} m^2 self-observed")
     for condition in conditions:
-        local_finals = [union_coverage_over_time(entry[4] for entry in run.values()) for run in results[condition]]
-        nav_finals = [union_coverage_over_time(entry[5] for entry in run.values()) for run in results[condition]]
-        local_tiles = [m[-1][1] for m in local_finals if m]
-        nav_tiles = [m[-1][1] for m in nav_finals if m]
-        final_local_tiles = np.mean(local_tiles) if local_tiles else 0
-        final_nav_tiles = np.mean(nav_tiles) if nav_tiles else 0
-        local_suffix = f" ± {np.std(local_tiles):.0f}" if len(local_tiles) > 1 else ""
-        nav_suffix = f" ± {np.std(nav_tiles):.0f}" if len(nav_tiles) > 1 else ""
+        n = summary[condition]["runs"]
+        physical_mean, physical_std = summary[condition]["physical"]
+        known_mean, known_std = summary[condition]["known"]
+        local_suffix = f" ± {physical_std:.1f}" if n > 1 else ""
+        nav_suffix = f" ± {known_std:.1f}" if n > 1 else ""
         print(f"{DISPLAY_NAMES[condition]:>10} team physical coverage (union, self-observed only): "
-              f"{final_local_tiles:,.0f}{local_suffix} tiles; "
-              f"team known coverage (union, incl. peer-relayed): {final_nav_tiles:,.0f}{nav_suffix} tiles")
+              f"{physical_mean:,.1f}{local_suffix} m²; "
+              f"team known coverage (best-informed robot, incl. peer-relayed): "
+              f"{known_mean:,.1f}{nav_suffix} m²")
     for condition in conditions:
-        local_finals = [union_coverage_over_time(entry[4] for entry in run.values()) for run in results[condition]]
-        local_tiles = [m[-1][1] for m in local_finals if m]
-        final_local_tiles = np.mean(local_tiles) if local_tiles else 0
-        redundant_finals = [run_redundant_series(run, 4) for run in results[condition]]
-        redundant_tiles = [m[-1][1] for m in redundant_finals if m]
-        final_redundant = np.mean(redundant_tiles) if redundant_tiles else 0
-        redundant_suffix = f" ± {np.std(redundant_tiles):.0f}" if len(redundant_tiles) > 1 else ""
-        pct = f" ({100 * final_redundant / final_local_tiles:.1f}% of physical coverage)" if final_local_tiles else ""
+        n = summary[condition]["runs"]
+        redundant_mean, redundant_std = summary[condition]["redundant"]
+        redundant_suffix = f" ± {redundant_std:.1f}" if n > 1 else ""
+        pct_val = summary[condition]["redundant_pct"][0]
+        pct = f" ({pct_val:.1f}% of physical coverage)" if summary[condition]["physical"][0] else ""
         print(f"{DISPLAY_NAMES[condition]:>10} redundant physical coverage (territory overlap): "
-              f"{final_redundant:,.0f}{redundant_suffix} tiles{pct}")
+              f"{redundant_mean:,.1f}{redundant_suffix} m²{pct}")
+
+    if args.table or args.table_file:
+        if args.table_file:
+            # The file's own extension picks its style, not --table (which
+            # only governs stdout) -- writing a markdown pipe table into a
+            # .csv because of an unrelated stdout flag is never what's meant.
+            style = {".csv": "csv", ".md": "markdown", ".markdown": "markdown"}.get(
+                args.table_file.suffix.lower(), "text")
+            args.table_file.parent.mkdir(parents=True, exist_ok=True)
+            args.table_file.write_text(format_summary_table(summary, conditions, style) + "\n")
+        if args.table:
+            print()
+            print(format_summary_table(summary, conditions, args.table))
+        if args.table_file:
+            print(str(args.table_file.resolve()))
+
     print(str(args.out.resolve()))
 
 

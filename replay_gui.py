@@ -230,12 +230,17 @@ class RunPicker(ttk.Frame):
 
 
 class ReplayGUI(tk.Tk):
-    def __init__(self, initial_max_duration=""):
+    def __init__(self, initial_max_duration="", initial_table=None, table_file=None):
         super().__init__()
         self.title("Replay Compare")
         self.geometry("1080x560")
         self.proc = None
         self.fig_proc = None
+        # --table-file has no widget: it's a path, and the GUI already names
+        # its own output files. Set once from the CLI and carried across
+        # refresh() so `./replay_gui.sh --table-file summary.csv` keeps
+        # writing there for the whole session.
+        self.table_file = table_file
 
         sessions = scan_runs()
         # Derived from the scanned sessions rather than os.listdir(RUNS_DIR):
@@ -304,6 +309,15 @@ class ReplayGUI(tk.Tk):
             controls, text="Each panel as its own image", variable=self.separate_figures_var,
         ).pack(side="left", padx=(8, 0))
 
+        # "off" rather than an empty string so the dropdown reads as a
+        # deliberate choice; generate_figure() maps it back to "no --table".
+        ttk.Label(controls, text="Summary table:").pack(side="left", padx=(12, 0))
+        self.table_var = tk.StringVar(value=initial_table or "off")
+        ttk.Combobox(
+            controls, textvariable=self.table_var, width=9, state="readonly",
+            values=("off", "text", "markdown", "csv"),
+        ).pack(side="left", padx=(4, 0))
+
         ttk.Button(controls, text="Refresh runs", command=self.refresh).pack(side="right")
 
         self.status_var = tk.StringVar(value="Ready.")
@@ -320,10 +334,18 @@ class ReplayGUI(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def refresh(self):
+        # __init__ rebuilds every widget, so anything the user set has to be
+        # handed back in explicitly or it silently resets on a refresh.
         max_duration = self.max_duration_var.get()
+        table = self.table_var.get()
+        table_file = self.table_file
         for child in list(self.children.values()):
             child.destroy()
-        self.__init__(initial_max_duration=max_duration)
+        self.__init__(
+            initial_max_duration=max_duration,
+            initial_table=None if table == "off" else table,
+            table_file=table_file,
+        )
 
     def append_log(self, text):
         self.log.configure(state="normal")
@@ -505,6 +527,13 @@ class ReplayGUI(tk.Tk):
         separate_figures = self.separate_figures_var.get()
         if separate_figures:
             py_cmd += ["--separate-figures"]
+        table_style = self.table_var.get()
+        if table_style != "off":
+            # The figure script prints the table on stdout, which
+            # _run_figure_process pipes straight into the log pane below.
+            py_cmd += ["--table", table_style]
+        if self.table_file:
+            py_cmd += ["--table-file", self.table_file]
 
         if in_container():
             cmd = py_cmd
@@ -580,13 +609,29 @@ def main():
         "--max-duration", type=float, default=None,
         help="Clip both playback and the generated figure to this many seconds of bag time.",
     )
+    # Forwarded verbatim to generate_comparison_figure.py -- same names and
+    # meanings as there, so `./replay_gui.sh --table` does what the same flag
+    # does on the figure script itself. --table also preselects the GUI's
+    # summary dropdown, so it stays visible and switchable without restarting.
+    parser.add_argument(
+        "--table", nargs="?", const="text", choices=("text", "markdown", "csv"),
+        help="Print a per-condition summary table into the log after generating a figure.",
+    )
+    parser.add_argument(
+        "--table-file", type=str, default=None,
+        help="Also write that summary table to this path (.csv/.md/else text).",
+    )
     args = parser.parse_args()
 
     if not os.path.isdir(RUNS_DIR):
         print(f"No experiment_runs/ directory found at {RUNS_DIR}", file=sys.stderr)
         sys.exit(1)
     initial_max_duration = "" if args.max_duration is None else str(args.max_duration)
-    ReplayGUI(initial_max_duration=initial_max_duration).mainloop()
+    ReplayGUI(
+        initial_max_duration=initial_max_duration,
+        initial_table=args.table,
+        table_file=args.table_file,
+    ).mainloop()
 
 
 if __name__ == "__main__":

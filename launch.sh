@@ -132,6 +132,39 @@ if [[ "${WORLD}" == "warehouse" ]]; then
   SPAWN_YAW="1.58"
 fi
 
+if [[ "${WORLD}" == "maze" ]]; then
+  # maze_3_6x6 model is included at pose (-3, -2.5); half a meter inside its
+  # (0,0) corner cell keeps the spawn clear of every wall panel, which sit
+  # exactly on integer grid lines in the model's local frame.
+  SPAWN_X="-2.5"
+  SPAWN_Y="-2.0"
+  SPAWN_YAW="0.00"
+fi
+
+if [[ "${WORLD}" == "mine" ]]; then
+  # lc_mine's scanned mesh is centered near world origin (include pose -2,0,-1
+  # composed with the model's own -3,0,0 offset), which is also where the
+  # overview camera and ground-plane patch are framed -- the best available
+  # signal for where the mine entrance sits, since there's no flat reference
+  # floor to read an exact height off of. Spawn a couple meters up so physics
+  # settles the robot onto the mesh instead of risking it starting embedded
+  # in rock; re-tune x/y/z if it lands somewhere blocked.
+  SPAWN_X="0.0"
+  SPAWN_Y="0.0"
+  SPAWN_YAW="0.00"
+  SPAWN_Z="2.0"
+fi
+
+if [[ "${WORLD}" == "small_maze" ]]; then
+  # smaze2d is included at the world origin with no offset. Its outer walls
+  # fully enclose x:[0,24] y:[0,28] (each wall segment is a thin 0.4m-thick
+  # box); (2,2) sits well clear of that boundary and of every interior wall
+  # segment's footprint, so it's a safe drop point inside the labyrinth.
+  SPAWN_X="2.0"
+  SPAWN_Y="2.0"
+  SPAWN_YAW="0.00"
+fi
+
 SPAWN_PRESET="${SPAWN_PRESET:-default}"
 SPAWN_PRESETS_FILE="${PROJECT_ROOT}/spawn_presets.yaml"
 

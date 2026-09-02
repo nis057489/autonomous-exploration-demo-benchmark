@@ -36,20 +36,29 @@ corridor:
   default:
     - { x: -8.11, y: 0.31, yaw: 0.00 }
   distributed:
-    - { x: -7.00, y: 0.00, yaw: 0.0000 } # left corridor end
-    - { x: 7.00, y: 0.00, yaw: 3.1416 } # right corridor end
-    - { x: -4.50, y: 4.25, yaw: -1.5707 } # top-left room
-    - { x: 4.50, y: 4.25, yaw: 1.5707 } # top-right room
-    - { x: -4.50, y: -4.25, yaw: 1.5707 } # bottom-left room
-    - { x: 0.00, y: -4.25, yaw: 1.5707 } # bottom-mid room
-    - { x: 4.50, y: -4.25, yaw: 1.5707 } # bottom-right room
-    - { x: 0.00, y: 0.00, yaw: 0.0000 } # center corridor
+    - { x: 1.00, y: 1.00, yaw: 0.0000 } # left corridor end
+    - { x: 1.50, y: 1.30, yaw: 3.1416 } # right corridor end
+    - { x: 0.00, y: 0.00, yaw: -1.5707 } # top-left room
+
 
 warehouse:
   default:
     - { x: -12.97, y: 8.23, yaw: 1.58 }
   distributed:
-    - { x: -12.97, y: 8.23, yaw: 1.58 }
-    - { x: 3.34, y: -23.54, yaw: 1.58 }
-    - { x: 1.16, y: 13.22, yaw: 1.58 }
-    - { x: 11.09, y: -10.31, yaw: -1.58 }
+    - { x: 1.00, y: 1.00, yaw: 0.0000 } # left corridor end
+    - { x: 1.50, y: 1.30, yaw: 3.1416 } # right corridor end
+    - { x: 0.00, y: 0.00, yaw: -1.5707 } # top-left room
+
+maze:
+  default:
+    - { x: -2.50, y: -2.00, yaw: 0.00 }
+
+mine:
+  default:
+    - { x: 0.00, y: 0.00, yaw: 0.00 }
+
+small_maze:
+  default:
+    - { x: 2.00, y: 2.00, yaw: 0.00 }
+    - { x: 1.50, y: 2.00, yaw: 0.00 }
+    - { x: 1.00, y: 2.00, yaw: 0.00 }
