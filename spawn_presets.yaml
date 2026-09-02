@@ -57,6 +57,13 @@ mine:
   default:
     - { x: 0.00, y: 0.00, yaw: 0.00 }
 
+long_t:
+  default:
+    - { x: 0.00, y: -28.00, yaw: 1.5708 }
+  distributed:
+    - { x: 0.00, y: -28.00, yaw: 1.5708 }
+    - { x: 0.00, y: -10.00, yaw: 1.5708 }
+
 small_maze:
   default:
     - { x: 2.00, y: 2.00, yaw: 0.00 }
