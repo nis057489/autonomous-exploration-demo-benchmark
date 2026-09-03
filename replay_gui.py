@@ -26,6 +26,7 @@ import tempfile
 import threading
 from datetime import datetime
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import ttk, messagebox
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -236,6 +237,14 @@ class ReplayGUI(tk.Tk):
         self.geometry("1080x560")
         self.proc = None
         self.fig_proc = None
+
+        # ttk's built-in Treeview rowheight is a fixed ~20px, independent of
+        # the actual font size -- on a scaled/HiDPI display the default font
+        # renders taller than that and rows overlap. Derive it from the real
+        # font metrics instead.
+        default_font = tkfont.nametofont("TkDefaultFont")
+        style = ttk.Style(self)
+        style.configure("Treeview", rowheight=default_font.metrics("linespace") + 6)
         # --table-file has no widget: it's a path, and the GUI already names
         # its own output files. Set once from the CLI and carried across
         # refresh() so `./replay_gui.sh --table-file summary.csv` keeps

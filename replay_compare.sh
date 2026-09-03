@@ -179,7 +179,33 @@ for entry in "${RUNS_DIR}"/*/; do
   if [[ -z "${latest_ref[${world}]:-}" || "${name}" > "${latest_ref[${world}]}" ]]; then
     latest_ref["${world}"]="${name}"
   fi
+  if [[ -z "${GLOBAL_LATEST_NAME:-}" || "${name}" > "${GLOBAL_LATEST_NAME}" ]]; then
+    GLOBAL_LATEST_NAME="${name}"
+    GLOBAL_LATEST_WORLD="${world}"
+  fi
 done
+
+# Which world(s) to actually replay: any world named by an override (this is
+# how replay_gui.py drives a specific world selection), or -- if nothing was
+# overridden -- just the single most-recently-run world. Without this,
+# experiment_runs/ holding flat runs for more than one world (e.g. both
+# bookstore and long_t) would bundle every world's latest run into the same
+# bag list and play them all back together, which is what made a long_t
+# selection in the GUI still show up looking like a bookstore replay.
+declare -A TARGET_WORLDS=()
+for condition in "${CONDITIONS[@]}"; do
+  case "${condition}" in
+    baseline) declare -n overrides_ref=RUN_OVERRIDES_baseline ;;
+    vxch)     declare -n overrides_ref=RUN_OVERRIDES_vxch ;;
+    zstd)     declare -n overrides_ref=RUN_OVERRIDES_zstd ;;
+  esac
+  for world in "${!overrides_ref[@]}"; do
+    TARGET_WORLDS["${world}"]=1
+  done
+done
+if [[ ${#TARGET_WORLDS[@]} -eq 0 && -n "${GLOBAL_LATEST_WORLD:-}" ]]; then
+  TARGET_WORLDS["${GLOBAL_LATEST_WORLD}"]=1
+fi
 
 for condition in "${CONDITIONS[@]}"; do
   case "${condition}" in
@@ -188,6 +214,7 @@ for condition in "${CONDITIONS[@]}"; do
     zstd)     declare -n overrides_ref=RUN_OVERRIDES_zstd;     declare -n latest_ref=LATEST_NAME_zstd;     declare -n list_ref=BAG_LIST_zstd ;;
   esac
   for world in "${!latest_ref[@]}"; do
+    [[ -n "${TARGET_WORLDS[${world}]:-}" ]] || continue
     name="${latest_ref[${world}]}"
     if [[ -n "${overrides_ref[${world}]:-}" ]]; then
       name="${overrides_ref[${world}]}"
