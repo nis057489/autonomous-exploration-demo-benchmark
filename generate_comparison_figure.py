@@ -62,12 +62,16 @@ Usage:
 import argparse
 import csv
 import io
+import math
+import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+import yaml
 
 import matplotlib
 matplotlib.use("Agg")
@@ -98,6 +102,91 @@ def parse_robot_paths(pairs):
     return out
 
 
+def apply_pose(px, py, pyaw, x, y):
+    """Compose a 2D pose (px, py, pyaw) with a point (x, y) expressed in that
+    pose's frame. Same math as team_map_fusion.py's _apply_pose -- kept
+    identical on purpose, since the whole point is to key cells into the very
+    frame fusion builds /nav_map in."""
+    cos_yaw = math.cos(pyaw)
+    sin_yaw = math.sin(pyaw)
+    return px + cos_yaw * x - sin_yaw * y, py + sin_yaw * x + cos_yaw * y
+
+
+def yaw_from_quaternion(q):
+    """Yaw only -- these are 2D grid origins, so roll/pitch are always 0."""
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                      1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+def parse_robot_offsets(pairs):
+    """--robot-offset robot1=X,Y,YAW pairs into {robot: (x, y, yaw)}."""
+    out = {}
+    for pair in pairs or ():
+        robot, sep, values = pair.partition("=")
+        if not sep or not robot:
+            raise ValueError(f"expected robot=X,Y,YAW, got {pair!r}")
+        parts = [p for p in values.split(",") if p != ""]
+        if len(parts) != 3:
+            raise ValueError(f"expected robot=X,Y,YAW (3 numbers), got {pair!r}")
+        out[robot] = tuple(float(p) for p in parts)
+    return out
+
+
+def default_spawn_preset():
+    """Which spawn_presets.yaml preset the runs were launched with. Read from
+    the environment, else experiment.conf (the file docker.sh sources, so it's
+    the same value the launch actually used), else 'default'. Hardcoding
+    'distributed' here would silently produce wrong offsets -- and therefore a
+    wrong coverage union -- for any run launched with a different preset."""
+    env = os.environ.get("SPAWN_PRESET")
+    if env:
+        return env
+    conf = Path(__file__).parent / "experiment.conf"
+    if conf.is_file():
+        for line in conf.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"\s*SPAWN_PRESET\s*=\s*([^\s#]+)", line)
+            if m:
+                return m.group(1)
+    return "default"
+
+
+def world_from_bag_dir(bag_dir):
+    """Run dirs are experiment_runs/<timestamp>_<condition>_<world>/bag, so the
+    world name (which selects a spawn_presets.yaml block) is recoverable from
+    the path. Returns None if the path doesn't follow that shape."""
+    for part in (Path(bag_dir).resolve()).parts[::-1]:
+        m = re.match(r"^\d{8}_\d{6}_(?:baseline|vxch|zstd)_(.+)$", part)
+        if m:
+            return m.group(1)
+    return None
+
+
+def spawn_offsets_for(world, preset, robots, presets_path=None):
+    """Per-robot spawn poses (x, y, yaw) from spawn_presets.yaml -- the same
+    source multi_robot_vxch_experiment.launch.py feeds to team_map_fusion as
+    offsets_x/offsets_y/offsets_yaw. Robot N takes positions[N-1], cycling if
+    there are more robots than listed positions (matching that file's own
+    documented rule). Returns {} if the world/preset isn't found."""
+    path = Path(presets_path or (Path(__file__).parent / "spawn_presets.yaml"))
+    if not path.is_file() or not world:
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    positions = (data.get(world) or {}).get(preset)
+    if not positions:
+        return {}
+    out = {}
+    for robot in robots:
+        m = re.search(r"(\d+)$", robot)
+        if not m:
+            continue
+        pos = positions[(int(m.group(1)) - 1) % len(positions)]
+        out[robot] = (float(pos["x"]), float(pos["y"]), float(pos.get("yaw", 0.0)))
+    return out
+
+
 def _reindexed_copy(bag_dir):
     """metadata.yaml is missing (recorder killed before finalizing, e.g. an
     interrupted run) -- symlink the raw .mcap into a scratch dir and reindex
@@ -120,7 +209,7 @@ def _reindexed_copy(bag_dir):
     return scratch
 
 
-def read_bag(robot, bag_dir, condition, max_duration=None):
+def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
     """Returns (received_bytes, sent_bytes, coverage, local_coverage,
     local_cell_series, nav_cell_series, resolution) where coverage and
     local_coverage are each a list of (seconds_since_start, known_area_m2) -- coverage
@@ -143,7 +232,13 @@ def read_bag(robot, bag_dir, condition, max_duration=None):
     resolution is the grid resolution (m/cell) behind local_cell_series' and
     nav_cell_series' packed keys, for converting union "tile" counts back to
     m^2 downstream -- 0.0 if this robot never published a /map or /nav_map
-    message with any known cells."""
+    message with any known cells.
+
+    map_offset is this robot's spawn pose (x, y, yaw) -- the pose of its
+    private SLAM `map` frame within the shared team frame -- and is required
+    for local_cell_series' keys to be comparable across robots at all; see
+    known_cells. None keeps every robot in its own frame, which is only
+    correct for a single-robot run."""
     bag_dir = Path(bag_dir)
     scratch_dir = None
     try:
@@ -191,13 +286,30 @@ def read_bag(robot, bag_dir, condition, max_duration=None):
         known = int(np.count_nonzero(np.asarray(msg.data) != -1))
         return known * (msg.info.resolution ** 2)
 
-    def known_cells(msg):
-        """Grid-cell coordinates keyed in a global, resolution-sized lattice
-        (not this message's local row/col indices) so that cells from
-        different robots -- whose grids can have different origins/extents
-        as slam_toolbox grows each robot's own map independently -- line up
-        and can be unioned. Assumes all robots share the same map frame and
-        resolution, which holds for this benchmark's shared SLAM config.
+    def known_cells(msg, offset=None):
+        """Grid-cell coordinates keyed in a shared, resolution-sized world
+        lattice (not this message's local row/col indices) so that cells from
+        different robots -- whose grids have different origins/extents as
+        slam_toolbox grows each robot's own map independently -- line up and
+        can be unioned.
+
+        `offset` is this robot's spawn pose (x, y, yaw), i.e. the pose of its
+        private SLAM `map` frame within the shared team frame, and MUST be
+        supplied for any per-robot topic (/map). Every robot runs its own
+        async_slam_toolbox_node anchored at its own start pose, so /map
+        coordinates are in that robot's private frame -- in long_t/distributed
+        the two robots spawn 16 m apart, so without this the same physical
+        ground keys 16 m apart, two robots' cells never dedupe, and the
+        "union" inflates to roughly the sum (it read 505 m^2 for a world whose
+        entire navigable floor is ~260 m^2). This is the exact transform chain
+        team_map_fusion.py applies when it builds /nav_map: cell centre ->
+        through the grid's own origin pose -> through the robot's spawn
+        offset -> shared team frame.
+
+        Pass offset=None only for a topic already published in the shared
+        frame (/nav_map, which fusion emits with an identical origin for every
+        robot); offsetting those again would move correct data off-frame.
+
         Returns a sorted int64 numpy array, each element packing (gx, gy)
         into one 64-bit key (32 bits each) -- cheap to build and diff with
         numpy's setdiff1d/isin, vs. a Python set of (int, int) tuples which
@@ -214,8 +326,21 @@ def read_bag(robot, bag_dir, condition, max_duration=None):
         oy = msg.info.origin.position.y
         xs = known_idx % width
         ys = known_idx // width
-        gx = np.round((ox + (xs + 0.5) * res) / res).astype(np.int64)
-        gy = np.round((oy + (ys + 0.5) * res) / res).astype(np.int64)
+
+        # Cell centres in the grid's own pixel space...
+        local_x = (xs + 0.5) * res
+        local_y = (ys + 0.5) * res
+        # ...through the grid's origin pose (yaw included: slam_toolbox's
+        # origin is normally axis-aligned, but nothing guarantees it, and
+        # fusion honours it, so honour it here too rather than assuming)...
+        origin_yaw = yaw_from_quaternion(msg.info.origin.orientation)
+        map_x, map_y = apply_pose(ox, oy, origin_yaw, local_x, local_y)
+        # ...and then through this robot's spawn offset into the team frame.
+        if offset is not None:
+            map_x, map_y = apply_pose(offset[0], offset[1], offset[2], map_x, map_y)
+
+        gx = np.round(map_x / res).astype(np.int64)
+        gy = np.round(map_y / res).astype(np.int64)
         keys = (gx << np.int64(32)) | (gy & np.int64(0xFFFFFFFF))
         # np.unique, not just sort: two cells of ONE message can land on the
         # same key when the grid's real row/column spacing disagrees with the
@@ -242,6 +367,8 @@ def read_bag(robot, bag_dir, condition, max_duration=None):
             msg = deserialize_message(data, OccupancyGrid)
             t = (t_ns - start_ns) / 1e9
             coverage.append((t, known_area_m2(msg)))
+            # No offset: /nav_map is fusion's output, already in the shared
+            # team frame (every robot publishes it with the same origin).
             cells_now = known_cells(msg)
             new_cells = np.setdiff1d(cells_now, seen_nav_cells, assume_unique=True)
             if new_cells.size:
@@ -258,7 +385,8 @@ def read_bag(robot, bag_dir, condition, max_duration=None):
             # of O(final cell count) and OOM on longer runs. Diffs union
             # together identically to full snapshots downstream since set
             # union already dedupes across messages/robots.
-            cells_now = known_cells(msg)
+            # Offset applied: /map is this robot's private SLAM frame.
+            cells_now = known_cells(msg, offset=map_offset)
             new_cells = np.setdiff1d(cells_now, seen_cells, assume_unique=True)
             if new_cells.size:
                 local_cell_series.append((t, new_cells))
@@ -465,7 +593,12 @@ def local_physical_union_series(run):
     counts once. Trustworthy because /map's cells key cleanly -- summing
     local_cell_series' per-message diffs lands within ~2% of the final
     /map snapshot's own known_area_m2, i.e. the keys really are 1:1 with
-    distinct grid cells (unlike /nav_map's, see team_known_coverage_series)."""
+    distinct grid cells (unlike /nav_map's, see team_known_coverage_series).
+
+    Only meaningful when read_bag was given each robot's map_offset: the
+    cells are keyed in the shared team frame, and without that every robot
+    sits in its own SLAM frame and the "union" degenerates into roughly the
+    sum. main() warns when offsets are missing for a multi-robot run."""
     return to_area_m2(union_coverage_over_time(entry[4] for entry in run.values()), run_resolution(run))
 
 
@@ -748,6 +881,16 @@ def main():
     parser.add_argument("--table-file", type=Path,
                          help="Also write the summary table to this path, in the style its extension implies "
                               "(.csv, .md, else text) regardless of --table. Use it to keep stdout pipe-clean.")
+    parser.add_argument("--robot-offset", metavar="robot=X,Y,YAW", action="append",
+                         help="This robot's spawn pose, i.e. the pose of its private SLAM 'map' frame in the "
+                              "shared team frame. Required to union different robots' self-observed coverage, "
+                              "since each robot's /map is in its own frame. Normally inferred from "
+                              "spawn_presets.yaml via the run directory's world name; use this to override "
+                              "or to supply offsets for bags stored outside experiment_runs/.")
+    parser.add_argument("--spawn-preset", default=None,
+                         help="spawn_presets.yaml preset the runs were launched with, used to infer "
+                              "--robot-offset values. Defaults to $SPAWN_PRESET, else experiment.conf's "
+                              "SPAWN_PRESET, else 'default'.")
     args = parser.parse_args()
 
     # Each condition's runs (from repeated --<condition> occurrences), each
@@ -765,12 +908,33 @@ def main():
     # results[c] is a list of per-run {robot: read_bag() result} dicts, one
     # per --<condition> occurrence -- more than one run per condition drives
     # the mean +/- std error bars/bands in the plot_* functions below.
+    cli_offsets = parse_robot_offsets(args.robot_offset)
+    spawn_preset = args.spawn_preset or default_spawn_preset()
+
     results = {c: [] for c in conditions}
     for condition, runs in robot_paths.items():
         for run_robots in runs:
+            # Each robot's /map is in its own SLAM frame, anchored at that
+            # robot's spawn pose, so unioning them requires putting them in
+            # one frame first. Prefer explicit --robot-offset, else infer from
+            # spawn_presets.yaml using the world named by the run directory.
+            robots = sorted(run_robots)
+            offsets = dict(spawn_offsets_for(
+                world_from_bag_dir(next(iter(run_robots.values()))),
+                spawn_preset, robots))
+            offsets.update(cli_offsets)
+            if len(robots) > 1 and not all(r in offsets for r in robots):
+                print(
+                    f"warning: no spawn offset for {[r for r in robots if r not in offsets]} "
+                    f"({condition}) -- each robot's /map stays in its own SLAM frame, so team "
+                    f"physical coverage will double-count ground more than one robot covered. "
+                    f"Pass --robot-offset robot=X,Y,YAW (or --spawn-preset).",
+                    file=sys.stderr)
+
             run_results = {}
             for robot, bag_dir in sorted(run_robots.items()):
-                r = read_bag(robot, bag_dir, condition, max_duration=args.max_duration)
+                r = read_bag(robot, bag_dir, condition, max_duration=args.max_duration,
+                             map_offset=offsets.get(robot))
                 if r is not None:
                     run_results[robot] = r
             if run_results:
