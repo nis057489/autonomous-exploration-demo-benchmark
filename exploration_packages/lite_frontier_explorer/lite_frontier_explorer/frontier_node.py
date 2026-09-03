@@ -70,6 +70,11 @@ class LiteFrontierExplorer(Node):
         # backtracking for a marginally-better frontier.
         self.declare_parameter('hysteresis_bonus_m', 1.5)
         self.declare_parameter('replan_period_s', 3.0)
+        # If, while a goal is in flight, replanning selects a frontier this
+        # far (or more) from the goal actually being driven to, cancel the
+        # in-flight goal and switch to the new one instead of riding out the
+        # stale goal until it succeeds/aborts.
+        self.declare_parameter('goal_preempt_distance_m', 1.0)
         self.declare_parameter('navigate_to_pose_action_name', 'navigate_to_pose')
         self.declare_parameter('frontier_marker_topic', 'explore/frontiers')
         self.declare_parameter('frontier_marker_scale', 0.15)
@@ -92,6 +97,7 @@ class LiteFrontierExplorer(Node):
         self._gain_region_cap = self.get_parameter('gain_region_cap').value
         self._turn_penalty_m = self.get_parameter('turn_penalty_m').value
         self._hysteresis_bonus_m = self.get_parameter('hysteresis_bonus_m').value
+        self._goal_preempt_distance_m = self.get_parameter('goal_preempt_distance_m').value
         replan_period_s = self.get_parameter('replan_period_s').value
         action_name = self.get_parameter('navigate_to_pose_action_name').value
         self._marker_scale = self.get_parameter('frontier_marker_scale').value
@@ -103,6 +109,8 @@ class LiteFrontierExplorer(Node):
 
         self._latest_costmap = None
         self._goal_active = False
+        self._goal_handle = None
+        self._preempting = False
         self._pending_goal_xy = None
         self._blacklisted_goals = []
         self._last_goal_direction = None  # (dx, dy) of the most recently sent goal
@@ -223,6 +231,24 @@ class LiteFrontierExplorer(Node):
         self._publish_frontier_markers(cluster_xy, cluster_status, goal)
 
         if self._goal_active:
+            # Replanning may have found a materially better/closer frontier
+            # than the one currently being driven to -- preempt the stale
+            # goal instead of riding it out to success/abort. Without this,
+            # the markers show the newly identified frontier while the
+            # robot keeps executing whatever goal was in flight when it was
+            # found, which looks like it's ignoring the frontier entirely.
+            if (not self._preempting and goal is not None
+                    and self._pending_goal_xy is not None
+                    and math.hypot(goal[0] - self._pending_goal_xy[0],
+                                    goal[1] - self._pending_goal_xy[1])
+                    >= self._goal_preempt_distance_m):
+                self.get_logger().info(
+                    f"Preempting in-flight goal ({self._pending_goal_xy[0]:.2f}, "
+                    f"{self._pending_goal_xy[1]:.2f}) for closer/better frontier "
+                    f"({goal[0]:.2f}, {goal[1]:.2f}).")
+                self._preempting = True
+                if self._goal_handle is not None:
+                    self._goal_handle.cancel_goal_async()
             return  # still navigating -- _on_result() clears this when nav2 is done
 
         if not clusters:
@@ -258,6 +284,8 @@ class LiteFrontierExplorer(Node):
         self.get_logger().info(
             f"Sending goal to frontier at ({goal_x:.2f}, {goal_y:.2f})")
         self._goal_active = True
+        self._goal_handle = None
+        self._preempting = False
         self._pending_goal_xy = (goal_x, goal_y)
         send_future = self._nav_client.send_goal_async(goal_msg)
         send_future.add_done_callback(self._on_goal_response)
@@ -359,18 +387,30 @@ class LiteFrontierExplorer(Node):
             self.get_logger().warn("Goal rejected by nav2.")
             self._blacklist_pending_goal()
             self._goal_active = False
+            self._preempting = False
             return
+        self._goal_handle = goal_handle
+        # A preemption request may have arrived between send and accept;
+        # honor it now that we finally have a handle to cancel.
+        if self._preempting:
+            goal_handle.cancel_goal_async()
         goal_handle.get_result_async().add_done_callback(self._on_result)
 
     def _on_result(self, future):
         status = future.result().status
         if status == GoalStatus.STATUS_SUCCEEDED:
             self._pending_goal_xy = None
+        elif status == GoalStatus.STATUS_CANCELED and self._preempting:
+            # Cancelled by us to switch to a better frontier, not a real
+            # failure -- don't blacklist a perfectly reachable goal.
+            self._pending_goal_xy = None
         else:
             self.get_logger().warn(
                 f"Goal did not succeed (status={status}) -- blacklisting it.")
             self._blacklist_pending_goal()
         self._goal_active = False
+        self._goal_handle = None
+        self._preempting = False
 
     def _blacklist_pending_goal(self):
         if self._pending_goal_xy is not None:

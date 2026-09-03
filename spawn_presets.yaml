@@ -62,7 +62,7 @@ long_t:
     - { x: 0.00, y: -13.00, yaw: 1.5708 }
   distributed:
     - { x: 0.00, y: -4.00, yaw: 1.5708 }
-    - { x: 0.00, y: -13.00, yaw: 1.5708 }
+    - { x: 0.00, y: -14.00, yaw: 1.5708 }
 
 small_maze:
   default:
