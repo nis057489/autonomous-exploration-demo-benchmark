@@ -62,13 +62,34 @@ class LiteFrontierExplorer(Node):
         # because both fill up the same small window.
         self.declare_parameter('gain_region_cap', 2000)
         # Cost per direction change along the candidate path -- penalizes a
-        # zig-zag route over a straight one of the same step count.
-        self.declare_parameter('turn_penalty_m', 0.3)
+        # zig-zag route over a straight one of the same step count. Stays
+        # small on purpose: measured on the real 0.05 m/cell global costmap
+        # the BFS yields L-shaped paths with 0-1 direction changes (not
+        # per-cell staircases), so this lands under a metre and acts as a
+        # tiebreaker rather than swamping path distance. It penalizes
+        # off-axis goals, not reversals -- hysteresis_bonus_m below is the
+        # knob that discourages turning around.
+        self.declare_parameter('turn_penalty_m', 0.5)
         # Bonus/penalty (scaled by directional alignment) applied to a
         # candidate relative to the direction of the last goal sent, so the
         # robot favors continuing the way it was already heading over
         # backtracking for a marginally-better frontier.
-        self.declare_parameter('hysteresis_bonus_m', 1.5)
+        #
+        # Alignment runs +1 (dead ahead) to -1 (directly behind), so the
+        # ahead-vs-behind spread is 2 * this value: a frontier BEHIND the
+        # robot has to be that much closer to win. The old 1.5 put that at
+        # only 3 m, which anything mid-corridor clears easily -- that's what
+        # had robots abandoning a corridor partway to double back for a
+        # marginally nearer frontier. 6.0 sets the spread to ~12 m, about one
+        # full corridor leg in long_t (legs ~13-15 m, map ~20x19 m), so a
+        # robot committed to a leg keeps going unless something behind it is
+        # dramatically cheaper -- in practice, until the direction it's facing
+        # is close to exhausted.
+        #
+        # This is a relative cost term, not a gate: when every remaining
+        # frontier is behind, they all take the same penalty and one still
+        # wins normally, so the robot can't deadlock refusing to turn around.
+        self.declare_parameter('hysteresis_bonus_m', 6.0)
         self.declare_parameter('replan_period_s', 3.0)
         # If, while a goal is in flight, replanning selects a frontier this
         # far (or more) from the goal actually being driven to, cancel the
