@@ -74,6 +74,11 @@ struct TileBandState
 {
   int width{0};
   int height{0};
+  // Where this tile's data starts inside its own lattice tile. Nonzero only
+  // for a tile clipped by the sender's array edge when that edge isn't
+  // tile-aligned -- see tile_scheduler.hpp's tile_offset_row/col.
+  int offset_row{0};
+  int offset_col{0};
   int levels{0};
   int total_bands{0};
   std::vector<std::vector<std::int64_t>> band_coeffs;  // [band_index] → coefficients
@@ -212,12 +217,20 @@ public:
       const TileKey key{get_desc_meta("tile_row", 0), get_desc_meta("tile_col", 0)};
       const int tile_w = get_desc_meta("tile_width", static_cast<int>(geometry_.grid_width));
       const int tile_h = get_desc_meta("tile_height", static_cast<int>(geometry_.grid_height));
+      // Absent (an older/untiled encoder) means "starts at the tile boundary",
+      // which is what placement assumed unconditionally before this existed.
+      const int tile_off_r = get_desc_meta("tile_offset_row", 0);
+      const int tile_off_c = get_desc_meta("tile_offset_col", 0);
 
       auto & tile = tiles_[key];
-      if (tile.width != tile_w || tile.height != tile_h || tile.levels != haar_levels_) {
+      if (tile.width != tile_w || tile.height != tile_h || tile.levels != haar_levels_ ||
+        tile.offset_row != tile_off_r || tile.offset_col != tile_off_c)
+      {
         tile = TileBandState{};
         tile.width = tile_w;
         tile.height = tile_h;
+        tile.offset_row = tile_off_r;
+        tile.offset_col = tile_off_c;
         tile.levels = haar_levels_;
         tile.total_bands = haar_levels_ + 1;
         tile.band_coeffs.assign(static_cast<std::size_t>(tile.total_bands), {});
@@ -306,10 +319,15 @@ public:
       // an error -- e.g. a peer's array hasn't grown far enough yet to
       // include a tile this receiver already decoded from an earlier,
       // larger-extent manifest.
+      // tile.offset_row/col place a tile whose data was clipped by the
+      // sender's array edge: its first row/col is that many cells INTO the
+      // lattice tile, not at the tile boundary. Zero for every interior tile.
       const long long row0 = static_cast<long long>(key.first) *
-        static_cast<long long>(geometry_.tile_size_cells) - origin_cell_y;
+        static_cast<long long>(geometry_.tile_size_cells) +
+        static_cast<long long>(tile.offset_row) - origin_cell_y;
       const long long col0 = static_cast<long long>(key.second) *
-        static_cast<long long>(geometry_.tile_size_cells) - origin_cell_x;
+        static_cast<long long>(geometry_.tile_size_cells) +
+        static_cast<long long>(tile.offset_col) - origin_cell_x;
 
       // 2D nearest-neighbour upsample if we only have a coarse reconstruction
       // of this tile -- a real (blurry but spatially faithful) downsampled

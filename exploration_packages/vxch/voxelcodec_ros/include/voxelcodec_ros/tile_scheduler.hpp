@@ -202,6 +202,23 @@ public:
           continue;
         }
 
+        // Where this span's data starts INSIDE its lattice tile. Interior
+        // tiles start at the tile boundary (offset 0), but the first span on
+        // each axis is clipped to the array's own edge, which generally is
+        // not tile-aligned (origins move continuously as SLAM refines them --
+        // see compute_axis_tile_spans). Without this the decoder has no way
+        // to tell a 3-cell tile clipped from the left (data belongs at
+        // in-tile offset 1) from a 3-cell tile clipped from the right (offset
+        // 0), so it assumes 0 for both, pastes the leading partial tile
+        // shifted toward the origin, and leaves the cells between the lattice
+        // boundary and the array edge permanently unwritten.
+        const int offset_row =
+          static_cast<int>(origin_cell_y + row_span.local_start -
+          static_cast<long long>(trow) * tile_size_cells_);
+        const int offset_col =
+          static_cast<int>(origin_cell_x + col_span.local_start -
+          static_cast<long long>(tcol) * tile_size_cells_);
+
         const TileKey key{trow, tcol};
         auto & fp_for_tile = last_band_fingerprint_[key];
         if (fp_for_tile.empty()) {
@@ -215,12 +232,21 @@ public:
           band.descriptor.metadata["tile_col"] = std::to_string(tcol);
           band.descriptor.metadata["tile_width"] = std::to_string(width);
           band.descriptor.metadata["tile_height"] = std::to_string(height);
+          band.descriptor.metadata["tile_offset_row"] = std::to_string(offset_row);
+          band.descriptor.metadata["tile_offset_col"] = std::to_string(offset_col);
           band.descriptor.metadata["tile_size_cells"] = std::to_string(tile_size_cells_);
 
+          // Placement is folded into the fingerprint, not just the payload:
+          // a tile can keep byte-identical content while its clipped extent
+          // and in-tile offset shift (the array's origin moved under it), and
+          // the decoder needs the new placement or it would keep rendering
+          // that tile at the stale offset indefinitely.
           const auto & payload = band.payload;
           const std::size_t fp =
             payload.size() ^
-            std::hash<std::string>{}(std::string(payload.begin(), payload.end()));
+            std::hash<std::string>{}(std::string(payload.begin(), payload.end())) ^
+            (std::hash<int>{}(offset_row) * 3U) ^ (std::hash<int>{}(offset_col) * 5U) ^
+            (std::hash<int>{}(width) * 7U) ^ (std::hash<int>{}(height) * 11U);
           if (schedule_mode_ == "simple" || fp != fp_for_tile[k]) {
             fp_for_tile[k] = fp;
             pending_by_tile_[key][static_cast<int>(k)] = std::move(band);

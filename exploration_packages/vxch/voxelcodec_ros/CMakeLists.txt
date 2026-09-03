@@ -295,6 +295,15 @@ if(BUILD_TESTING)
     target_link_libraries(test_tile_reconstructor ${PROJECT_NAME})
   endif()
 
+  # End-to-end TileScheduler -> TileReconstructor round trips at origins that
+  # don't sit on the tile lattice -- the case where edge tiles are clipped.
+  ament_add_gtest(test_tile_origin_alignment
+    test/test_tile_origin_alignment.cpp
+  )
+  if(TARGET test_tile_origin_alignment)
+    target_link_libraries(test_tile_origin_alignment ${PROJECT_NAME})
+  endif()
+
   # ddil_proxy_logic.hpp holds ddil_proxy_node's pure topic/relay parsing,
   # token-bucket rate limiter, and priority band queue -- no rclcpp::Node.
   ament_add_gtest(test_ddil_proxy_logic
