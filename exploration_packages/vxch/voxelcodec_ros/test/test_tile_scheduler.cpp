@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -339,22 +340,52 @@ TEST(TileScheduler, SmartModePrefersNeverSentBandOverRecentlySentOne)
   EXPECT_EQ(second[0].band_index, 1);
 }
 
-TEST(TileScheduler, SimpleModeIgnoresSendRecencyAndStaysCoarsestFirst)
+TEST(TileScheduler, SimpleModeSendsEveryBandCoarsestFirstIgnoringMaxBandsPerUpdate)
 {
   TileScheduler scheduler(4.0, 2, "none", true, "simple");
   auto grid = make_grid(4, 4);
   scheduler.ingest_grid(grid, 4, 4, 1.0);
 
+  // levels=2 -> 3 bands. Simple mode mirrors baseline's resend-the-whole-map
+  // relay, so all 3 go out on one tick, coarsest-first, even though the caller
+  // asked for max_bands_per_update=1 (that cap is for smart/rd only).
   const auto first = scheduler.take_pending_bands(1, -1);
-  ASSERT_EQ(first.size(), 1U);
+  ASSERT_EQ(first.size(), 3U);
   EXPECT_EQ(first[0].band_index, 0);
+  EXPECT_EQ(first[1].band_index, 1);
+  EXPECT_EQ(first[2].band_index, 2);
+  EXPECT_FALSE(scheduler.has_pending());
 
-  // Simple mode re-queues band 0 again unconditionally (no fingerprint check),
-  // and with no recency tracking it must come out first again, not band 1.
+  // Re-queued unconditionally (no fingerprint check), and with no recency
+  // tracking the order is the same every cycle: coarsest-first, all of them.
   scheduler.ingest_grid(grid, 4, 4, 1.0);
   const auto second = scheduler.take_pending_bands(1, -1);
-  ASSERT_EQ(second.size(), 1U);
+  ASSERT_EQ(second.size(), 3U);
   EXPECT_EQ(second[0].band_index, 0);
+  EXPECT_EQ(second[1].band_index, 1);
+  EXPECT_EQ(second[2].band_index, 2);
+}
+
+TEST(TileScheduler, SimpleModeDoesNotStarveFineBandsBehindTheAlwaysRequeuedCoarseOne)
+{
+  // Regression: with max_bands_per_update=1, simple mode used to hand out
+  // band 0 and nothing else, forever. ingest_grid() re-queues band 0
+  // unconditionally in this mode, and with no recency reordering it is always
+  // bands_for_tile.begin(), so it won every turn while bands 1..L sat in the
+  // backlog for the whole run -- only band_0 ever reached the wire.
+  TileScheduler scheduler(4.0, 2, "none", true, "simple");
+  std::map<int, int> sends_by_band;
+  for (int tick = 0; tick < 10; ++tick) {
+    scheduler.ingest_grid(make_grid(8, 8, tick), 8, 8, 1.0);
+    for (const auto & item : scheduler.take_pending_bands(1, -1)) {
+      sends_by_band[item.band_index]++;
+    }
+  }
+
+  ASSERT_EQ(sends_by_band.size(), 3U) << "some band index never went out at all";
+  // Every band goes out exactly once per tile per tick, so all three counts match.
+  EXPECT_EQ(sends_by_band[1], sends_by_band[0]);
+  EXPECT_EQ(sends_by_band[2], sends_by_band[0]);
 }
 
 TEST(TileScheduler, IngestGridRecordsPerTileEncodingErrorsWithoutThrowing)

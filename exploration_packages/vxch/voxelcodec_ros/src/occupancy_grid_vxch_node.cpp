@@ -76,6 +76,8 @@ public:
     // Sending only this many of the highest-priority (coarsest) pending bands per send tick,
     // per tile, and carrying the rest over spaces this robot's own traffic out, leaving gaps
     // for peers to get a word in. 1 = strictly one band per tile per tick.
+    // Does not apply to schedule_mode "simple", which always sends every pending
+    // band of each serviced tile (see schedule_mode below).
     max_bands_per_update_ = declare_parameter<int>("max_bands_per_update", 1);
     if (max_bands_per_update_ < 1) {
       throw std::runtime_error("max_bands_per_update must be >= 1");
@@ -93,7 +95,9 @@ public:
     // "smart" = only queue a band when its fingerprint actually changed, and within a tile
     // prefer whichever pending band has gone longest without a turn (see TileScheduler).
     // "simple" = every tile's every band is queued fresh on every on_map() call (no change
-    // detection) and always sent strict coarsest-first (no recency reordering) -- this is the
+    // detection) and all of them are sent strict coarsest-first every tick, ignoring
+    // max_bands_per_update_ (which would otherwise let unconditionally-re-queued band 0 win
+    // every turn and starve bands 1..L off the wire entirely) -- this is the
     // same "just iterate over the tiles" scheme the baseline OccupancyGrid relay effectively
     // gets for free: ddil_proxy_node has no dedup/priority logic for a plain map topic (only
     // for band_N/manifest topics), so baseline already resends the whole map unconditionally

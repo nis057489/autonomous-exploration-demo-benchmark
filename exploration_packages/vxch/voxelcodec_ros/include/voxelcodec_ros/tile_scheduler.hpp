@@ -86,11 +86,14 @@ inline std::vector<AxisTileSpan> compute_axis_tile_spans(
 // Splits an occupancy grid into tile_size_m x tile_size_m tiles, each with
 // its own independent Haar pyramid, fingerprints each tile's bands to detect
 // real content changes, and schedules changed bands for sending. "smart" and
-// "simple" use round-robin fairness across tiles (and, in "smart" mode,
-// least-recently-sent-first within a tile); "rd" instead scores every
-// pending band by estimated distortion-reduction-per-byte and drains highest
-// score first across ALL queued tiles at once -- see take_pending_bands_rd
-// for the rationale. See occupancy_grid_vxch_node.cpp's on_map()/
+// "simple" use round-robin fairness across tiles (in "smart" mode,
+// least-recently-sent-first within a tile, capped at max_bands_per_update;
+// in "simple" mode, every pending band of the tile, coarsest-first, since
+// that mode's job is to imitate baseline's resend-everything relay); "rd"
+// instead scores every pending band by estimated distortion-reduction-per-
+// byte and drains highest score first across ALL queued tiles at once --
+// see take_pending_bands_rd for the rationale.
+// See occupancy_grid_vxch_node.cpp's on_map()/
 // send_pending_bands() comments for the full rationale -- this class is an
 // extraction of that logic, unchanged, so the ROS Node wrapper can declare
 // parameters/publishers/logging around it instead of interleaving them.
@@ -250,6 +253,9 @@ public:
   // max_bands_per_update of its own highest-priority pending bands this tick,
   // then -- if it still has more pending -- goes to the back of the queue.
   // max_tiles_per_update < 0 means no cap (every tile currently queued gets a turn).
+  // Exception: "simple" sends every pending band of each serviced tile,
+  // coarsest-first, ignoring max_bands_per_update -- see the comment on
+  // bands_this_tile below.
   std::vector<ScheduledBand> take_pending_bands(int max_bands_per_update, int max_tiles_per_update)
   {
     std::vector<ScheduledBand> out;
@@ -277,7 +283,21 @@ public:
       auto & bands_for_tile = tile_it->second;
       auto & last_sent = last_sent_seq_[key];
 
-      for (int i = 0; i < max_bands_per_update && !bands_for_tile.empty(); ++i) {
+      // "simple" deliberately ignores max_bands_per_update: it exists to mirror
+      // the baseline relay, which resends the WHOLE map every tick, so a tile
+      // has to emit each of its pending bands exactly once per tick,
+      // coarsest-first. Honouring the cap here instead permanently starved
+      // bands 1..L -- ingest_grid() re-queues band 0 unconditionally every
+      // cycle in this mode (no fingerprint check) and, with no recency
+      // reordering, band 0 is always bands_for_tile.begin(), so it won every
+      // single turn and nothing finer ever reached the wire. "smart"/"rd" keep
+      // the cap: their change detection and recency/aging ordering are what
+      // guarantee the carried-over bands still get a turn.
+      const int bands_this_tile = (schedule_mode_ == "simple") ?
+        static_cast<int>(bands_for_tile.size()) :
+        max_bands_per_update;
+
+      for (int i = 0; i < bands_this_tile && !bands_for_tile.empty(); ++i) {
         // "smart": prefer the least-recently-sent pending band over strict
         // coarsest-first, so a band that was just delivered doesn't cut back
         // in line ahead of one that's been waiting longer.
