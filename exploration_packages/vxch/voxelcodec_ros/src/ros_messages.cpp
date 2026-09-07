@@ -104,6 +104,63 @@ voxelcodec_msgs::msg::VoxelChannel channel_to_msg(
   return message;
 }
 
+namespace
+{
+// Reads an int out of a descriptor's ASCII metadata map. The encoder side
+// still receives tile geometry that way from TileScheduler; this is where it
+// stops being strings and becomes typed wire fields.
+int meta_int(const Metadata & metadata, const std::string & key, int fallback)
+{
+  auto it = metadata.find(key);
+  if (it == metadata.end()) {
+    return fallback;
+  }
+  try {
+    return std::stoi(it->second);
+  } catch (const std::exception &) {
+    return fallback;
+  }
+}
+}  // namespace
+
+voxelcodec_msgs::msg::VoxelTilePayload tile_payload_to_msg(
+  int tile_row, int tile_col,
+  const ChannelDescriptor & descriptor,
+  std::vector<std::uint8_t> payload)
+{
+  voxelcodec_msgs::msg::VoxelTilePayload tile;
+  tile.tile_row = tile_row;
+  tile.tile_col = tile_col;
+  tile.tile_width = meta_int(descriptor.metadata, "tile_width", 0);
+  tile.tile_height = meta_int(descriptor.metadata, "tile_height", 0);
+  tile.tile_offset_row = meta_int(descriptor.metadata, "tile_offset_row", 0);
+  tile.tile_offset_col = meta_int(descriptor.metadata, "tile_offset_col", 0);
+  tile.element_count = descriptor.element_count;
+  tile.payload = std::move(payload);
+  return tile;
+}
+
+ChannelDescriptor tile_payload_to_descriptor(
+  const voxelcodec_msgs::msg::VoxelTileBatch & batch,
+  const voxelcodec_msgs::msg::VoxelTilePayload & tile,
+  int band_index)
+{
+  ChannelDescriptor descriptor;
+  descriptor.name = "band_" + std::to_string(band_index);
+  descriptor.compression = batch.compression;
+  descriptor.element_count = tile.element_count;
+  // Stream-level constants come off the batch, per-tile geometry off the tile.
+  descriptor.metadata[kHaarVarintKey] = batch.varint_encoding ? "1" : "0";
+  descriptor.metadata["tile_size_cells"] = std::to_string(batch.tile_size_cells);
+  descriptor.metadata["tile_row"] = std::to_string(tile.tile_row);
+  descriptor.metadata["tile_col"] = std::to_string(tile.tile_col);
+  descriptor.metadata["tile_width"] = std::to_string(tile.tile_width);
+  descriptor.metadata["tile_height"] = std::to_string(tile.tile_height);
+  descriptor.metadata["tile_offset_row"] = std::to_string(tile.tile_offset_row);
+  descriptor.metadata["tile_offset_col"] = std::to_string(tile.tile_offset_col);
+  return descriptor;
+}
+
 std::string channel_topic(const std::string & base_topic, const std::string & channel_name)
 {
   if (base_topic.empty() || base_topic == "/") {

@@ -177,3 +177,95 @@ TEST(OriginAlignment, OriginShiftBetweenIngestsStillReconstructsExactly)
     EXPECT_EQ(out->data, grid) << "step=" << step << " origin_x=" << origin_x;
   }
 }
+
+// --- VoxelTileBatch wire layer ----------------------------------------------
+// The batching change moved tile geometry out of the descriptor's ASCII
+// metadata and into typed message fields. Encoder and decoder each go through
+// one of a pair of inverse functions; if they ever disagree, every tile lands
+// in the wrong place (or fails to decode) with nothing else to catch it.
+
+#include "voxelcodec_ros/ros_messages.hpp"
+
+TEST(VoxelTileBatch, PayloadRoundTripsThroughTypedWireFields)
+{
+  const int levels = 2, w = 16, h = 16;
+  const double resolution = 1.0, tile_size_m = 4.0;
+  const double origin_x = 9.0, origin_y = 9.0;   // deliberately NOT tile-aligned
+  const auto grid = make_grid(w, h);
+
+  TileScheduler scheduler(tile_size_m, levels, "none", true, "smart");
+  scheduler.ingest_grid(grid, w, h, resolution, origin_x, origin_y);
+
+  TileReconstructor reconstructor(levels);
+  const Metadata manifest{
+    {"grid_width", std::to_string(w)},
+    {"grid_height", std::to_string(h)},
+    {"tile_size_cells", std::to_string(scheduler.tile_size_cells())},
+    {"resolution", std::to_string(resolution)},
+    {"origin_x", std::to_string(origin_x)},
+    {"origin_y", std::to_string(origin_y)},
+    {"frame_id", "map"},
+  };
+  ASSERT_TRUE(reconstructor.ingest_manifest(manifest, Stamp{}));
+
+  // Drive the full encoder -> batch message -> decoder path.
+  for (int i = 0; i < 100 && scheduler.has_pending(); ++i) {
+    std::map<int, voxelcodec_msgs::msg::VoxelTileBatch> batches;
+    for (auto & item : scheduler.take_pending_bands(100, -1)) {
+      auto & batch = batches[item.band_index];
+      batch.band_index = static_cast<std::uint8_t>(item.band_index);
+      batch.haar_levels = static_cast<std::uint8_t>(levels);
+      batch.haar_total_bands = static_cast<std::uint8_t>(levels + 1);
+      batch.varint_encoding = true;
+      batch.compression = "none";
+      batch.tile_size_cells = scheduler.tile_size_cells();
+      batch.tiles.push_back(
+        voxelcodec_ros::tile_payload_to_msg(
+          item.tile.first, item.tile.second, item.channel.descriptor,
+          std::move(item.channel.payload)));
+    }
+    for (const auto & entry : batches) {
+      for (const auto & tile : entry.second.tiles) {
+        const auto desc = voxelcodec_ros::tile_payload_to_descriptor(
+          entry.second, tile, entry.first);
+        const auto err = reconstructor.ingest_band(entry.first, desc, tile.payload);
+        EXPECT_FALSE(err.has_value()) << *err;
+      }
+    }
+  }
+
+  const auto out = reconstructor.reconstruct();
+  ASSERT_TRUE(out.has_value());
+  EXPECT_EQ(out->data, grid);
+}
+
+TEST(VoxelTileBatch, DescriptorSurvivesTheTypedFieldRoundTripExactly)
+{
+  voxelcodec_ros::ChannelDescriptor original;
+  original.name = "band_1";
+  original.compression = "zstd";
+  original.element_count = 42;
+  original.metadata["tile_width"] = "13";
+  original.metadata["tile_height"] = "1";
+  original.metadata["tile_offset_row"] = "59";
+  original.metadata["tile_offset_col"] = "47";
+  original.metadata[voxelcodec_ros::kHaarVarintKey] = "1";
+  original.metadata["tile_size_cells"] = "60";
+
+  const auto tile = voxelcodec_ros::tile_payload_to_msg(-4, -7, original, {1, 2, 3});
+
+  voxelcodec_msgs::msg::VoxelTileBatch batch;
+  batch.compression = "zstd";
+  batch.varint_encoding = true;
+  batch.tile_size_cells = 60;
+  const auto restored = voxelcodec_ros::tile_payload_to_descriptor(batch, tile, 1);
+
+  EXPECT_EQ(restored.name, original.name);
+  EXPECT_EQ(restored.compression, original.compression);
+  EXPECT_EQ(restored.element_count, original.element_count);
+  for (const auto & kv : original.metadata) {
+    EXPECT_EQ(restored.metadata.at(kv.first), kv.second) << "key " << kv.first;
+  }
+  EXPECT_EQ(tile.tile_row, -4);
+  EXPECT_EQ(tile.tile_col, -7);
+}

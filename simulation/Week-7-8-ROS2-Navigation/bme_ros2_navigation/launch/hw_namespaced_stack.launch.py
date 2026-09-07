@@ -288,7 +288,7 @@ def _team_map_share_actions(
             robot_ddil_base = f"/{namespace}/incoming/{peer_name}"
             relay_topics = [
                 f"/{peer_name}/vxch/map/band_{k} {robot_ddil_base}/band_{k}"
-                " voxelcodec_msgs/msg/VoxelChannel"
+                " voxelcodec_msgs/msg/VoxelTileBatch"
                 for k in range(total_bands)
             ]
             relay_topics.append(

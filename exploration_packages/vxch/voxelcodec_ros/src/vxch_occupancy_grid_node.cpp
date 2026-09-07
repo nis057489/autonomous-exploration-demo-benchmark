@@ -13,6 +13,7 @@
 #include "voxelcodec_ros/tile_reconstructor.hpp"
 #include "voxelcodec_ros/types.hpp"
 #include "voxelcodec_msgs/msg/voxel_channel.hpp"
+#include "voxelcodec_msgs/msg/voxel_tile_batch.hpp"
 #include "voxelcodec_msgs/msg/voxel_manifest.hpp"
 
 namespace voxelcodec_ros
@@ -67,10 +68,10 @@ public:
       const std::string topic = input_base_topic_ + "/band_" + std::to_string(k);
       const int band_index = k;
       band_subs_[static_cast<std::size_t>(k)] =
-        create_subscription<voxelcodec_msgs::msg::VoxelChannel>(
+        create_subscription<voxelcodec_msgs::msg::VoxelTileBatch>(
           topic, band_qos,
-          [this, band_index](voxelcodec_msgs::msg::VoxelChannel::ConstSharedPtr msg) {
-            on_band(band_index, msg);
+          [this, band_index](voxelcodec_msgs::msg::VoxelTileBatch::ConstSharedPtr msg) {
+            on_band_batch(band_index, msg);
           });
     }
 
@@ -96,13 +97,24 @@ private:
     }
   }
 
-  void on_band(int band_index, const voxelcodec_msgs::msg::VoxelChannel::ConstSharedPtr & msg)
+  // One batch carries every tile the encoder scheduled for this band in one
+  // send tick (see VoxelTileBatch.msg). The batch's typed fields are expanded
+  // back into the ChannelDescriptor shape TileReconstructor already consumes,
+  // rather than teaching the reconstructor a second input format -- the wire
+  // saving is the point of the batching, and decode-side string building costs
+  // only local CPU.
+  void on_band_batch(
+    int band_index, const voxelcodec_msgs::msg::VoxelTileBatch::ConstSharedPtr & msg)
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    const ChannelDescriptor desc = descriptor_from_msg(msg->descriptor);
-    const auto error = reconstructor_->ingest_band(band_index, desc, msg->payload);
-    if (error.has_value()) {
-      RCLCPP_WARN(get_logger(), "Failed to decode band %d: %s", band_index, error->c_str());
+    for (const auto & tile : msg->tiles) {
+      const ChannelDescriptor desc = tile_payload_to_descriptor(*msg, tile, band_index);
+      const auto error = reconstructor_->ingest_band(band_index, desc, tile.payload);
+      if (error.has_value()) {
+        RCLCPP_WARN(
+          get_logger(), "Failed to decode band %d tile (%d,%d): %s",
+          band_index, tile.tile_row, tile.tile_col, error->c_str());
+      }
     }
   }
 
@@ -137,7 +149,7 @@ private:
 
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map_pub_;
   rclcpp::Subscription<voxelcodec_msgs::msg::VoxelManifest>::SharedPtr manifest_sub_;
-  std::vector<rclcpp::Subscription<voxelcodec_msgs::msg::VoxelChannel>::SharedPtr> band_subs_;
+  std::vector<rclcpp::Subscription<voxelcodec_msgs::msg::VoxelTileBatch>::SharedPtr> band_subs_;
   rclcpp::TimerBase::SharedPtr timer_;
 
   std::mutex mutex_;

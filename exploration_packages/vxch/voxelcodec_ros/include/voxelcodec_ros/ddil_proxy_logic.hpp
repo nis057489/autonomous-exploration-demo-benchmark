@@ -56,7 +56,12 @@ inline EpochRole epoch_role_from_msg_type(const std::string & msg_type)
   if (msg_type == "voxelcodec_msgs/msg/VoxelManifest") {
     return EpochRole::kManifest;
   }
-  if (msg_type == "voxelcodec_msgs/msg/VoxelChannel") {
+  // VoxelChannel is the pre-batching per-(tile,band) message; VoxelTileBatch
+  // carries a whole tick's tiles for one band. Both are band traffic as far as
+  // staleness/priority is concerned.
+  if (msg_type == "voxelcodec_msgs/msg/VoxelChannel" ||
+    msg_type == "voxelcodec_msgs/msg/VoxelTileBatch")
+  {
     return EpochRole::kBand;
   }
   return EpochRole::kNone;
@@ -117,6 +122,13 @@ inline bool is_manifest_topic(const std::string & topic)
          topic.compare(topic.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
+// NO LONGER USED IN PRODUCTION. Band traffic is now VoxelTileBatch (one
+// message per band per send tick, carrying every changed tile), so there is no
+// single tile id to key a dedup slot on, and ddil_proxy_node deliberately
+// leaves band messages un-deduped -- successive batches hold DIFFERENT tile
+// sets, so replacing one with another would drop map updates. Kept, with its
+// tests, for the legacy per-(tile,band) VoxelChannel format.
+//
 // A tiled occupancy_grid_vxch_node encoder multiplexes every tile's band_k
 // onto the SAME fixed /band_k topic (tile identity travels in the message's
 // descriptor metadata, not the topic name -- see occupancy_grid_vxch_node's

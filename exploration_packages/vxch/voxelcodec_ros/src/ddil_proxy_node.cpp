@@ -21,6 +21,7 @@
 #include <rclcpp/serialized_message.hpp>
 
 #include <voxelcodec_msgs/msg/ddil_band_status.hpp>
+#include <voxelcodec_msgs/msg/voxel_tile_batch.hpp>
 #include <voxelcodec_msgs/msg/ddil_stats.hpp>
 #include <voxelcodec_msgs/msg/voxel_channel.hpp>
 #include <voxelcodec_msgs/msg/voxel_manifest.hpp>
@@ -40,7 +41,6 @@ using voxelcodec_ros::epoch_role_from_msg_type;
 using voxelcodec_ros::is_manifest_topic;
 using voxelcodec_ros::parse_relay_entry;
 using voxelcodec_ros::RelayConfig;
-using voxelcodec_ros::tile_id_from_channel_msg;
 
 class DdilProxy : public rclcpp::Node
 {
@@ -231,11 +231,21 @@ private:
     const int band_idx = band_index_from_topic(input_topic);
     if (band_idx >= 0) {
       item.band_priority = band_idx;
-      const auto [tile_row, tile_col] = tile_id_from_channel_msg(*serialized);
-      item.dedup_key =
-        std::to_string(reinterpret_cast<std::uintptr_t>(pub.get())) +
-        ":band_" + std::to_string(band_idx) +
-        ":tile_" + std::to_string(tile_row) + "_" + std::to_string(tile_col);
+      // Deliberately NO dedup key for band traffic.
+      //
+      // Each band message is now a VoxelTileBatch carrying every tile the
+      // encoder scheduled for that band in one send tick, and the scheduler
+      // only puts a tile in when its content actually changed. Two successive
+      // batches on the same band therefore describe DIFFERENT sets of tiles,
+      // not two versions of one tile -- replacing an older queued batch with a
+      // newer one would silently discard every tile the older one carried and
+      // the newer one doesn't, i.e. drop map updates outright.
+      //
+      // (The old per-(tile,band) dedup key made sense when one message meant
+      // one tile, where a newer state genuinely superseded the older. Batching
+      // removes both the need and the safety of that.) An empty dedup_key
+      // never dedups -- see BandQueueEmptyDedupKeyNeverDedups.
+      item.dedup_key.clear();
     } else if (is_manifest_topic(input_topic)) {
       // Manifest must arrive before any band (decoder needs it to parse coefficients).
       // Priority -1 puts it ahead of band_0 (priority 0). Deduplicated so only the
@@ -270,7 +280,7 @@ private:
 
   // Deserialize just enough to read header.stamp, for stale-epoch tracking.
   // Only called for items already gated by EpochRole (kManifest/kBand), i.e.
-  // whose msg_type string is confirmed to be VoxelManifest/VoxelChannel --
+  // whose msg_type string is confirmed to be VoxelManifest/VoxelTileBatch --
   // never attempted for arbitrary/generic relayed types.
   static voxelcodec_ros::Stamp extract_stamp(const QueuedMessage & item)
   {
@@ -280,8 +290,8 @@ private:
       ser.deserialize_message(item.serialized.get(), &msg);
       return {msg.header.stamp.sec, static_cast<std::uint32_t>(msg.header.stamp.nanosec)};
     }
-    static rclcpp::Serialization<voxelcodec_msgs::msg::VoxelChannel> ser;
-    voxelcodec_msgs::msg::VoxelChannel msg;
+    static rclcpp::Serialization<voxelcodec_msgs::msg::VoxelTileBatch> ser;
+    voxelcodec_msgs::msg::VoxelTileBatch msg;
     ser.deserialize_message(item.serialized.get(), &msg);
     return {msg.header.stamp.sec, static_cast<std::uint32_t>(msg.header.stamp.nanosec)};
   }

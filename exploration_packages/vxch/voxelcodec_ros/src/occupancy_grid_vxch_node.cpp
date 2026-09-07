@@ -1,8 +1,12 @@
 #include <cstdint>
+#include <limits>
 #include <iomanip>
+#include <map>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <sstream>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -15,6 +19,8 @@
 #include "voxelcodec_ros/tile_scheduler.hpp"
 #include "voxelcodec_ros/types.hpp"
 #include "voxelcodec_msgs/msg/voxel_channel.hpp"
+#include "voxelcodec_msgs/msg/voxel_tile_batch.hpp"
+#include "voxelcodec_msgs/msg/voxel_tile_payload.hpp"
 #include "voxelcodec_msgs/msg/voxel_manifest.hpp"
 
 namespace voxelcodec_ros
@@ -93,7 +99,11 @@ public:
     // "smart" = only queue a band when its fingerprint actually changed, and within a tile
     // prefer whichever pending band has gone longest without a turn (see TileScheduler).
     // "simple" = every tile's every band is queued fresh on every on_map() call (no change
-    // detection) and always sent strict coarsest-first (no recency reordering) -- this is the
+    // detection). Within a tile, bands still rotate least-recently-sent-first, same as
+    // "smart" -- what distinguishes "simple" is the absence of change detection, not the
+    // send order. (It used to take strictly the lowest pending band index, which combined
+    // with re-queueing everything every ingest meant band 0 was refilled and re-picked
+    // forever and no finer band was ever sent at all.) This is the
     // same "just iterate over the tiles" scheme the baseline OccupancyGrid relay effectively
     // gets for free: ddil_proxy_node has no dedup/priority logic for a plain map topic (only
     // for band_N/manifest topics), so baseline already resends the whole map unconditionally
@@ -122,6 +132,26 @@ public:
       throw std::runtime_error("send_rate_hz must be > 0");
     }
 
+    // Cap on one batch's serialized size, so a band's tiles are split across
+    // several messages in the same tick rather than forming one oversized
+    // datagram. Bands travel BEST_EFFORT with no retransmission, so a message
+    // that IP-fragments turns one lost fragment into the loss of every tile it
+    // carried -- on a real lossy link that converts a small packet loss into
+    // dozens of tiles gone. Default 1300 keeps the CDR message inside a 1500 B
+    // Ethernet/802.11 MTU after RTPS (~56-80 B) + UDP (8 B) + IP (20 B)
+    // headers. Measured on a long_t run, batches were 549 B median / 2751 B
+    // max, with 12.6% over MTU -- so this only splits the tail.
+    //
+    // It costs nothing in bytes: the same tiles go out in the same tick, just
+    // divided differently. Set to 0 to disable and let batches grow unbounded.
+    max_batch_bytes_ = declare_parameter<int>("max_batch_bytes", 1300);
+    if (max_batch_bytes_ < 0) {
+      throw std::runtime_error("max_batch_bytes must be >= 0");
+    }
+    if (max_batch_bytes_ == 0) {
+      max_batch_bytes_ = std::numeric_limits<int>::max();
+    }
+
     if (haar_levels_ < 1 || haar_levels_ > 12) {
       throw std::runtime_error("haar_levels must be between 1 and 12");
     }
@@ -132,14 +162,10 @@ public:
     const auto map_qos = rclcpp::QoS(1)
       .reliable()
       .durability(rclcpp::DurabilityPolicy::TransientLocal);
-    // Tiling means one send tick can publish several *different* tiles' messages
-    // back-to-back on the SAME fixed band_k topic (tile identity travels in the
-    // payload, not the topic). A depth-1 queue only ever holds the single latest
-    // sample published on a topic; if N tiles publish to band_k before the
-    // subscriber's executor gets a chance to drain each one, only the last of
-    // those N survives at the DDS layer -- silent data loss, not a dedup/logic
-    // bug. Sizing the queue to comfortably exceed the largest expected number of
-    // tiles serviced in one tick avoids that regardless of scheduling jitter.
+    // One message per (band, tick) carrying every tile scheduled for that band,
+    // so a tick publishes at most one sample per band topic. This also removes
+    // the depth-vs-tile-count hazard the old one-message-per-tile scheme had
+    // (N tiles racing the subscriber's executor on one depth-limited topic).
     const auto band_qos = rclcpp::QoS(kBandQueueDepth).best_effort();
 
     manifest_pub_ = create_publisher<voxelcodec_msgs::msg::VoxelManifest>(
@@ -149,7 +175,7 @@ public:
     band_pubs_.resize(static_cast<std::size_t>(total_bands));
     for (int k = 0; k < total_bands; ++k) {
       band_pubs_[static_cast<std::size_t>(k)] =
-        create_publisher<voxelcodec_msgs::msg::VoxelChannel>(
+        create_publisher<voxelcodec_msgs::msg::VoxelTileBatch>(
           output_base_topic_ + "/band_" + std::to_string(k), band_qos);
     }
 
@@ -267,21 +293,80 @@ private:
     const auto scheduled = scheduler_->take_pending_bands(
       max_bands_per_update_, max_tiles_per_update_);
 
+    // Group this tick's scheduled tiles by band, so each band topic gets one
+    // message carrying all of its tiles rather than one message per tile. The
+    // per-message envelope (header, stamp, frame_id, stream_id, descriptor
+    // strings, CDR overhead) ran ~550 bytes against a ~26 byte payload, so it,
+    // not the coded data, was the dominant cost of the whole scheme.
+    //
+    // open_batch_[band] is the batch currently being filled for that band, with
+    // its running estimated serialized size; a band can emit more than one once
+    // max_batch_bytes_ is reached.
+    std::vector<std::pair<int, voxelcodec_msgs::msg::VoxelTileBatch>> ready;
+
     std::size_t sent_bytes = 0;
     std::ostringstream ss;
     ss << "[";
     for (std::size_t i = 0; i < scheduled.size(); ++i) {
-      const auto & item = scheduled[i];
+      auto & item = scheduled[i];
       if (i > 0) {ss << " ";}
       const double kb = static_cast<double>(item.channel.payload.size()) / 1024.0;
       ss << "t(" << item.tile.first << "," << item.tile.second << "):" << item.band_index << ":"
          << std::fixed << std::setprecision(1) << kb << "KB";
       sent_bytes += item.channel.payload.size();
 
-      band_pubs_[static_cast<std::size_t>(item.band_index)]->publish(
-        channel_to_msg(latest_header_, stream_id_, item.channel.descriptor, item.channel.payload));
+      // Typed fields in place of the descriptor's ASCII key/value metadata --
+      // the tile geometry the decoder needs, and nothing that's either
+      // stream-constant (now on the batch) or derivable. Paired with
+      // tile_payload_to_descriptor on the decode side.
+      auto tile_msg = tile_payload_to_msg(
+        item.tile.first, item.tile.second, item.channel.descriptor,
+        std::move(item.channel.payload));
+
+      // Start a new batch for this band when the current one would outgrow
+      // max_batch_bytes_. Splitting within the tick (rather than deferring the
+      // tile to a later one) keeps the same bytes on the same schedule -- it
+      // only changes how they're divided into datagrams.
+      //
+      // A single tile whose own payload exceeds the cap still goes out alone in
+      // an oversized batch: one tile's coefficients are the smallest
+      // indivisible unit here, so there is nothing to split. It lands in its
+      // own message rather than dragging others over the limit with it.
+      auto & open = open_batch_[item.band_index];
+      const std::size_t tile_bytes = estimated_tile_bytes(tile_msg);
+      if (open.has_value() &&
+        open->second + tile_bytes > static_cast<std::size_t>(max_batch_bytes_))
+      {
+        ready.push_back({item.band_index, std::move(open->first)});
+        open.reset();
+      }
+      if (!open.has_value()) {
+        voxelcodec_msgs::msg::VoxelTileBatch batch;
+        batch.header = latest_header_;
+        batch.stream_id = stream_id_;
+        batch.band_index = static_cast<std::uint8_t>(item.band_index);
+        batch.haar_levels = static_cast<std::uint8_t>(haar_levels_);
+        batch.haar_total_bands = static_cast<std::uint8_t>(haar_levels_ + 1);
+        batch.varint_encoding = varint_encoding_;
+        batch.compression = compression_;
+        batch.tile_size_cells = scheduler_->tile_size_cells();
+        open = std::make_pair(std::move(batch), estimated_batch_base_bytes());
+      }
+      open->second += tile_bytes;
+      open->first.tiles.push_back(std::move(tile_msg));
     }
     ss << "]";
+
+    for (auto & entry : open_batch_) {
+      if (entry.second.has_value()) {
+        ready.push_back({entry.first, std::move(entry.second->first)});
+      }
+    }
+    open_batch_.clear();
+
+    for (auto & entry : ready) {
+      band_pubs_[static_cast<std::size_t>(entry.first)]->publish(std::move(entry.second));
+    }
 
     RCLCPP_INFO(
       get_logger(), "send tick %s  total=%.1f KB  (%zu sent, %zu tile(s) still queued)",
@@ -290,8 +375,34 @@ private:
       scheduled.size(), scheduler_->queued_tile_count());
   }
 
+  // CDR wire cost of one VoxelTilePayload entry: 6 int32 geometry fields +
+  // uint32 element_count (28 B), the payload's own 4-byte length prefix, the
+  // bytes themselves, and up to 3 bytes of padding realigning the next entry.
+  // Deliberately an over-estimate -- overshooting splits a batch a little
+  // early, undershooting would push a datagram past the MTU, which is the
+  // whole thing we're avoiding.
+  static std::size_t estimated_tile_bytes(
+    const voxelcodec_msgs::msg::VoxelTilePayload & tile)
+  {
+    return 28 + 4 + tile.payload.size() + 3;
+  }
+
+  // Fixed part of a batch: header stamp + frame_id, stream_id, the four small
+  // codec constants, tile_size_cells, and the tiles array length prefix, each
+  // string carrying a 4-byte length and up to 3 bytes of padding.
+  std::size_t estimated_batch_base_bytes() const
+  {
+    return 8 + (4 + latest_header_.frame_id.size() + 3) +
+           (4 + stream_id_.size() + 3) + 4 +
+           (4 + compression_.size() + 3) + 4 + 4;
+  }
+
   std::string input_topic_;
   std::string output_base_topic_;
+  int max_batch_bytes_;
+  // Per band, the batch being filled this tick and its running size estimate.
+  std::map<int, std::optional<std::pair<voxelcodec_msgs::msg::VoxelTileBatch, std::size_t>>>
+  open_batch_;
   int haar_levels_;
   std::string compression_;
   bool varint_encoding_;
@@ -311,7 +422,7 @@ private:
   rclcpp::CallbackGroup::SharedPtr map_cb_group_;
   rclcpp::CallbackGroup::SharedPtr send_cb_group_;
   rclcpp::Publisher<voxelcodec_msgs::msg::VoxelManifest>::SharedPtr manifest_pub_;
-  std::vector<rclcpp::Publisher<voxelcodec_msgs::msg::VoxelChannel>::SharedPtr> band_pubs_;
+  std::vector<rclcpp::Publisher<voxelcodec_msgs::msg::VoxelTileBatch>::SharedPtr> band_pubs_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
   rclcpp::TimerBase::SharedPtr send_timer_;
 

@@ -339,22 +339,43 @@ TEST(TileScheduler, SmartModePrefersNeverSentBandOverRecentlySentOne)
   EXPECT_EQ(second[0].band_index, 1);
 }
 
-TEST(TileScheduler, SimpleModeIgnoresSendRecencyAndStaysCoarsestFirst)
+TEST(TileScheduler, SimpleModeStillReachesEveryBandInsteadOfStarvingOnBandZero)
 {
+  // This used to assert the opposite -- that "simple" hands out band 0 again
+  // on the second tick -- which looked like a defensible "coarsest-first, no
+  // recency reordering" policy but is actually unbounded starvation: simple
+  // mode re-queues every band on every ingest, so if selection always takes
+  // the lowest pending index, band 0 is refilled and re-picked forever and no
+  // finer band is EVER sent. A real long_t run shipped exactly that: 12,176
+  // band_0 messages and 0 on band_1/band_2, leaving every decoder stuck with
+  // the coarsest approximation it could never refine.
   TileScheduler scheduler(4.0, 2, "none", true, "simple");
   auto grid = make_grid(4, 4);
   scheduler.ingest_grid(grid, 4, 4, 1.0);
 
+  // Coarsest still goes first: on the first pass every band is unsent, and the
+  // least-recently-sent scan breaks on the first never-sent candidate, which
+  // is the lowest index. Progressive decode still gets coarse before fine.
   const auto first = scheduler.take_pending_bands(1, -1);
   ASSERT_EQ(first.size(), 1U);
   EXPECT_EQ(first[0].band_index, 0);
 
-  // Simple mode re-queues band 0 again unconditionally (no fingerprint check),
-  // and with no recency tracking it must come out first again, not band 1.
+  // ...but band 0 must not immediately cut back in front of bands that have
+  // never had a turn.
   scheduler.ingest_grid(grid, 4, 4, 1.0);
   const auto second = scheduler.take_pending_bands(1, -1);
   ASSERT_EQ(second.size(), 1U);
-  EXPECT_EQ(second[0].band_index, 0);
+  EXPECT_EQ(second[0].band_index, 1);
+
+  // Over enough ticks on unchanging content, every band gets delivered.
+  std::set<int> seen{first[0].band_index, second[0].band_index};
+  for (int tick = 0; tick < 10; ++tick) {
+    scheduler.ingest_grid(grid, 4, 4, 1.0);
+    for (const auto & item : scheduler.take_pending_bands(1, -1)) {
+      seen.insert(item.band_index);
+    }
+  }
+  EXPECT_EQ(seen, (std::set<int>{0, 1, 2})) << "some band never got sent at all";
 }
 
 TEST(TileScheduler, IngestGridRecordsPerTileEncodingErrorsWithoutThrowing)

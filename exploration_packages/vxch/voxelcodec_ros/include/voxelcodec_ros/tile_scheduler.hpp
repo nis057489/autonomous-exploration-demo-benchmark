@@ -86,8 +86,9 @@ inline std::vector<AxisTileSpan> compute_axis_tile_spans(
 // Splits an occupancy grid into tile_size_m x tile_size_m tiles, each with
 // its own independent Haar pyramid, fingerprints each tile's bands to detect
 // real content changes, and schedules changed bands for sending. "smart" and
-// "simple" use round-robin fairness across tiles (and, in "smart" mode,
-// least-recently-sent-first within a tile); "rd" instead scores every
+// "simple" use round-robin fairness across tiles, and both rotate
+// least-recently-sent-first within a tile (see take_pending_bands: doing that
+// only in "smart" left "simple" sending nothing but band 0); "rd" instead scores every
 // pending band by estimated distortion-reduction-per-byte and drains highest
 // score first across ALL queued tiles at once -- see take_pending_bands_rd
 // for the rationale. See occupancy_grid_vxch_node.cpp's on_map()/
@@ -154,6 +155,8 @@ public:
       tile_size_cells_ = new_tile_size_cells;
       last_band_fingerprint_.clear();
       pending_by_tile_.clear();
+      pending_fp_.clear();
+      last_sent_fp_.clear();
       tile_queue_.clear();
       tiles_in_queue_.clear();
       last_sent_seq_.clear();
@@ -247,9 +250,26 @@ public:
             std::hash<std::string>{}(std::string(payload.begin(), payload.end())) ^
             (std::hash<int>{}(offset_row) * 3U) ^ (std::hash<int>{}(offset_col) * 5U) ^
             (std::hash<int>{}(width) * 7U) ^ (std::hash<int>{}(height) * 11U);
-          if (schedule_mode_ == "simple" || fp != fp_for_tile[k]) {
+          // Two separate gates, and both matter:
+          //   fp_for_tile[k]  -- what was last QUEUED, so a band doesn't get
+          //                      re-queued every ingest while it waits its turn.
+          //   last_sent_fp_   -- what the receiver was last actually GIVEN.
+          // The second is what stops re-sending a state the peer already holds.
+          // Origin motion re-clips edge tiles every tick, so a tile is
+          // re-encoded constantly; whenever that re-encode lands back on the
+          // exact bytes and placement already delivered, sending it again buys
+          // the receiver nothing. Measured on a long_t run, 30.6% of all band
+          // messages were byte-identical to the previous send of that same
+          // (tile, band).
+          auto sent_it = last_sent_fp_.find(key);
+          const bool already_delivered =
+            sent_it != last_sent_fp_.end() &&
+            sent_it->second.count(static_cast<int>(k)) &&
+            sent_it->second.at(static_cast<int>(k)) == fp;
+          if (schedule_mode_ == "simple" || (fp != fp_for_tile[k] && !already_delivered)) {
             fp_for_tile[k] = fp;
             pending_by_tile_[key][static_cast<int>(k)] = std::move(band);
+            pending_fp_[key][static_cast<int>(k)] = fp;
             tile_changed = true;
             ++result.total_changed;
           }
@@ -304,32 +324,45 @@ public:
       auto & last_sent = last_sent_seq_[key];
 
       for (int i = 0; i < max_bands_per_update && !bands_for_tile.empty(); ++i) {
-        // "smart": prefer the least-recently-sent pending band over strict
-        // coarsest-first, so a band that was just delivered doesn't cut back
-        // in line ahead of one that's been waiting longer.
-        // "simple": always take the lowest pending band index (bands_for_tile
-        // is keyed by band index, so begin() is already coarsest-first).
+        // Prefer the least-recently-sent pending band over strict
+        // coarsest-first, so a band that was just delivered doesn't cut back in
+        // line ahead of one that's been waiting longer.
+        //
+        // This rotation applies in EVERY mode, not just "smart". Taking
+        // bands_for_tile.begin() unconditionally (it is keyed by band index, so
+        // begin() is the coarsest) looks like a harmless "coarsest-first"
+        // policy, but combined with "simple" mode's re-queue-everything ingest
+        // it starves every finer band forever: band 0 is put back on each
+        // ingest and, at the default max_bands_per_update of 1, is the only
+        // band ever taken. Measured before this fix, 20 ticks in "simple" sent
+        // band_0 320 times and bands 1 and 2 exactly zero times -- so the
+        // decoder only ever received the coarsest approximation and could
+        // never refine it. A real run shipped that way: its bag has 12,176
+        // band_0 messages and 0 on band_1/band_2.
+        //
+        // Least-recently-sent still yields coarsest-first ordering on the first
+        // pass (every band starts unsent, and the scan below breaks on the
+        // first never-sent candidate, which is the lowest index), so the
+        // coarse-before-fine property that progressive decoding relies on is
+        // preserved -- it just can't starve now.
         auto it = bands_for_tile.begin();
-        if (schedule_mode_ == "smart") {
-          std::uint64_t best_seq = std::numeric_limits<std::uint64_t>::max();
-          for (auto candidate = bands_for_tile.begin(); candidate != bands_for_tile.end();
-            ++candidate)
-          {
-            auto sent_it = last_sent.find(candidate->first);
-            const std::uint64_t seq = (sent_it == last_sent.end()) ? 0 : sent_it->second;
-            if (seq < best_seq) {
-              best_seq = seq;
-              it = candidate;
-              if (seq == 0) {break;}  // never sent -- can't do better than this
-            }
+        std::uint64_t best_seq = std::numeric_limits<std::uint64_t>::max();
+        for (auto candidate = bands_for_tile.begin(); candidate != bands_for_tile.end();
+          ++candidate)
+        {
+          auto sent_it = last_sent.find(candidate->first);
+          const std::uint64_t seq = (sent_it == last_sent.end()) ? 0 : sent_it->second;
+          if (seq < best_seq) {
+            best_seq = seq;
+            it = candidate;
+            if (seq == 0) {break;}  // never sent -- can't do better than this
           }
         }
         const int band_idx = it->first;
         EncodedChannel channel = std::move(it->second);
         bands_for_tile.erase(it);
-        if (schedule_mode_ == "smart") {
-          last_sent[band_idx] = ++send_seq_counter_;
-        }
+        last_sent[band_idx] = ++send_seq_counter_;
+        record_sent(key, band_idx);
         out.push_back(ScheduledBand{key, band_idx, std::move(channel)});
       }
 
@@ -422,6 +455,7 @@ private:
       tile_it->second.erase(band_it);
 
       last_sent_seq_[c.tile][c.band_index] = ++send_seq_counter_;
+      record_sent(c.tile, c.band_index);
       ++taken;
       tiles_touched.insert(c.tile);
       out.push_back(ScheduledBand{c.tile, c.band_index, std::move(channel)});
@@ -444,6 +478,18 @@ private:
     return out;
   }
 
+  // Moves a band's queued fingerprint into the "delivered" record.
+  void record_sent(const TileKey & key, int band_index)
+  {
+    auto pend = pending_fp_.find(key);
+    if (pend == pending_fp_.end()) {return;}
+    auto it = pend->second.find(band_index);
+    if (it == pend->second.end()) {return;}
+    last_sent_fp_[key][band_index] = it->second;
+    pend->second.erase(it);
+    if (pend->second.empty()) {pending_fp_.erase(pend);}
+  }
+
   double tile_size_m_;
   int haar_levels_;
   std::string compression_;
@@ -459,6 +505,12 @@ private:
   // Bands queued but not yet sent, per tile; within a tile, keyed by band index
   // so begin() is always that tile's lowest (coarsest/highest-priority) pending entry.
   std::map<TileKey, std::map<int, EncodedChannel>> pending_by_tile_;
+  // Fingerprint of each queued band, carried alongside it so take_pending_bands
+  // can record what was actually handed to the receiver without re-hashing.
+  std::map<TileKey, std::map<int, std::size_t>> pending_fp_;
+  // Fingerprint of the last band actually SENT per (tile, band) -- the record
+  // of what the peer already holds, so an unchanged re-encode isn't re-sent.
+  std::map<TileKey, std::map<int, std::size_t>> last_sent_fp_;
   // FIFO of tiles with at least one pending band, for round-robin fairness across tiles.
   std::deque<TileKey> tile_queue_;
   std::set<TileKey> tiles_in_queue_;
