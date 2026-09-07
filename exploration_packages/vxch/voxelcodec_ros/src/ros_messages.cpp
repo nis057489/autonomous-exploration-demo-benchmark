@@ -1,5 +1,8 @@
 #include "voxelcodec_ros/ros_messages.hpp"
 
+#include <limits>
+#include <utility>
+
 namespace voxelcodec_ros
 {
 
@@ -136,6 +139,7 @@ voxelcodec_msgs::msg::VoxelTilePayload tile_payload_to_msg(
   tile.tile_offset_row = meta_int(descriptor.metadata, "tile_offset_row", 0);
   tile.tile_offset_col = meta_int(descriptor.metadata, "tile_offset_col", 0);
   tile.element_count = descriptor.element_count;
+  tile.uncompressed_size = static_cast<std::uint32_t>(descriptor.uncompressed_size);
   tile.payload = std::move(payload);
   return tile;
 }
@@ -149,6 +153,10 @@ ChannelDescriptor tile_payload_to_descriptor(
   descriptor.name = "band_" + std::to_string(band_index);
   descriptor.compression = batch.compression;
   descriptor.element_count = tile.element_count;
+  // decompress_payload() sizes its output buffer from this; without it every
+  // zstd decode fails with "Destination buffer is too small".
+  descriptor.uncompressed_size = tile.uncompressed_size;
+  descriptor.compressed_size = tile.payload.size();
   // Stream-level constants come off the batch, per-tile geometry off the tile.
   descriptor.metadata[kHaarVarintKey] = batch.varint_encoding ? "1" : "0";
   descriptor.metadata["tile_size_cells"] = std::to_string(batch.tile_size_cells);
@@ -159,6 +167,61 @@ ChannelDescriptor tile_payload_to_descriptor(
   descriptor.metadata["tile_offset_row"] = std::to_string(tile.tile_offset_row);
   descriptor.metadata["tile_offset_col"] = std::to_string(tile.tile_offset_col);
   return descriptor;
+}
+
+std::size_t estimated_tile_bytes(const voxelcodec_msgs::msg::VoxelTilePayload & tile)
+{
+  return 32 + 4 + tile.payload.size() + 3;
+}
+
+std::size_t estimated_batch_base_bytes(const TileBatchSpec & spec)
+{
+  return 8 + (4 + spec.header.frame_id.size() + 3) +
+         (4 + spec.stream_id.size() + 3) + 4 +
+         (4 + spec.compression.size() + 3) + 4 + 4;
+}
+
+std::vector<voxelcodec_msgs::msg::VoxelTileBatch> split_tiles_into_batches(
+  const TileBatchSpec & spec,
+  std::vector<voxelcodec_msgs::msg::VoxelTilePayload> tiles,
+  std::size_t max_batch_bytes)
+{
+  std::vector<voxelcodec_msgs::msg::VoxelTileBatch> out;
+  if (tiles.empty()) {
+    return out;
+  }
+
+  const auto make_batch = [&spec]() {
+      voxelcodec_msgs::msg::VoxelTileBatch batch;
+      batch.header = spec.header;
+      batch.stream_id = spec.stream_id;
+      batch.band_index = static_cast<std::uint8_t>(spec.band_index);
+      batch.haar_levels = static_cast<std::uint8_t>(spec.haar_levels);
+      batch.haar_total_bands = static_cast<std::uint8_t>(spec.haar_total_bands);
+      batch.varint_encoding = spec.varint_encoding;
+      batch.compression = spec.compression;
+      batch.tile_size_cells = spec.tile_size_cells;
+      return batch;
+    };
+
+  const std::size_t cap =
+    (max_batch_bytes == 0) ? std::numeric_limits<std::size_t>::max() : max_batch_bytes;
+  const std::size_t base = estimated_batch_base_bytes(spec);
+
+  out.push_back(make_batch());
+  std::size_t running = base;
+  for (auto & tile : tiles) {
+    const std::size_t tile_bytes = estimated_tile_bytes(tile);
+    // Close the current batch only if it already holds something -- otherwise a
+    // single over-cap tile would emit an empty batch ahead of itself.
+    if (!out.back().tiles.empty() && running + tile_bytes > cap) {
+      out.push_back(make_batch());
+      running = base;
+    }
+    running += tile_bytes;
+    out.back().tiles.push_back(std::move(tile));
+  }
+  return out;
 }
 
 std::string channel_topic(const std::string & base_topic, const std::string & channel_name)

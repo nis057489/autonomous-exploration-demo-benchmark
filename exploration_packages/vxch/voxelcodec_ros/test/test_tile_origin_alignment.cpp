@@ -269,3 +269,67 @@ TEST(VoxelTileBatch, DescriptorSurvivesTheTypedFieldRoundTripExactly)
   EXPECT_EQ(tile.tile_row, -4);
   EXPECT_EQ(tile.tile_col, -7);
 }
+
+
+// The batch round trip above runs with compression="none", which makes
+// decompress_payload() return the payload untouched and never look at
+// uncompressed_size. Production runs zstd, where that field sizes the
+// destination buffer -- dropping it from the wire made every real decode fail
+// with "Destination buffer is too small" while every test still passed. This
+// exercises the compressed path end to end so that gap can't reopen.
+TEST(VoxelTileBatch, ZstdCompressedPayloadRoundTripsThroughTypedWireFields)
+{
+  const int levels = 2, w = 16, h = 16;
+  const double resolution = 1.0, tile_size_m = 4.0;
+  const double origin_x = 9.0, origin_y = 9.0;
+  const auto grid = make_grid(w, h);
+
+  TileScheduler scheduler(tile_size_m, levels, "zstd", true, "smart");
+  scheduler.ingest_grid(grid, w, h, resolution, origin_x, origin_y);
+
+  TileReconstructor reconstructor(levels);
+  const Metadata manifest{
+    {"grid_width", std::to_string(w)},
+    {"grid_height", std::to_string(h)},
+    {"tile_size_cells", std::to_string(scheduler.tile_size_cells())},
+    {"resolution", std::to_string(resolution)},
+    {"origin_x", std::to_string(origin_x)},
+    {"origin_y", std::to_string(origin_y)},
+    {"frame_id", "map"},
+  };
+  ASSERT_TRUE(reconstructor.ingest_manifest(manifest, Stamp{}));
+
+  for (int i = 0; i < 100 && scheduler.has_pending(); ++i) {
+    std::map<int, std::vector<voxelcodec_msgs::msg::VoxelTilePayload>> by_band;
+    for (auto & item : scheduler.take_pending_bands(100, -1)) {
+      by_band[item.band_index].push_back(
+        voxelcodec_ros::tile_payload_to_msg(
+          item.tile.first, item.tile.second, item.channel.descriptor,
+          std::move(item.channel.payload)));
+    }
+    for (auto & entry : by_band) {
+      voxelcodec_ros::TileBatchSpec spec;
+      spec.band_index = entry.first;
+      spec.haar_levels = levels;
+      spec.haar_total_bands = levels + 1;
+      spec.varint_encoding = true;
+      spec.compression = "zstd";
+      spec.tile_size_cells = scheduler.tile_size_cells();
+
+      for (const auto & batch :
+        voxelcodec_ros::split_tiles_into_batches(spec, std::move(entry.second), 1300))
+      {
+        for (const auto & tile : batch.tiles) {
+          const auto desc =
+            voxelcodec_ros::tile_payload_to_descriptor(batch, tile, entry.first);
+          const auto err = reconstructor.ingest_band(entry.first, desc, tile.payload);
+          EXPECT_FALSE(err.has_value()) << *err;
+        }
+      }
+    }
+  }
+
+  const auto out = reconstructor.reconstruct();
+  ASSERT_TRUE(out.has_value());
+  EXPECT_EQ(out->data, grid);
+}

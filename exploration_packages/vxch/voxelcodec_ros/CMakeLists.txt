@@ -275,6 +275,9 @@ if(BUILD_TESTING)
   )
   if(TARGET test_ros_messages)
     target_link_libraries(test_ros_messages ${PROJECT_NAME})
+    # rclcpp for real CDR serialization, used to check that
+    # split_tiles_into_batches' size estimate is never optimistic.
+    ament_target_dependencies(test_ros_messages rclcpp)
   endif()
 
   # tile_scheduler.hpp holds occupancy_grid_vxch_node's pure tiling/fingerprint/

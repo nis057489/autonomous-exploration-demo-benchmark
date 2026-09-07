@@ -24,4 +24,11 @@ int32 tile_offset_col
 # varint/fixed-width decode; it is not derivable from payload length).
 uint32 element_count
 
+# Size of `payload` after decompression. decompress_payload() allocates its
+# destination buffer from exactly this, so omitting it makes every zstd decode
+# fail with "Destination buffer is too small". Not derivable: under varint
+# packing the decompressed length depends on the coefficient magnitudes, not
+# just on element_count. Equal to payload.size() when compression is 'none'.
+uint32 uncompressed_size
+
 uint8[] payload

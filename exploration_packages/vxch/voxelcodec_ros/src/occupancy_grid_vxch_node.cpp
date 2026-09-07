@@ -148,9 +148,6 @@ public:
     if (max_batch_bytes_ < 0) {
       throw std::runtime_error("max_batch_bytes must be >= 0");
     }
-    if (max_batch_bytes_ == 0) {
-      max_batch_bytes_ = std::numeric_limits<int>::max();
-    }
 
     if (haar_levels_ < 1 || haar_levels_ > 12) {
       throw std::runtime_error("haar_levels must be between 1 and 12");
@@ -299,10 +296,9 @@ private:
     // strings, CDR overhead) ran ~550 bytes against a ~26 byte payload, so it,
     // not the coded data, was the dominant cost of the whole scheme.
     //
-    // open_batch_[band] is the batch currently being filled for that band, with
-    // its running estimated serialized size; a band can emit more than one once
-    // max_batch_bytes_ is reached.
-    std::vector<std::pair<int, voxelcodec_msgs::msg::VoxelTileBatch>> ready;
+    // Tiles accumulated per band this tick; split_tiles_into_batches turns each
+    // band's list into one or more sub-MTU messages below.
+    std::map<int, std::vector<voxelcodec_msgs::msg::VoxelTilePayload>> tiles_by_band;
 
     std::size_t sent_bytes = 0;
     std::ostringstream ss;
@@ -319,53 +315,29 @@ private:
       // the tile geometry the decoder needs, and nothing that's either
       // stream-constant (now on the batch) or derivable. Paired with
       // tile_payload_to_descriptor on the decode side.
-      auto tile_msg = tile_payload_to_msg(
-        item.tile.first, item.tile.second, item.channel.descriptor,
-        std::move(item.channel.payload));
-
-      // Start a new batch for this band when the current one would outgrow
-      // max_batch_bytes_. Splitting within the tick (rather than deferring the
-      // tile to a later one) keeps the same bytes on the same schedule -- it
-      // only changes how they're divided into datagrams.
-      //
-      // A single tile whose own payload exceeds the cap still goes out alone in
-      // an oversized batch: one tile's coefficients are the smallest
-      // indivisible unit here, so there is nothing to split. It lands in its
-      // own message rather than dragging others over the limit with it.
-      auto & open = open_batch_[item.band_index];
-      const std::size_t tile_bytes = estimated_tile_bytes(tile_msg);
-      if (open.has_value() &&
-        open->second + tile_bytes > static_cast<std::size_t>(max_batch_bytes_))
-      {
-        ready.push_back({item.band_index, std::move(open->first)});
-        open.reset();
-      }
-      if (!open.has_value()) {
-        voxelcodec_msgs::msg::VoxelTileBatch batch;
-        batch.header = latest_header_;
-        batch.stream_id = stream_id_;
-        batch.band_index = static_cast<std::uint8_t>(item.band_index);
-        batch.haar_levels = static_cast<std::uint8_t>(haar_levels_);
-        batch.haar_total_bands = static_cast<std::uint8_t>(haar_levels_ + 1);
-        batch.varint_encoding = varint_encoding_;
-        batch.compression = compression_;
-        batch.tile_size_cells = scheduler_->tile_size_cells();
-        open = std::make_pair(std::move(batch), estimated_batch_base_bytes());
-      }
-      open->second += tile_bytes;
-      open->first.tiles.push_back(std::move(tile_msg));
+      tiles_by_band[item.band_index].push_back(
+        tile_payload_to_msg(
+          item.tile.first, item.tile.second, item.channel.descriptor,
+          std::move(item.channel.payload)));
     }
     ss << "]";
 
-    for (auto & entry : open_batch_) {
-      if (entry.second.has_value()) {
-        ready.push_back({entry.first, std::move(entry.second->first)});
-      }
-    }
-    open_batch_.clear();
+    for (auto & entry : tiles_by_band) {
+      TileBatchSpec spec;
+      spec.header = latest_header_;
+      spec.stream_id = stream_id_;
+      spec.band_index = entry.first;
+      spec.haar_levels = haar_levels_;
+      spec.haar_total_bands = haar_levels_ + 1;
+      spec.varint_encoding = varint_encoding_;
+      spec.compression = compression_;
+      spec.tile_size_cells = scheduler_->tile_size_cells();
 
-    for (auto & entry : ready) {
-      band_pubs_[static_cast<std::size_t>(entry.first)]->publish(std::move(entry.second));
+      for (auto & batch : split_tiles_into_batches(
+          spec, std::move(entry.second), static_cast<std::size_t>(max_batch_bytes_)))
+      {
+        band_pubs_[static_cast<std::size_t>(entry.first)]->publish(std::move(batch));
+      }
     }
 
     RCLCPP_INFO(
@@ -375,34 +347,9 @@ private:
       scheduled.size(), scheduler_->queued_tile_count());
   }
 
-  // CDR wire cost of one VoxelTilePayload entry: 6 int32 geometry fields +
-  // uint32 element_count (28 B), the payload's own 4-byte length prefix, the
-  // bytes themselves, and up to 3 bytes of padding realigning the next entry.
-  // Deliberately an over-estimate -- overshooting splits a batch a little
-  // early, undershooting would push a datagram past the MTU, which is the
-  // whole thing we're avoiding.
-  static std::size_t estimated_tile_bytes(
-    const voxelcodec_msgs::msg::VoxelTilePayload & tile)
-  {
-    return 28 + 4 + tile.payload.size() + 3;
-  }
-
-  // Fixed part of a batch: header stamp + frame_id, stream_id, the four small
-  // codec constants, tile_size_cells, and the tiles array length prefix, each
-  // string carrying a 4-byte length and up to 3 bytes of padding.
-  std::size_t estimated_batch_base_bytes() const
-  {
-    return 8 + (4 + latest_header_.frame_id.size() + 3) +
-           (4 + stream_id_.size() + 3) + 4 +
-           (4 + compression_.size() + 3) + 4 + 4;
-  }
-
   std::string input_topic_;
   std::string output_base_topic_;
   int max_batch_bytes_;
-  // Per band, the batch being filled this tick and its running size estimate.
-  std::map<int, std::optional<std::pair<voxelcodec_msgs::msg::VoxelTileBatch, std::size_t>>>
-  open_batch_;
   int haar_levels_;
   std::string compression_;
   bool varint_encoding_;
