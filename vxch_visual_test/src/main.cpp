@@ -12,6 +12,24 @@
 //                                                round-robin order for a
 //                                                single static map -- see
 //                                                build_send_order below)
+//   voxels-info  --archive <file.vxch>
+//                                                report the 3D archive's
+//                                                channels, encodings and band
+//                                                ladder
+//   voxels-decode --archive <file.vxch> --bands N --out <voxels>
+//                                                decode the sparse voxel cloud
+//                                                at level of detail N (1 =
+//                                                coarsest, 0 = full); this is
+//                                                the 3D mode, where a band
+//                                                prefix yields FEWER, coarser
+//                                                voxels rather than a blurrier
+//                                                dense grid
+//   voxels-ablate --archive <file.vxch> --bands N
+//                                                does splitting x/y/z into
+//                                                separate channels actually
+//                                                help? compares interleaved vs
+//                                                concatenated vs split on the
+//                                                same values
 //   step     --session <session> --state <state> --out-receiver <grid>
 //                                                pop the next N queued bands,
 //                                                decode them into the
@@ -25,6 +43,8 @@
 // button click (or a few times per click for "send all"), each time
 // re-reading/re-writing --state so the caller (gui/vxch_gui.py) doesn't have
 // to keep a long-lived process around.
+#include "voxels_3d.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
@@ -513,12 +533,154 @@ int cmd_step(const ArgMap & args)
   return 0;
 }
 
+
+// ---- 3D (sparse voxel) mode ------------------------------------------------
+// Reports what a .vxch archive actually contains. The encoding per channel
+// matters: haar-wavelet gives a progressive band ladder, while column-run or
+// delta-varint (what the Go encoder picks for z after column sorting) decode
+// only in full.
+int cmd_voxels_info(const ArgMap & args)
+{
+  const auto archive_path = args.get("archive", "");
+  if (archive_path.empty()) {
+    throw std::runtime_error("voxels-info requires --archive");
+  }
+  const auto bytes = vxch_test::read_binary_file(archive_path);
+  const auto archive = voxelcodec_ros::read_archive(bytes);
+
+  json channels = json::array();
+  int max_ladder = 0;
+  for (const auto & descriptor : archive.manifest.channels) {
+    const int bands = voxelcodec_ros::haar_max_bands(descriptor);
+    max_ladder = std::max(max_ladder, bands);
+    channels.push_back({
+      {"name", descriptor.name},
+      {"encoding", descriptor.encoding},
+      {"element_count", descriptor.element_count},
+      {"compressed_bytes", archive.payloads.at(descriptor.name).size()},
+      {"bands", bands},
+    });
+  }
+
+  json result;
+  result["archive_bytes"] = bytes.size();
+  result["channels"] = std::move(channels);
+  result["max_bands"] = max_ladder;
+  std::cout << result.dump() << std::endl;
+  return 0;
+}
+
+int cmd_voxels_decode(const ArgMap & args)
+{
+  const auto archive_path = args.get("archive", "");
+  const auto out_path = args.get("out", "");
+  if (archive_path.empty() || out_path.empty()) {
+    throw std::runtime_error("voxels-decode requires --archive and --out");
+  }
+  const int bands = std::atoi(args.get("bands", "0").c_str());
+
+  const auto bytes = vxch_test::read_binary_file(archive_path);
+  const auto archive = voxelcodec_ros::read_archive(bytes);
+
+  std::size_t compressed = 0;
+  const auto cloud = vxch_test::decode_voxels(archive, bands, &compressed);
+  vxch_test::write_voxels(out_path, cloud);
+
+  // What reaching THIS level of detail actually costs on the wire. A Haar
+  // channel's coefficients are one coarsest-first stream, so a band prefix is
+  // a prefix of that stream and its size is measured, not estimated; a channel
+  // with no band ladder has no partial form and costs its whole payload at
+  // every level.
+  std::size_t full = 0;
+  std::size_t prefix_compressed = 0;
+  std::size_t prefix_varint = 0;
+  std::size_t full_compressed = 0;
+  json channels = json::array();
+  for (const auto & descriptor : archive.manifest.channels) {
+    if (descriptor.name == "x") {full = descriptor.element_count;}
+    const auto & payload = archive.payloads.at(descriptor.name);
+    full_compressed += payload.size();
+
+    const auto prefix = vxch_test::haar_prefix_bytes(descriptor, payload, bands);
+    const bool progressive = voxelcodec_ros::haar_max_bands(descriptor) > 0;
+    const std::size_t on_wire = progressive ? prefix.compressed_bytes : payload.size();
+    const std::size_t raw_bytes = progressive ? prefix.varint_bytes : payload.size();
+    prefix_compressed += on_wire;
+    prefix_varint += raw_bytes;
+
+    channels.push_back({
+      {"name", descriptor.name},
+      {"encoding", descriptor.encoding},
+      {"progressive", progressive},
+      {"bytes", on_wire},
+      {"varint_bytes", raw_bytes},
+      {"full_bytes", payload.size()},
+    });
+  }
+
+  json result;
+  result["bands"] = bands;
+  result["voxels"] = cloud.count();
+  result["full_voxels"] = full;
+  result["archive_bytes"] = bytes.size();
+  result["channel_bytes"] = compressed;
+  result["level_bytes"] = prefix_compressed;
+  result["level_varint_bytes"] = prefix_varint;
+  result["full_channel_bytes"] = full_compressed;
+  result["channels"] = std::move(channels);
+  std::cout << result.dump() << std::endl;
+  return 0;
+}
+
+
+// Channel-separation ablation at a given level of detail. Answers "does
+// splitting x/y/z into separate channels actually do anything, or would one
+// interleaved blob compress just as well?" -- see separation_ablation.
+int cmd_voxels_ablate(const ArgMap & args)
+{
+  const auto archive_path = args.get("archive", "");
+  if (archive_path.empty()) {
+    throw std::runtime_error("voxels-ablate requires --archive");
+  }
+  const int bands = std::atoi(args.get("bands", "0").c_str());
+
+  const auto bytes = vxch_test::read_binary_file(archive_path);
+  const auto archive = voxelcodec_ros::read_archive(bytes);
+  const auto cloud = vxch_test::decode_voxels(archive, bands, nullptr);
+
+  std::string compression = voxelcodec_ros::kCompressionZstd;
+  for (const auto & descriptor : archive.manifest.channels) {
+    if (descriptor.name == "x") {compression = descriptor.compression;}
+  }
+  const auto ablation = vxch_test::separation_ablation(cloud, compression);
+
+  json result;
+  result["bands"] = bands;
+  result["voxels"] = ablation.voxels;
+  result["compression"] = compression;
+  result["interleaved"] = ablation.interleaved;
+  result["concatenated"] = ablation.concatenated;
+  result["split"] = ablation.split;
+  result["split_x"] = ablation.split_x;
+  result["split_y"] = ablation.split_y;
+  result["split_z"] = ablation.split_z;
+  // How much of the interleaved->split win is grouping vs separate contexts.
+  result["grouping_gain"] = ablation.concatenated > 0
+    ? static_cast<double>(ablation.interleaved) / static_cast<double>(ablation.concatenated) : 0.0;
+  result["separation_gain"] = ablation.split > 0
+    ? static_cast<double>(ablation.concatenated) / static_cast<double>(ablation.split) : 0.0;
+  result["total_gain"] = ablation.split > 0
+    ? static_cast<double>(ablation.interleaved) / static_cast<double>(ablation.split) : 0.0;
+  std::cout << result.dump() << std::endl;
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char ** argv)
 {
   if (argc < 2) {
-    std::cerr << "usage: vxch_cli <gen-map|encode|step> [--key value ...]\n";
+    std::cerr << "usage: vxch_cli <gen-map|encode|step|voxels-info|voxels-decode|voxels-ablate> [--key value ...]\n";
     return 1;
   }
   const std::string cmd = argv[1];
@@ -528,6 +690,9 @@ int main(int argc, char ** argv)
     if (cmd == "gen-map") {return cmd_gen_map(args);}
     if (cmd == "encode") {return cmd_encode(args);}
     if (cmd == "step") {return cmd_step(args);}
+    if (cmd == "voxels-info") {return cmd_voxels_info(args);}
+    if (cmd == "voxels-decode") {return cmd_voxels_decode(args);}
+    if (cmd == "voxels-ablate") {return cmd_voxels_ablate(args);}
     std::cerr << "unknown subcommand: " << cmd << "\n";
     return 1;
   } catch (const std::exception & e) {

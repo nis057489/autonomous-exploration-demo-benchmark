@@ -1,3 +1,4 @@
+#include <limits>
 #include "voxelcodec_ros/codec.hpp"
 
 #include <algorithm>
@@ -52,7 +53,8 @@ namespace voxelcodec_ros
       if (
           encoding != kEncodingRawLE && encoding != kEncodingConstant &&
           encoding != kEncodingPalette && encoding != kEncodingDeltaVarint &&
-          encoding != kEncodingHaarWavelet && encoding != kEncodingByteShuffle)
+          encoding != kEncodingHaarWavelet && encoding != kEncodingByteShuffle &&
+          encoding != kEncodingColumnRun && encoding != kEncodingXORByteShuffle)
       {
         throw std::runtime_error("unsupported encoding: " + encoding);
       }
@@ -449,6 +451,88 @@ namespace voxelcodec_ros
         throw std::runtime_error("delta-varint payload has trailing bytes");
       }
       return values;
+    }
+
+    // Expands (start, length) plain-uvarint pairs back into consecutive
+    // integers. Mirrors ColumnRunChannel.MarshalBinary in the Go encoder,
+    // which is what column sorting makes profitable: sorting voxels by
+    // (x, y, z) turns a vertical obstacle into a run z, z+1, z+2, ... so one
+    // whole column of z coordinates costs two varints.
+    //
+    // Plain uvarint, not the zigzag delta-varint uses -- runs are absolute
+    // starts and positive lengths, so there is nothing to sign-fold.
+    ScalarBuffer decode_column_run_channel(
+        const ChannelDescriptor &descriptor,
+        const std::vector<std::uint8_t> &raw)
+    {
+      if (descriptor.data_type != kDataTypeUint32)
+      {
+        throw std::runtime_error("column-run supports uint32 logical values only");
+      }
+      std::vector<std::uint32_t> values;
+      values.reserve(descriptor.element_count);
+      std::size_t offset = 0;
+      while (values.size() < descriptor.element_count)
+      {
+        if (offset >= raw.size())
+        {
+          throw std::runtime_error("column-run payload truncated for channel: " + descriptor.name);
+        }
+        const auto start = read_uvarint(raw, offset);
+        const auto length = read_uvarint(raw, offset);
+        if (length == 0)
+        {
+          throw std::runtime_error("column-run zero-length run for channel: " + descriptor.name);
+        }
+        if (values.size() + length > descriptor.element_count)
+        {
+          throw std::runtime_error("column-run run overflows element_count for channel: " + descriptor.name);
+        }
+        if (start + length - 1 > std::numeric_limits<std::uint32_t>::max())
+        {
+          throw std::runtime_error("column-run run exceeds uint32 range for channel: " + descriptor.name);
+        }
+        for (std::uint64_t i = 0; i < length; ++i)
+        {
+          values.push_back(static_cast<std::uint32_t>(start + i));
+        }
+      }
+      if (offset != raw.size())
+      {
+        throw std::runtime_error("column-run payload has trailing bytes for channel: " + descriptor.name);
+      }
+      return ScalarBuffer{std::move(values)};
+    }
+
+    // byte-shuffle planes carrying a XOR-with-previous chain: plane-major
+    // bytes reassemble to v[i] ^ v[i-1], so the running XOR recovers v.
+    ScalarBuffer decode_xor_byte_shuffle_channel(
+        const ChannelDescriptor &descriptor,
+        const std::vector<std::uint8_t> &raw)
+    {
+      if (descriptor.data_type != kDataTypeUint32)
+      {
+        throw std::runtime_error("xor-byte-shuffle supports uint32 logical values only");
+      }
+      if (raw.size() != static_cast<std::size_t>(descriptor.element_count) * sizeof(std::uint32_t))
+      {
+        throw std::runtime_error("xor-byte-shuffle payload size mismatch for channel: " + descriptor.name);
+      }
+
+      const std::size_t n = descriptor.element_count;
+      std::vector<std::uint32_t> values(n);
+      std::uint32_t previous = 0;
+      for (std::size_t i = 0; i < n; ++i)
+      {
+        const std::uint32_t xored =
+            static_cast<std::uint32_t>(raw[i]) |
+            (static_cast<std::uint32_t>(raw[n + i]) << 8U) |
+            (static_cast<std::uint32_t>(raw[2 * n + i]) << 16U) |
+            (static_cast<std::uint32_t>(raw[3 * n + i]) << 24U);
+        previous = xored ^ previous;
+        values[i] = previous;
+      }
+      return ScalarBuffer{std::move(values)};
     }
 
     ScalarBuffer decode_byte_shuffle_channel(
@@ -1063,6 +1147,16 @@ namespace voxelcodec_ros
     if (descriptor.encoding == kEncodingByteShuffle)
     {
       decoded.values = decode_byte_shuffle_channel(descriptor, raw);
+      return decoded;
+    }
+    if (descriptor.encoding == kEncodingColumnRun)
+    {
+      decoded.values = decode_column_run_channel(descriptor, raw);
+      return decoded;
+    }
+    if (descriptor.encoding == kEncodingXORByteShuffle)
+    {
+      decoded.values = decode_xor_byte_shuffle_channel(descriptor, raw);
       return decoded;
     }
     throw std::runtime_error("unsupported encoding: " + descriptor.encoding);

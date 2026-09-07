@@ -300,6 +300,15 @@ if(BUILD_TESTING)
 
   # End-to-end TileScheduler -> TileReconstructor round trips at origins that
   # don't sit on the tile lattice -- the case where edge tiles are clipped.
+  # Byte-level conformance against the Go encoder in voxel_channels -- the
+  # encodings a 3D (sparse voxel) archive actually arrives in.
+  ament_add_gtest(test_go_conformance
+    test/test_go_conformance.cpp
+  )
+  if(TARGET test_go_conformance)
+    target_link_libraries(test_go_conformance ${PROJECT_NAME})
+  endif()
+
   ament_add_gtest(test_tile_origin_alignment
     test/test_tile_origin_alignment.cpp
   )

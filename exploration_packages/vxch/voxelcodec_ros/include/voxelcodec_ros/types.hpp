@@ -20,6 +20,13 @@ namespace voxelcodec_ros
   inline constexpr char kEncodingDeltaVarint[] = "delta-varint";
   inline constexpr char kEncodingHaarWavelet[] = "haar-wavelet";
   inline constexpr char kEncodingByteShuffle[] = "byte-shuffle";
+  // Contiguous integer runs as (start, length) plain-uvarint pairs. What the
+  // Go encoder selects for z after column sorting: a floor-to-ceiling obstacle
+  // emits z, z+1, z+2, ... within one (x,y) column, so a whole column costs two
+  // varints. Note plain uvarint here, NOT the zigzag used by delta-varint.
+  inline constexpr char kEncodingColumnRun[] = "column-run";
+  // byte-shuffle layout applied to a XOR-with-previous chain.
+  inline constexpr char kEncodingXORByteShuffle[] = "xor-byte-shuffle";
 
   inline constexpr char kCompressionNone[] = "none";
   inline constexpr char kCompressionZstd[] = "zstd";
