@@ -155,6 +155,24 @@ if [[ "${WORLD}" == "mine" ]]; then
   SPAWN_Z="2.0"
 fi
 
+if [[ "${WORLD}" == "office" ]]; then
+  # Matches spawn_presets.yaml's office/default.
+  #
+  # WARNING: check_spawn_points.py measures 0.00 m clearance here -- this point
+  # is not inside anything, but it is flush against table_4 (an
+  # office_cafe_table), so a single-robot run may spawn wedged against it.
+  # Only affects SPAWN_PRESET=default with NUM_ROBOTS=1; the "distributed"
+  # preset is measured clear. Left as-is pending a decision on where to move it.
+  #
+  # Do NOT eyeball a replacement from the floorplan:
+  # ServiceSim fills several rooms (PublicMeetingRoomC, PrivateMeetingRoomB-E,
+  # PrivateOfficeA/B, PrivateBathroomB) with a single solid box collision, so
+  # points that look like open room floor are inside geometry and wedge the robot.
+  SPAWN_X="17.10"
+  SPAWN_Y="5.30"
+  SPAWN_YAW="3.1416"
+fi
+
 if [[ "${WORLD}" == "small_maze" ]]; then
   # smaze2d is included at the world origin with no offset. Its outer walls
   # fully enclose x:[0,24] y:[0,28] (each wall segment is a thin 0.4m-thick

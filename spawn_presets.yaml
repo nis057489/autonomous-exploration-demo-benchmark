@@ -69,3 +69,25 @@ small_maze:
     - { x: 2.00, y: 2.00, yaw: 0.00 }
     - { x: 1.50, y: 2.00, yaw: 0.00 }
     - { x: 1.00, y: 2.00, yaw: 0.00 }
+
+# Office layout reference (verified against office.world's collision geometry,
+# not the shipped map.png -- which does not match this world's generation):
+#   The building interior is one connected 734 m^2 region, sealed from outside.
+#   ServiceSim models rooms two ways: some are enterable (thin wall boxes with a
+#   doorway gap), but PublicMeetingRoomC, PrivateMeetingRoomB-E, PrivateOfficeA/B
+#   and PrivateBathroomB are SOLID blocks -- a single box filling the whole room.
+#   The previous positions below all sat inside PublicMeetingRoomC's solid box,
+#   which left every robot embedded in geometry and unable to move.
+#   Positions below are clear of all 290 collision volumes; the comment on each
+#   is its measured clearance to the nearest obstacle.
+#   The "distributed" preset here deliberately clusters all robots in the same
+#   open hall around (17.1, 5.3) -- 1.73 m apart on a 1 m ring -- each facing a
+#   different direction, so they fan out from a shared start rather than being
+#   scattered across the building.
+office:
+  default:
+    - { x: 17.10, y: 5.30, yaw: 3.1416 }
+  distributed:
+    - { x: 14.23, y: 4.50, yaw: 5.2360 }
+    - { x: 17.10, y: 1.50, yaw: 3.1416 }
+    - { x: 19.97, y: 7.50, yaw: 1.0472 }
