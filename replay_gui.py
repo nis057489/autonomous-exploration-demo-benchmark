@@ -511,9 +511,16 @@ class ReplayGUI(tk.Tk):
             return args
 
         os.makedirs(FIGURES_DIR, exist_ok=True)
+
+        def condition_tag(c, sessions):
+            ts_list = sorted(s["ts"] for s in sessions)
+            span = ts_list[0].strftime("%Y%m%d_%H%M%S")
+            if len(ts_list) > 1:
+                span += f"-{ts_list[-1].strftime('%H%M%S')}"
+            return f"{c}-{span}x{len(ts_list)}"
+
         out_name = "compare_" + "_vs_".join(
-            c + "-" + "+".join(s["ts"].strftime("%Y%m%d_%H%M%S") for s in sessions)
-            for c, sessions in selected.items()
+            condition_tag(c, sessions) for c, sessions in selected.items()
         ) + ".png"
         out_path = os.path.join(FIGURES_DIR, out_name)
 
