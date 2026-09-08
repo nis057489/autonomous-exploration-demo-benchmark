@@ -45,11 +45,13 @@ Check what it would do without launching anything:
 
 import argparse
 import errno
+import glob
 import json
 import os
 import pty
 import re
 import select
+import shlex
 import signal
 import subprocess
 import sys
@@ -61,6 +63,14 @@ REPO = Path(__file__).resolve().parent.parent
 CONF = REPO / "experiment.conf"
 RUNS_DIR = REPO / "experiment_runs"
 SWEEP_DIR = REPO / "logs" / "sweep"
+FIGURES_DIR = REPO / "figures"
+FIGURE_SCRIPT = REPO / "generate_comparison_figure.py"
+
+# Same shape replay_gui.py reads out of a bag's metadata.yaml to learn which
+# robot namespaces it holds. Parsed with a regex rather than a YAML load so
+# this keeps working on the host, which has neither rosbag2_py nor (as
+# replay_gui's own docstring notes) tkinter.
+TOPIC_NAME_RE = re.compile(r"^\s*name:\s*/([A-Za-z0-9_]+)/", re.MULTILINE)
 
 # docker.sh prints this once the image is built and the container is actually
 # starting. Everything before it is build time, which must not count against
@@ -120,6 +130,198 @@ def set_conf_method(path, method):
     if not found:
         raise SystemExit(f"no MAP_TRANSPORT= line found in {path}")
     path.write_text("".join(lines))
+
+
+def map_message_counts(bag_dir):
+    """{topic: message_count} for /<robot>/map topics, straight from
+    metadata.yaml. A run whose /map topics are all empty recorded a stack that
+    never produced a map -- generate_comparison_figure.py warns about exactly
+    this ("no /map or /nav_map messages ... contributes 0 bytes") and silently
+    drags a condition's mean toward zero if it is left in the set."""
+    md = Path(bag_dir) / "metadata.yaml"
+    if not md.is_file():
+        return None
+    text = md.read_text()
+    counts = {}
+    # topics_with_message_count entries pair a name: line with a later
+    # message_count: line; pair them up in document order.
+    entries = re.findall(r"name:\s*(/\S+)|message_count:\s*(\d+)", text)
+    pending = None
+    for name, count in entries:
+        if name:
+            pending = name
+        elif pending is not None:
+            counts[pending] = int(count)
+            pending = None
+    return {t: c for t, c in counts.items() if re.fullmatch(r"/robot\d+/map", t)}
+
+
+def prune_invalid_runs(apply_rename, expected_robots=None):
+    """Report (and optionally delete) run dirs that did not record a usable run.
+
+    Catches both total failures (nothing recorded) and the partial failure this
+    sweep exists to guard against -- one robot never starting, which still
+    leaves the other robots' maps in the bag and so looks superficially fine.
+    """
+    if not RUNS_DIR.is_dir():
+        print("no experiment_runs/ directory")
+        return []
+    dead = []
+    print(f"{'run dir':42s} {'size':>8s}  map messages")
+    for path in sorted(RUNS_DIR.iterdir()):
+        if not path.is_dir() or not RUN_DIR_RE.match(path.name):
+            continue
+        bag = path / "bag"
+        counts = map_message_counts(bag) if bag.is_dir() else None
+        size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+        detail = ("" if not counts else
+                  ", ".join(f"{t.split('/')[1]}={c}" for t, c in sorted(counts.items())))
+        if counts is None:
+            verdict, bad = "no bag/metadata", True
+        elif not counts:
+            verdict, bad = "no /robotN/map topics", True
+        elif all(c == 0 for c in counts.values()):
+            verdict, bad = f"all {len(counts)} map topics empty", True
+        elif any(c == 0 for c in counts.values()):
+            silent = [t.split("/")[1] for t, c in sorted(counts.items()) if c == 0]
+            verdict, bad = f"{detail}  ({', '.join(silent)} never mapped)", True
+        elif expected_robots and len(counts) < expected_robots:
+            missing = expected_robots - len(counts)
+            verdict, bad = f"{detail}  ({missing} robot(s) absent entirely)", True
+        else:
+            verdict, bad = detail, False
+        print(f"  {path.name:40s} {size/1e6:7.1f}M  {verdict}"
+              + ("   <-- DEAD" if bad else ""))
+        if bad:
+            dead.append(path)
+
+    if not dead:
+        print("\nnothing to flag -- every run recorded map data")
+        return []
+    total = sum(sum(f.stat().st_size for f in p.rglob('*') if f.is_file()) for p in dead)
+    print(f"\n{len(dead)} dead run(s), {total/1e6:.1f} MB")
+    if not apply_rename:
+        print("re-run with --prune-invalid --yes to prefix them with "
+              f"'{INVALID_PREFIX}' (nothing is ever deleted)")
+        return dead
+    for path in dead:
+        renamed = _rename_invalid(path, path.name)
+        if renamed:
+            print(f"  renamed -> experiment_runs/{renamed}")
+    return dead
+
+
+def in_container():
+    """Same probe replay_gui.py uses to decide whether it already has ROS."""
+    return Path("/run/.containerenv").exists()
+
+
+def ros_cmd(py_args, distrobox_name):
+    """Wrap a python invocation so rosbag2_py/rclpy are importable.
+
+    Mirrors replay_gui.py's own dispatch: /usr/bin/python3 explicitly (a
+    PATH-shadowing venv in the login shell would otherwise hide the
+    interpreter that actually has rosbag2_py), and a distrobox login shell
+    when we are on the host, because the ROS setup is sourced from .bashrc.d.
+    """
+    cmd = ["/usr/bin/python3"] + [str(a) for a in py_args]
+    if in_container():
+        return cmd
+    return ["distrobox", "enter", distrobox_name, "--", "bash", "-lc",
+            " ".join(shlex.quote(p) for p in cmd)]
+
+
+def robots_in_bag(bag_dir, fallback_count):
+    """Robot namespaces recorded in a bag, from metadata.yaml.
+
+    Simulator bags hold every robot's topics in one file, so the figure script
+    -- which wants one robot=bag_dir pair per robot -- needs all of them
+    pointing at the same bag. Falls back to robot1..N if metadata.yaml is
+    missing, which happens when a recorder is killed before finalising;
+    replay_gui.py handles that case by reindexing a scratch copy, so use it
+    if the fallback looks wrong.
+    """
+    md = Path(bag_dir) / "metadata.yaml"
+    if md.is_file():
+        names = sorted(set(TOPIC_NAME_RE.findall(md.read_text())))
+        robots = [n for n in names if re.fullmatch(r"robot\d+", n)]
+        if robots:
+            return robots
+    return [f"robot{i}" for i in range(1, fallback_count + 1)]
+
+
+def export_summaries(result, args, num_robots):
+    """Cache a valid run's bag-derived series so figures survive bag deletion."""
+    made = []
+    for run_dir in result["run_dirs"]:
+        bag = RUNS_DIR / run_dir / "bag"
+        if not bag.is_dir():
+            continue
+        robots = robots_in_bag(bag, num_robots)
+        out = Path(args.summary_dir) / f"{run_dir}.npz"
+        py = [REPO / "tools" / "export_run_summary.py",
+              "--condition", result["method"], "--out", out, "--bag"]
+        py += [f"{r}={bag}" for r in robots]
+        if args.max_duration is not None:
+            py += ["--max-duration", args.max_duration]
+        print(f"    caching summary -> {rel(out)}", flush=True)
+        proc = subprocess.run(ros_cmd(py, args.distrobox), cwd=str(REPO))
+        if proc.returncode == 0:
+            made.append(rel(out))
+        else:
+            print(f"    WARNING: summary export failed (exit {proc.returncode}); "
+                  "the bag is still on disk, so this can be redone later",
+                  file=sys.stderr)
+    result["summaries"] = made
+    return made
+
+
+def generate_figure(state, args, num_robots):
+    """Build the comparison figure from this sweep's valid runs.
+
+    Same invocation replay_gui.py assembles -- one --<condition> occurrence per
+    run, each listing every robot=bag_dir -- but the runs are chosen from the
+    sweep's own validity record instead of being picked by hand in the GUI.
+    """
+    by_method = {}
+    for r in state["results"]:
+        if r["valid"] and not r.get("dry_run"):
+            by_method.setdefault(r["method"], []).extend(r["run_dirs"])
+    by_method = {m: dirs for m, dirs in by_method.items() if dirs}
+
+    if len(by_method) < 2:
+        print("\n  skipping --figure: generate_comparison_figure.py needs at least "
+              f"2 conditions with valid runs (have {sorted(by_method) or 'none'}).")
+        return None
+
+    py = [FIGURE_SCRIPT]
+    for method, dirs in by_method.items():
+        for run_dir in dirs:
+            bag = RUNS_DIR / run_dir / "bag"
+            robots = robots_in_bag(bag, num_robots)
+            py += [f"--{method}"] + [f"{r}={bag}" for r in robots]
+
+    out = args.figure_out or (
+        FIGURES_DIR / f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    py += ["--out", out]
+    if args.max_duration is not None:
+        py += ["--max-duration", args.max_duration]
+    if args.separate_figures:
+        py += ["--separate-figures"]
+    if args.table:
+        py += ["--table", args.table]
+    if args.table_file:
+        py += ["--table-file", args.table_file]
+
+    counts = ", ".join(f"{m}x{len(d)}" for m, d in by_method.items())
+    print(f"\n  generating figure from valid runs ({counts})...", flush=True)
+    proc = subprocess.run(ros_cmd(py, args.distrobox), cwd=str(REPO))
+    if proc.returncode != 0:
+        print(f"  figure generation failed (exit {proc.returncode})", file=sys.stderr)
+        return None
+    print(f"  figure: {rel(out)}")
+    return out
 
 
 class RunAborted(Exception):
@@ -388,23 +590,79 @@ def _finish(run, result, args, before):
     force_cleanup_container(args.container_name, args.dry_run)
     result["run_dirs"] = new_run_dirs(before)
 
-    # Mark a failed run's bag directory so it is obvious later which output
-    # came from a run that should not be analysed. The directory is left in
-    # place and NOT renamed -- generate_comparison_figure.py is given bag
-    # paths explicitly, so a stray marker file cannot confuse it, whereas
-    # renaming could break anything that parses the timestamp_condition_world
-    # naming convention.
+    # A discarded run's bag is not analysable, but it is still evidence about
+    # why the run failed -- so it is never deleted, only renamed with an
+    # "invalid_" prefix. That declutters experiment_runs/ (and drops the run
+    # out of replay_gui.py's picker, whose RUN_DIR_RE only matches the
+    # timestamp_condition_world convention) while staying fully reversible.
+    #
+    # The rename is deliberately narrow: only directories this attempt created
+    # (diffed against a snapshot taken immediately before launch), whose names
+    # match that convention, sitting directly under experiment_runs/.
     if not result["valid"]:
+        result["renamed_dirs"], result["kept_dirs"] = [], []
         for name in result["run_dirs"]:
-            marker = RUNS_DIR / name / "INVALID_RUN.txt"
-            try:
-                marker.write_text(
-                    "This run was discarded by tools/run_experiment_sweep.py.\n"
-                    f"Reason: {result.get('reason')}\n"
-                    f"Log: {result.get('log')}\n")
-            except OSError:
-                pass
+            target = RUNS_DIR / name
+            _mark_invalid(target, result)
+            if args.no_rename_invalid:
+                result["kept_dirs"].append(name)
+                continue
+            renamed = _rename_invalid(target, name)
+            if renamed:
+                result["renamed_dirs"].append(renamed)
+                print(f"    marked invalid run dir -> experiment_runs/{renamed}")
+            else:
+                result["kept_dirs"].append(name)
     return result
+
+
+# timestamp_condition_world, the naming convention launch.sh uses for
+# RECORD_METRICS run dirs (and what replay_gui.py parses).
+RUN_DIR_RE = re.compile(r"^\d{8}_\d{6}_[a-z0-9]+_\w+$")
+INVALID_PREFIX = "invalid_"
+
+
+def _rename_invalid(target, name):
+    """Prefix a run directory with invalid_. Returns the new name, or None.
+
+    Refuses anything that is not a plain run directory sitting directly under
+    experiment_runs/, and never overwrites an existing path.
+    """
+    if not RUN_DIR_RE.match(name):
+        print(f"    not renaming unexpected path {target}", file=sys.stderr)
+        return None
+    try:
+        resolved = target.resolve()
+        if (resolved.parent != RUNS_DIR.resolve() or not resolved.is_dir()
+                or target.is_symlink()):
+            print(f"    not renaming unexpected path {target}", file=sys.stderr)
+            return None
+    except OSError:
+        return None
+
+    new_name = INVALID_PREFIX + name
+    destination = RUNS_DIR / new_name
+    if destination.exists():
+        print(f"    {new_name} already exists -- leaving {name} as-is",
+              file=sys.stderr)
+        return None
+    try:
+        target.rename(destination)
+    except OSError as exc:
+        print(f"    could not rename {target}: {exc}", file=sys.stderr)
+        return None
+    return new_name
+
+
+def _mark_invalid(target, result):
+    """Fallback when a bad run's directory is kept: leave a note saying why."""
+    try:
+        (target / "INVALID_RUN.txt").write_text(
+            "This run was discarded by tools/run_experiment_sweep.py.\n"
+            f"Reason: {result.get('reason')}\n"
+            f"Log: {result.get('log')}\n")
+    except OSError:
+        pass
 
 
 def summarize(state, args):
@@ -419,13 +677,22 @@ def summarize(state, args):
         for r in attempts:
             if not r["valid"]:
                 print(f"      discarded: {r.get('reason')}  ({r.get('log')})")
-    invalid_dirs = [d for r in state["results"] if not r["valid"] for d in r["run_dirs"]]
-    if invalid_dirs:
-        print("\n  bag dirs from discarded runs (marked with INVALID_RUN.txt):")
-        for d in invalid_dirs:
+    renamed = [d for r in state["results"] if not r["valid"]
+               for d in r.get("renamed_dirs", [])]
+    kept = [d for r in state["results"] if not r["valid"]
+            for d in r.get("kept_dirs", [])]
+    if renamed:
+        print(f"\n  {len(renamed)} discarded run dir(s) renamed with the "
+              f"'{INVALID_PREFIX}' prefix:")
+        for d in renamed:
+            print(f"      experiment_runs/{d}")
+    if kept:
+        print("\n  bag dirs from discarded runs, kept and marked with INVALID_RUN.txt:")
+        for d in kept:
             print(f"      experiment_runs/{d}")
 
     manifest = SWEEP_DIR / "valid_runs.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(json.dumps(
         {m: [d for r in good[m] for d in r["run_dirs"]] for m in args.methods}, indent=2))
     print(f"\n  valid-run manifest: {rel(manifest)}")
@@ -472,9 +739,9 @@ def main():
                         "(default 3600; the first run may build the image)")
     p.add_argument("--stop-grace", type=float, default=90.0,
                    help="seconds to wait after Ctrl+C before escalating (default 90)")
-    p.add_argument("--max-attempts", type=int, default=3,
+    p.add_argument("--max-attempts", type=int, default=10,
                    help="consecutive failed attempts per method before giving up "
-                        "on it (default 3)")
+                        "on it (default 10)")
     p.add_argument("--max-hours", type=float, default=None,
                    help="stop starting new runs after this many hours")
     p.add_argument("--container-name", default=os.environ.get(
@@ -484,6 +751,43 @@ def main():
                    help="continue from an existing state file instead of starting over")
     p.add_argument("--echo", action="store_true",
                    help="mirror container output to this terminal (always logged to file)")
+    p.add_argument("--prune-invalid", action="store_true",
+                   help="scan experiment_runs/ for runs that recorded no map "
+                        "data and report them (add --yes to prefix them with "
+                        "'invalid_'); never deletes anything")
+    p.add_argument("--yes", action="store_true",
+                   help="with --prune-invalid, apply the rename instead of "
+                        "just reporting")
+    p.add_argument("--no-rename-invalid", action="store_true",
+                   help="leave a discarded run's directory name alone (it is "
+                        "still marked with INVALID_RUN.txt)")
+    p.add_argument("--summary", action="store_true",
+                   help="after each valid run, cache its bag-derived series to "
+                        "--summary-dir via tools/export_run_summary.py, so the "
+                        "figures can be rebuilt after the bags are deleted "
+                        "(~0.3 MB per run vs ~50 MB of bag)")
+    p.add_argument("--summary-dir", type=Path, default=REPO / "summaries")
+    p.add_argument("--figure", action="store_true",
+                   help="generate the comparison figure from this sweep's valid "
+                        "runs when it finishes (the same generate_comparison_"
+                        "figure.py call replay_gui.py builds, but with the runs "
+                        "chosen from the sweep's own validity record)")
+    p.add_argument("--figure-out", type=Path, default=None,
+                   help="figure path (default figures/sweep_<timestamp>.png)")
+    p.add_argument("--table", nargs="?", const="markdown",
+                   choices=("text", "markdown", "csv"),
+                   help="also print a per-condition summary table (forwarded)")
+    p.add_argument("--table-file", type=Path, default=None)
+    p.add_argument("--separate-figures", action="store_true")
+    p.add_argument("--max-duration", type=float, default=None,
+                   help="clip each bag to this many seconds for the summary/figure. "
+                        "Note bags start recording at container launch while the run "
+                        "window starts once every robot is exploring, so this is not "
+                        "the same as --duration.")
+    p.add_argument("--distrobox", default="jazzy_env",
+                   help="distrobox holding rosbag2_py/rclpy (default jazzy_env)")
+    p.add_argument("--figure-only", action="store_true",
+                   help="skip the runs; just build summaries/figure from --state")
     p.add_argument("--robot", default=None,
                    help="ROBOT model passed to docker.sh (default: docker.sh's own "
                         "default, mogi_bot). Validated against the URDF list below.")
@@ -515,7 +819,10 @@ def main():
 
     SWEEP_DIR.mkdir(parents=True, exist_ok=True)
     state = {"results": []}
-    if args.resume and args.state.exists():
+    # --figure-only exists to work on an earlier sweep's runs, so it implies
+    # loading that sweep's state; requiring --resume alongside it just produces
+    # a confusing "0 valid runs" report.
+    if (args.resume or args.figure_only) and args.state.exists():
         state = json.loads(args.state.read_text())
         print(f"resuming from {rel(args.state)} "
               f"({len(state['results'])} attempts already recorded)")
@@ -524,6 +831,11 @@ def main():
         return sum(1 for r in state["results"] if r["method"] == m and r["valid"])
 
     def save():
+        # logs/ is gitignored and routinely deleted, and --state may point
+        # anywhere, so never assume the directory is already there -- this
+        # ran in a finally block and turned an unrelated error into a
+        # confusing FileNotFoundError.
+        args.state.parent.mkdir(parents=True, exist_ok=True)
         args.state.write_text(json.dumps(state, indent=2))
 
     print(f"world={args.world}  methods={args.methods}  robots={num_robots}")
@@ -532,6 +844,20 @@ def main():
     est = (args.duration + 120 + args.cooldown) * len(args.methods)
     print(f"rough estimate: {timedelta(seconds=int(est * args.min_runs))} for the "
           f"minimum, {timedelta(seconds=int(est * args.target_runs))} for the target")
+
+    if args.prune_invalid:
+        prune_invalid_runs(apply_rename=args.yes, expected_robots=num_robots)
+        return
+
+    if args.figure_only:
+        if args.summary:
+            for r in state["results"]:
+                if r["valid"] and not r.get("dry_run"):
+                    export_summaries(r, args, num_robots)
+            save()
+        summarize(state, args)
+        generate_figure(state, args, num_robots)
+        return
 
     deadline = time.monotonic() + args.max_hours * 3600 if args.max_hours else None
     give_up = set()
@@ -559,6 +885,11 @@ def main():
                 if result["valid"]:
                     consecutive_failures[method] = 0
                     print(f"    VALID  ({valid_count(method)}/{goal} for {method})")
+                    if args.summary and not args.dry_run:
+                        # Cache now rather than at the end: an interrupted sweep
+                        # still leaves usable data for the runs it completed.
+                        export_summaries(result, args, num_robots)
+                        save()
                 else:
                     consecutive_failures[method] += 1
                     print(f"    INVALID: {result['reason']}")
@@ -578,6 +909,8 @@ def main():
             print(f"restored MAP_TRANSPORT={original_method} in experiment.conf")
         save()
         summarize(state, args)
+        if args.figure and not args.dry_run:
+            generate_figure(state, args, num_robots)
 
 
 if __name__ == "__main__":
