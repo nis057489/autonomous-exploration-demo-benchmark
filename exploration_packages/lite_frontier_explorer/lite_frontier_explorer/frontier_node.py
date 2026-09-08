@@ -96,6 +96,28 @@ class LiteFrontierExplorer(Node):
         # in-flight goal and switch to the new one instead of riding out the
         # stale goal until it succeeds/aborts.
         self.declare_parameter('goal_preempt_distance_m', 1.0)
+        # Give up on an in-flight goal the robot is making no headway toward.
+        #
+        # Without this the explorer sends a goal, sets _goal_active, and then
+        # does nothing but wait for nav2's result -- the preempt path above
+        # only fires when a *different* frontier appears >= goal_preempt_
+        # distance_m away, and when the robot is wedged the closest frontier is
+        # usually still the one it is wedged against (hysteresis_bonus_m biases
+        # toward it further). So a robot that jams on the curved reception desk
+        # or in a doorway rides out nav2's full BT recovery chain -- progress
+        # checker, then up to 6 retries of clear-costmap / spin / back-up /
+        # wait -- which is where the observed one-to-several-minute stalls come
+        # from. nav2 does eventually recover; it is just far slower than simply
+        # abandoning that frontier and driving somewhere else.
+        #
+        # Measured on displacement, not wall clock, so a legitimately long
+        # drive across the building never trips it: any movement beyond the
+        # epsilon resets the timer. On timeout the goal is cancelled, and
+        # because _preempting stays False, _on_result() blacklists it -- so the
+        # next tick picks a genuinely different frontier instead of re-sending
+        # the same one.
+        self.declare_parameter('goal_stuck_timeout_s', 12.0)
+        self.declare_parameter('goal_stuck_epsilon_m', 0.15)
         self.declare_parameter('navigate_to_pose_action_name', 'navigate_to_pose')
         self.declare_parameter('frontier_marker_topic', 'explore/frontiers')
         self.declare_parameter('frontier_marker_scale', 0.15)
@@ -119,6 +141,8 @@ class LiteFrontierExplorer(Node):
         self._turn_penalty_m = self.get_parameter('turn_penalty_m').value
         self._hysteresis_bonus_m = self.get_parameter('hysteresis_bonus_m').value
         self._goal_preempt_distance_m = self.get_parameter('goal_preempt_distance_m').value
+        self._goal_stuck_timeout_s = self.get_parameter('goal_stuck_timeout_s').value
+        self._goal_stuck_epsilon_m = self.get_parameter('goal_stuck_epsilon_m').value
         replan_period_s = self.get_parameter('replan_period_s').value
         action_name = self.get_parameter('navigate_to_pose_action_name').value
         self._marker_scale = self.get_parameter('frontier_marker_scale').value
@@ -135,6 +159,10 @@ class LiteFrontierExplorer(Node):
         self._pending_goal_xy = None
         self._blacklisted_goals = []
         self._last_goal_direction = None  # (dx, dy) of the most recently sent goal
+        # No-progress tracking for the active goal (see goal_stuck_timeout_s).
+        self._progress_ref_xy = None      # last pose we counted as progress
+        self._progress_ref_time = None    # when we counted it
+        self._abandoning_stuck = False    # cancel already requested this goal
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -252,6 +280,36 @@ class LiteFrontierExplorer(Node):
         self._publish_frontier_markers(cluster_xy, cluster_status, goal)
 
         if self._goal_active:
+            # Abandon a goal the robot is not actually getting anywhere with,
+            # rather than waiting out nav2's full recovery chain.
+            if (self._goal_stuck_timeout_s > 0.0 and not self._preempting
+                    and not self._abandoning_stuck):
+                now = self.get_clock().now()
+                if self._progress_ref_xy is None or self._progress_ref_time is None:
+                    self._progress_ref_xy = (robot_pose[0], robot_pose[1])
+                    self._progress_ref_time = now
+                elif math.hypot(robot_pose[0] - self._progress_ref_xy[0],
+                                robot_pose[1] - self._progress_ref_xy[1]) \
+                        >= self._goal_stuck_epsilon_m:
+                    # Moved far enough to count as headway -- reset the clock.
+                    self._progress_ref_xy = (robot_pose[0], robot_pose[1])
+                    self._progress_ref_time = now
+                else:
+                    stalled_s = (now - self._progress_ref_time).nanoseconds / 1e9
+                    if stalled_s >= self._goal_stuck_timeout_s:
+                        goal_desc = (
+                            f"({self._pending_goal_xy[0]:.2f}, {self._pending_goal_xy[1]:.2f})"
+                            if self._pending_goal_xy is not None else "(unknown)")
+                        self.get_logger().warn(
+                            f"No progress toward goal {goal_desc} for {stalled_s:.1f}s "
+                            f"(moved < {self._goal_stuck_epsilon_m}m) -- abandoning and "
+                            "blacklisting it instead of waiting out nav2 recovery.")
+                        # _preempting stays False so _on_result() blacklists it.
+                        self._abandoning_stuck = True
+                        if self._goal_handle is not None:
+                            self._goal_handle.cancel_goal_async()
+                        return
+
             # Replanning may have found a materially better/closer frontier
             # than the one currently being driven to -- preempt the stale
             # goal instead of riding it out to success/abort. Without this,
@@ -308,6 +366,10 @@ class LiteFrontierExplorer(Node):
         self._goal_handle = None
         self._preempting = False
         self._pending_goal_xy = (goal_x, goal_y)
+        # Fresh goal -- restart no-progress tracking.
+        self._progress_ref_xy = None
+        self._progress_ref_time = None
+        self._abandoning_stuck = False
         send_future = self._nav_client.send_goal_async(goal_msg)
         send_future.add_done_callback(self._on_goal_response)
 
@@ -409,11 +471,15 @@ class LiteFrontierExplorer(Node):
             self._blacklist_pending_goal()
             self._goal_active = False
             self._preempting = False
+            self._abandoning_stuck = False
             return
         self._goal_handle = goal_handle
-        # A preemption request may have arrived between send and accept;
-        # honor it now that we finally have a handle to cancel.
-        if self._preempting:
+        # A preemption (or stuck-abandon) request may have arrived between
+        # send and accept; honor it now that we finally have a handle to
+        # cancel. Without the _abandoning_stuck arm here, a goal that stalled
+        # before nav2 accepted it would never be cancelled and _goal_active
+        # would stay set forever, wedging the explorer itself.
+        if self._preempting or self._abandoning_stuck:
             goal_handle.cancel_goal_async()
         goal_handle.get_result_async().add_done_callback(self._on_result)
 
@@ -432,6 +498,9 @@ class LiteFrontierExplorer(Node):
         self._goal_active = False
         self._goal_handle = None
         self._preempting = False
+        self._abandoning_stuck = False
+        self._progress_ref_xy = None
+        self._progress_ref_time = None
 
     def _blacklist_pending_goal(self):
         if self._pending_goal_xy is not None:

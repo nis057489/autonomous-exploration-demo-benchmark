@@ -55,6 +55,11 @@ _LITE_PARAM_KEYS = (
     "min_frontier_distance_m",
     "occ_threshold",
     "replan_period_s",
+    # Without these two in the allowlist the node falls back to its declared
+    # defaults and the values in config.yaml are silently ignored -- this tuple
+    # is a filter, not documentation.
+    "goal_stuck_timeout_s",
+    "goal_stuck_epsilon_m",
     "navigate_to_pose_action_name",
     "frontier_marker_scale",
 )

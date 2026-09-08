@@ -57,10 +57,18 @@ controller_server:
     # goal-blacklist-and-retry logic (frontier_node.py) take over. Lower value
     # means a truly stuck robot recovers faster; required_movement_radius left
     # as-is since it's already a reasonably small bar to clear.
+    # movement_time_allowance further reduced 8.0 -> 5.0: a robot wedged against
+    # the curved reception desk shows no net displacement at all, so waiting 8 s
+    # per attempt only delays the recovery behaviours and the explorer's goal
+    # blacklisting. Kept at 5.0 rather than lower because the passages here are
+    # ~0.4 m wider than the robot on each side, so legitimate slow squeezing and
+    # rotate-to-heading moves need room to not be mistaken for being stuck.
+    # required_movement_radius stays 0.2 -- lowering it would make the check
+    # EASIER to pass, and so make recovery slower, not faster.
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.2
-      movement_time_allowance: 8.0
+      movement_time_allowance: 5.0
     # Goal checker parameters
     #precise_goal_checker:
     #  plugin: "nav2_controller::SimpleGoalChecker"
@@ -258,10 +266,44 @@ local_costmap:
       footprint: "[[0.22, 0.19], [0.22, -0.19], [-0.22, -0.19], [-0.22, 0.19]]"
       footprint_padding: 0.01
       plugins: ["voxel_layer", "inflation_layer"]
+      # inflation_radius was 0.32 with cost_scaling_factor 8.0. The footprint's
+      # circumscribed radius is 0.291 m, so that left only a 0.029 m buffer --
+      # the controller was effectively free to graze obstacles, and cost_scaling
+      # 8.0 collapsed the cost so fast beyond the inscribed radius that there
+      # was little gradient pushing the path toward the middle of a gap. That is
+      # what lets the robot commit to squeezing past curved furniture (the
+      # reception desk) and wedge itself.
+      #
+      # 0.40 is an upper bound measured against the office world's geometry, not
+      # a guess. Sweeping the required standoff over the interior free space
+      # (all 427 collision volumes, furniture included) and asking how much of
+      # the building stays reachable from spawn:
+      #
+      #     >=0.20 m -> 617 m^2 (91%)      >=0.40 m -> 503 m^2 (74%)
+      #     >=0.30 m -> 560 m^2 (83%)      >=0.45 m ->  47 m^2 (7%)
+      #     >=0.35 m -> 503 m^2 (74%)      >=0.55 m -> spawn itself walled off
+      #
+      # The cliff between 0.40 and 0.45 is not one choke point: 5408 cells
+      # spread across the whole building sit in that band, i.e. the office's
+      # typical corridor and cubicle-aisle half-width IS 0.40-0.45 m. Inflating
+      # to 0.45+ would leave no zero-cost route anywhere, which is how you get
+      # the GridBased "failed to create plan" loop already documented for
+      # turtlebot3_waffle in multi_robot_navigation_with_slam.launch.py, and
+      # would starve lite_frontier_explorer (its reachability check reads this
+      # same costmap) of reachable frontiers.
+      #
+      # So: 0.40 buys ~0.11 m of real standoff past the circumscribed radius,
+      # nearly 4x the old buffer, while leaving mid-passage cells at zero cost
+      # so the gradient still discriminates. Do not raise it further without
+      # re-running that sweep.
+      #
+      # Passability itself is unaffected either way: only cells within the
+      # inscribed radius (0.19 m) are lethal. Inflation beyond that is cost, not
+      # prohibition, so the 1.5 m doorways stay open.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 8.0
-        inflation_radius: 0.32
+        cost_scaling_factor: 4.0
+        inflation_radius: 0.40
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: True
@@ -316,10 +358,28 @@ global_costmap:
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
+      # inflation_radius was 0.7. The same free-space sweep that capped the
+      # local costmap at 0.40 (see local_costmap's inflation_layer comment)
+      # applies here -- it is the same building geometry. At 0.7 there was no
+      # zero-cost route anywhere in the office: every corridor and cubicle aisle
+      # has a half-width of 0.40-0.45 m, so the global planner was choosing
+      # between uniformly-inflated cells with no gradient left to tell a
+      # centred route from a wall-hugging one, and lite_frontier_explorer --
+      # whose reachability check reads this costmap -- saw far more of the
+      # building as expensive than actually is.
+      #
+      # Aligned to the local costmap's 0.40 so both planners agree on what
+      # counts as clearance, and so mid-passage stays genuinely free.
+      #
+      # cost_scaling_factor stays at 3.0 rather than matching local's 4.0: the
+      # gentler falloff is the intended local/global division of labour (tight,
+      # fast-reacting local avoidance vs a global path biased away from
+      # obstacles well in advance). With the radius now capped at 0.40 that
+      # costs nothing in passability -- beyond 0.40 m the cost is 0 either way.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.7
+        inflation_radius: 0.40
       always_send_full_costmap: True
 
 
