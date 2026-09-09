@@ -37373,19 +37373,7 @@
     <uri>model://wastebasket</uri>
   </include>
 
-  <include>
-    <pose>
-      0.0
-      16.9
-      0
-      0
-      0
-      3.141592653589793
-    </pose>
-    <uri>model://reception_desk</uri>
-  </include>
-
-</model>
+  </model>
 
 
     <!-- Front entrance -->
@@ -37429,18 +37417,6 @@
       1.5707963267948966
     </pose>
     <uri>model://coffee_maker</uri>
-  </include>
-
-  <include>
-    <pose>
-      -2.9
-      4.13
-      0
-      0
-      0
-      0
-    </pose>
-    <uri>model://reception_desk</uri>
   </include>
 
   <include>
@@ -37497,5 +37473,5 @@
       </camera>
     </gui>
      
-    </world>
+    <model name="deadend_blocker_north"><static>true</static><pose>-13.0 16.5 1.0 0 0 0</pose><link name="link"><collision name="collision"><geometry><box><size>2.0 2.0 2.0</size></box></geometry></collision><visual name="visual"><geometry><box><size>2.0 2.0 2.0</size></box></geometry></visual></link></model><model name="deadend_blocker_mid"><static>true</static><pose>-13.0 12.0 1.0 0 0 0</pose><link name="link"><collision name="collision"><geometry><box><size>2.0 2.0 2.0</size></box></geometry></collision><visual name="visual"><geometry><box><size>2.0 2.0 2.0</size></box></geometry></visual></link></model><model name="deadend_blocker_south"><static>true</static><pose>-13.0 7.5 1.0 0 0 0</pose><link name="link"><collision name="collision"><geometry><box><size>2.0 2.0 2.0</size></box></geometry></collision><visual name="visual"><geometry><box><size>2.0 2.0 2.0</size></box></geometry></visual></link></model><model name="deadend_blocker_west_33"><static>true</static><pose>-22.0 16.5 1.0 0 0 0</pose><link name="link"><collision name="collision"><geometry><box><size>2.0 2.0 2.0</size></box></geometry></collision><visual name="visual"><geometry><box><size>2.0 2.0 2.0</size></box></geometry></visual></link></model><model name="deadend_blocker_west_32"><static>true</static><pose>-22.0 12.0 1.0 0 0 0</pose><link name="link"><collision name="collision"><geometry><box><size>2.0 2.0 2.0</size></box></geometry></collision><visual name="visual"><geometry><box><size>2.0 2.0 2.0</size></box></geometry></visual></link></model><model name="deadend_blocker_west_31"><static>true</static><pose>-22.0 7.5 1.0 0 0 0</pose><link name="link"><collision name="collision"><geometry><box><size>2.0 2.0 2.0</size></box></geometry></collision><visual name="visual"><geometry><box><size>2.0 2.0 2.0</size></box></geometry></visual></link></model><model name="deadend_blocker_gap_south_mid"><static>true</static><pose>-13.0 9.75 1.0 0 0 0</pose><link name="link"><collision name="collision"><geometry><box><size>2.0 2.5 2.0</size></box></geometry></collision><visual name="visual"><geometry><box><size>2.0 2.5 2.0</size></box></geometry></visual></link></model><model name="deadend_blocker_gap_mid_north"><static>true</static><pose>-13.0 14.25 1.0 0 0 0</pose><link name="link"><collision name="collision"><geometry><box><size>2.0 2.5 2.0</size></box></geometry></collision><visual name="visual"><geometry><box><size>2.0 2.5 2.0</size></box></geometry></visual></link></model></world>
 </sdf>
