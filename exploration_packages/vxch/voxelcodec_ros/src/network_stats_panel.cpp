@@ -36,6 +36,33 @@ NetworkStatsPanel::NetworkStatsPanel(QWidget * parent)
   header->setStyleSheet("font-weight: bold; font-size: 13px;");
   root->addWidget(header);
 
+  // Global bandwidth control. Sits above the per-link cards because changing
+  // every link at once is the usual intent -- a run's links are configured
+  // identically and what's being explored is the team's radio conditions, not
+  // one pair's.
+  auto * all_row = new QHBoxLayout();
+  all_row->addWidget(new QLabel("Bandwidth, all links:"));
+  all_bandwidth_spin_ = new QDoubleSpinBox();
+  // 0 means unlimited (ddil_proxy_node's own convention for bandwidth_kbps),
+  // so it has to be reachable from the UI too. Upper bound is well past any
+  // DDIL-interesting rate -- the point of the control is exploring the
+  // constrained end, and "effectively unthrottled" is what 0 is for.
+  all_bandwidth_spin_->setRange(0.0, 100000.0);
+  all_bandwidth_spin_->setDecimals(0);
+  all_bandwidth_spin_->setSingleStep(5.0);
+  all_bandwidth_spin_->setValue(50.0);
+  all_bandwidth_spin_->setSuffix(" kbps");
+  all_bandwidth_spin_->setSpecialValueText("unlimited");
+  all_row->addWidget(all_bandwidth_spin_);
+  all_bandwidth_apply_ = new QPushButton("Apply to all");
+  all_row->addWidget(all_bandwidth_apply_);
+  apply_status_ = new QLabel();
+  apply_status_->setStyleSheet("color: gray;");
+  all_row->addWidget(apply_status_, /*stretch=*/1);
+  root->addLayout(all_row);
+
+  connect(all_bandwidth_apply_, &QPushButton::clicked, this, &NetworkStatsPanel::onApplyAll);
+
   empty_label_ = new QLabel(
     "No active DDIL links found yet. Waiting for ddil_proxy_node "
     "instances to appear (scanning every few seconds)...");
@@ -138,6 +165,24 @@ void NetworkStatsPanel::ensureLinkCard(const std::string & topic, const std::str
   info_row->addStretch();
   box_layout->addLayout(info_row);
 
+  // Per-link bandwidth override, for the asymmetric cases the global control
+  // can't express (e.g. degrading one robot's uplink while the rest stay put).
+  auto * bw_row = new QHBoxLayout();
+  bw_row->addWidget(new QLabel("Bandwidth:"));
+  auto * bandwidth_spin = new QDoubleSpinBox();
+  bandwidth_spin->setRange(0.0, 100000.0);
+  bandwidth_spin->setDecimals(0);
+  bandwidth_spin->setSingleStep(5.0);
+  bandwidth_spin->setSuffix(" kbps");
+  bandwidth_spin->setSpecialValueText("unlimited");
+  bw_row->addWidget(bandwidth_spin);
+  auto * bandwidth_apply = new QPushButton("Set");
+  bw_row->addWidget(bandwidth_apply);
+  auto * bandwidth_note = new QLabel();
+  bandwidth_note->setStyleSheet("color: gray; font-style: italic;");
+  bw_row->addWidget(bandwidth_note, /*stretch=*/1);
+  box_layout->addLayout(bw_row);
+
   auto * rows_layout = new QVBoxLayout();
   rows_layout->setSpacing(2);
   box_layout->addLayout(rows_layout);
@@ -151,7 +196,18 @@ void NetworkStatsPanel::ensureLinkCard(const std::string & topic, const std::str
   card.throughput_label = throughput_label;
   card.totals_label = totals_label;
   card.rows_layout = rows_layout;
+  card.bandwidth_spin = bandwidth_spin;
+  card.bandwidth_apply = bandwidth_apply;
+  card.bandwidth_note = bandwidth_note;
   cards_[topic] = card;
+
+  connect(
+    bandwidth_apply, &QPushButton::clicked, this,
+    [this, topic]() {
+      auto it = cards_.find(topic);
+      if (it == cards_.end()) {return;}
+      applyBandwidth(topic, it->second, it->second.bandwidth_spin->value());
+    });
 }
 
 void NetworkStatsPanel::updateLinkCard(LinkCard & card, const voxelcodec_msgs::msg::DdilStats & msg)
@@ -167,10 +223,42 @@ void NetworkStatsPanel::updateLinkCard(LinkCard & card, const voxelcodec_msgs::m
 
   card.throughput_label->setText(QString("Current: %1").arg(fmtRate(msg.send_rate_bps)));
 
-  card.totals_label->setText(
-    QString("Wants to send: %1 queued · %2 sent total")
-    .arg(fmtBytes(msg.queued_bytes))
-    .arg(fmtBytes(msg.sent_bytes)));
+  // Queued now carries its budget, because "4.0 MB queued" alone reads as a
+  // busy link when it actually means the backlog is unbounded and everything
+  // in it is minutes-to-hours stale. Shed is the honest counterpart: how much
+  // map detail the link could not afford and the queue therefore dropped
+  // (finest band first) rather than accumulating forever.
+  QString totals = QString("Queued: %1").arg(fmtBytes(msg.queued_bytes));
+  if (msg.queue_budget_bytes > 0) {
+    totals += QString(" / %1 budget").arg(fmtBytes(msg.queue_budget_bytes));
+  } else {
+    totals += " (unbounded)";
+  }
+  totals += QString(" · Sent: %1").arg(fmtBytes(msg.sent_bytes));
+  if (msg.msgs_shed > 0) {
+    totals += QString(" · Shed: %1 (%2)")
+      .arg(msg.msgs_shed)
+      .arg(fmtBytes(msg.shed_bytes));
+  }
+  card.totals_label->setText(totals);
+
+  // Seed the spinbox from the link's real configured rate once, then leave it
+  // alone -- otherwise a 5 Hz stats stream would fight the user's typing.
+  if (!card.bandwidth_seeded) {
+    card.bandwidth_seeded = true;
+    card.externally_shaped = msg.externally_shaped;
+    card.bandwidth_spin->setValue(msg.bandwidth_kbps);
+    if (msg.externally_shaped) {
+      // tc netem in a network namespace is doing the real shaping; setting
+      // bandwidth_kbps here would engage this node's token bucket ON TOP of
+      // the kernel's, which is exactly the double-impairment the tc path sets
+      // bandwidth_kbps=0 to avoid. Offering a knob that makes things quietly
+      // wrong is worse than not offering one.
+      card.bandwidth_spin->setEnabled(false);
+      card.bandwidth_apply->setEnabled(false);
+      card.bandwidth_note->setText("shaped by tc netem — change via tc, not RViz");
+    }
+  }
 
   bool added_row = false;
   for (const auto & bs : msg.bands) {
@@ -258,6 +346,70 @@ void NetworkStatsPanel::updateBandRow(BandRow & row, const voxelcodec_msgs::msg:
   }
 
   row.eta_label->setText(fmtEta(bs.eta_sec));
+}
+
+std::string NetworkStatsPanel::nodeNameFromStatsTopic(const std::string & topic)
+{
+  // ddil_proxy_node publishes "~/ddil_stats", which resolves to
+  // "<fully-qualified node name>/ddil_stats" -- so stripping the suffix yields
+  // exactly the name the parameter services live under, namespace included.
+  const std::string suffix = "/ddil_stats";
+  if (topic.size() > suffix.size() &&
+    topic.compare(topic.size() - suffix.size(), suffix.size(), suffix) == 0)
+  {
+    return topic.substr(0, topic.size() - suffix.size());
+  }
+  return topic;
+}
+
+void NetworkStatsPanel::applyBandwidth(
+  const std::string & topic, LinkCard & card, double kbps)
+{
+  if (card.externally_shaped) {
+    return;  // see updateLinkCard -- the knob is disabled for tc-shaped links
+  }
+  auto node = getDisplayContext()->getRosNodeAbstraction().lock()->get_raw_node();
+
+  if (!card.param_client) {
+    card.param_client = std::make_shared<rclcpp::AsyncParametersClient>(
+      node, nodeNameFromStatsTopic(topic));
+  }
+  if (!card.param_client->service_is_ready()) {
+    // Don't block RViz's UI thread waiting on a service that may never come
+    // up (a proxy that has since exited still leaves its topic in the graph
+    // for a while). The user can just press Set again.
+    card.bandwidth_note->setText("parameter service not ready — try again");
+    return;
+  }
+
+  // Fire-and-forget: the result shows up as the link's own reported Capacity
+  // changing on the next stats message, which is a better confirmation than a
+  // dialog would be. The future is discarded deliberately -- blocking on it
+  // here would stall the Qt event loop.
+  card.param_client->set_parameters({rclcpp::Parameter("bandwidth_kbps", kbps)});
+  card.bandwidth_note->setText(
+    kbps > 0.0 ? QString("set → %1 kbps").arg(kbps, 0, 'f', 0) : QString("set → unlimited"));
+}
+
+void NetworkStatsPanel::onApplyAll()
+{
+  const double kbps = all_bandwidth_spin_->value();
+  int applied = 0;
+  int skipped = 0;
+  for (auto & [topic, card] : cards_) {
+    if (card.externally_shaped) {
+      ++skipped;
+      continue;
+    }
+    card.bandwidth_spin->setValue(kbps);
+    applyBandwidth(topic, card, kbps);
+    ++applied;
+  }
+  QString status = QString("applied to %1 link(s)").arg(applied);
+  if (skipped > 0) {
+    status += QString(", %1 tc-shaped skipped").arg(skipped);
+  }
+  apply_status_->setText(status);
 }
 
 QString NetworkStatsPanel::fmtBytes(uint64_t b)

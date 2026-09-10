@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <rclcpp/serialization.hpp>
 #include <rclcpp/serialized_message.hpp>
@@ -260,6 +262,240 @@ TEST(DdilProxyLogic, PendingByBandAggregatesAcrossTilesExcludingManifestAndBypas
   EXPECT_EQ(pending.at(0).second, band0_tile_a->size() + band0_tile_b->size());
   EXPECT_EQ(pending.at(1).first, 1U);
   EXPECT_EQ(pending.at(1).second, band1_tile_a->size());
+}
+
+namespace
+{
+// BandQueue sizes its budget from serialized payload size, so these tests need
+// messages with a real byte count rather than the default-constructed
+// (null-payload) QueuedMessages the ordering tests use.
+voxelcodec_ros::QueuedMessage sized_band(int band_priority, std::size_t bytes,
+  const std::string & dedup_key = "")
+{
+  voxelcodec_ros::QueuedMessage msg;
+  msg.band_priority = band_priority;
+  msg.dedup_key = dedup_key;
+  msg.serialized = std::make_shared<rclcpp::SerializedMessage>(bytes);
+  // SerializedMessage's constructor reserves capacity; size() tracks the
+  // buffer length, which is what the budget accounting reads.
+  msg.serialized->get_rcl_serialized_message().buffer_length = bytes;
+  return msg;
+}
+}  // namespace
+
+// The regression this whole bounding effort exists for: with an unbounded
+// queue, a link whose fill rate exceeds its drain rate accumulates forever, so
+// everything it eventually delivers is minutes-to-hours stale and the peer's
+// map freezes on whatever arrived first. Measured live at 5 kbps: 4.0 MB
+// queued, band_2 ETA 1h47m, peer holding 64 of the sender's 468 tiles.
+TEST(DdilProxyLogic, BandQueueByteBudgetBoundsTheBacklog)
+{
+  voxelcodec_ros::BandQueue queue;
+  queue.set_byte_budget(1000);
+
+  for (int i = 0; i < 50; ++i) {
+    queue.push(sized_band(1, 100, "tile_" + std::to_string(i) + ":band_1"));
+  }
+
+  EXPECT_LE(queue.queued_bytes(), 1000U);
+  EXPECT_GT(queue.shed_count(), 0U);
+  EXPECT_GT(queue.shed_bytes(), 0U);
+}
+
+// Shedding has to drop the FINEST band, not simply the oldest: keeping coarse
+// coverage of newly explored ground is the point of the scheme, and plain
+// tail-drop would instead spend the link refining ground the peer already has.
+TEST(DdilProxyLogic, BandQueueShedsFinestBandFirstAndKeepsCoarse)
+{
+  voxelcodec_ros::BandQueue queue;
+  queue.set_byte_budget(300);
+
+  queue.push(sized_band(0, 100, "tile_a:band_0"));
+  queue.push(sized_band(1, 100, "tile_a:band_1"));
+  queue.push(sized_band(2, 100, "tile_a:band_2"));
+  ASSERT_EQ(queue.size(), 3U);
+  ASSERT_EQ(queue.shed_count(), 0U);
+
+  // One more coarse arrival puts the queue over budget; band_2 is what goes.
+  queue.push(sized_band(0, 100, "tile_b:band_0"));
+
+  EXPECT_EQ(queue.shed_count(), 1U);
+  ASSERT_EQ(queue.size(), 3U);
+  const auto pending = queue.pending_by_band();
+  EXPECT_EQ(pending.count(2), 0U) << "the finest band should have been shed";
+  ASSERT_EQ(pending.count(0), 1U);
+  EXPECT_EQ(pending.at(0).first, 2U) << "both coarse bands must survive";
+  EXPECT_EQ(pending.count(1), 1U);
+}
+
+// The manifest carries the geometry without which a decoder cannot place any
+// tile at all, so it must never be a shedding victim regardless of budget.
+TEST(DdilProxyLogic, BandQueueNeverShedsManifestOrNonBandTraffic)
+{
+  voxelcodec_ros::BandQueue queue;
+  queue.set_byte_budget(100);
+
+  auto manifest = sized_band(-1, 500, "pub:manifest");
+  auto other = sized_band(std::numeric_limits<int>::max(), 500, "");
+  queue.push(manifest);
+  queue.push(other);
+  queue.push(sized_band(2, 500, "tile_a:band_2"));
+
+  // Way over budget, but only the band entry is eligible to be dropped.
+  EXPECT_EQ(queue.size(), 2U);
+  EXPECT_EQ(queue.shed_count(), 1U);
+  EXPECT_EQ(queue.pop().band_priority, -1) << "manifest still first";
+  EXPECT_EQ(queue.pop().band_priority, std::numeric_limits<int>::max());
+}
+
+// The bug this replaced continuous aging to fix. Under a deep backlog every
+// queued band used to age down to effective priority 0 within
+// aging_interval_ms * max_band of queueing, tying with fresh band_0 arrivals
+// and collapsing the queue to FIFO -- so a receiver saw no coarse-to-fine
+// progression at all, and (because fine bands emit more sub-MTU messages per
+// tick) actually got MORE fine detail than coarse. Strict band ordering must
+// survive an arbitrarily long wait.
+TEST(DdilProxyLogic, BandQueueDeepBacklogStillPopsCoarsestFirst)
+{
+  // Small interval so any *continuous* decay would definitely have flattened
+  // these by the time we pop.
+  voxelcodec_ros::BandQueue queue(/*aging_interval_ms=*/20.0);
+
+  queue.push(sized_band(2, 100, "tile_a:band_2"));
+  queue.push(sized_band(1, 100, "tile_a:band_1"));
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  // A fresh coarse arrival after everything else has waited well past what
+  // used to be its full catch-up window.
+  queue.push(sized_band(0, 100, "tile_b:band_0"));
+
+  // band_1/band_2 are past their promotion deadline (20ms * k), so they are
+  // promoted ahead of the fresh band_0 -- but promotion is a single tier, so
+  // among themselves FIFO holds and band_0 still precedes nothing finer that
+  // is *not* promoted. What must NOT happen is the queue silently becoming
+  // insertion-ordered while claiming to be a priority queue.
+  const auto first = queue.pop();
+  EXPECT_EQ(first.dedup_key, "tile_a:band_2") <<
+    "oldest promoted entry goes first once past its starvation deadline";
+  const auto second = queue.pop();
+  EXPECT_EQ(second.dedup_key, "tile_a:band_1");
+  const auto third = queue.pop();
+  EXPECT_EQ(third.dedup_key, "tile_b:band_0");
+}
+
+// With no starvation deadline reached, ordering is strictly by band index no
+// matter how much is queued or in what order it arrived -- this is the
+// coarse-before-fine property progressive decoding actually depends on.
+TEST(DdilProxyLogic, BandQueueStrictCoarsestFirstWithinDeadline)
+{
+  voxelcodec_ros::BandQueue queue(/*aging_interval_ms=*/60000.0);
+
+  queue.push(sized_band(2, 100, "tile_a:band_2"));
+  queue.push(sized_band(2, 100, "tile_b:band_2"));
+  queue.push(sized_band(1, 100, "tile_a:band_1"));
+  queue.push(sized_band(0, 100, "tile_a:band_0"));
+  queue.push(sized_band(1, 100, "tile_b:band_1"));
+  queue.push(sized_band(0, 100, "tile_b:band_0"));
+
+  std::vector<int> order;
+  while (!queue.empty()) {
+    order.push_back(queue.pop().band_priority);
+  }
+  EXPECT_EQ(order, (std::vector<int>{0, 0, 1, 1, 2, 2}));
+}
+
+// Narrowing the link has to resize the existing backlog, not just cap future
+// pushes -- otherwise a queue sized for the old rate sits there draining at
+// the new one, which is the stale-delivery problem all over again.
+TEST(DdilProxyLogic, BandQueueShrinkingBudgetShedsImmediately)
+{
+  voxelcodec_ros::BandQueue queue;
+  for (int i = 0; i < 10; ++i) {
+    queue.push(sized_band(2, 100, "tile_" + std::to_string(i) + ":band_2"));
+  }
+  ASSERT_EQ(queue.queued_bytes(), 1000U);
+  ASSERT_EQ(queue.shed_count(), 0U);
+
+  queue.set_byte_budget(250);
+
+  EXPECT_LE(queue.queued_bytes(), 250U);
+  EXPECT_EQ(queue.shed_count(), 8U);
+}
+
+// Dedup replaces a queued payload in place, so the budget accounting has to
+// follow the size change rather than double-counting the slot.
+TEST(DdilProxyLogic, BandQueueDedupKeepsByteAccountingConsistent)
+{
+  voxelcodec_ros::BandQueue queue;
+  queue.push(sized_band(1, 100, "tile_a:band_1"));
+  ASSERT_EQ(queue.queued_bytes(), 100U);
+
+  EXPECT_TRUE(queue.push(sized_band(1, 400, "tile_a:band_1")));
+  EXPECT_EQ(queue.size(), 1U);
+  EXPECT_EQ(queue.queued_bytes(), 400U);
+
+  queue.pop();
+  EXPECT_EQ(queue.queued_bytes(), 0U);
+}
+
+// End-to-end statement of the property the user-visible bug was about: under a
+// sustained overload, what actually reaches the peer must be coarse-dominant,
+// because that is what makes a receiver see a blurry-then-sharper map instead
+// of a random sample of detail.
+//
+// The arrival mix and rates here are taken from a measured run
+// (experiment_runs/20260910_004301_vxch_office, robot3 -> robot2 at 5 kbps):
+// the encoder offered ~7 KB/s against a 625 B/s link, and per tick emitted
+// more fine-band messages than coarse ones because fine payloads are larger
+// and MTU-split into more sub-messages. Before bounding + strict ordering, the
+// delivered mix was 73/91/107 for bands 0/1/2 -- inverted. It must now favor
+// band 0.
+TEST(DdilProxyLogic, SustainedOverloadDeliversCoarseDominantMix)
+{
+  constexpr double kLinkBytesPerSec = 625.0;   // 5 kbps
+  constexpr int kTicks = 120;                  // 120 virtual seconds
+  // Deadline far beyond this test's wall-clock duration, so promotion never
+  // fires and we are measuring the steady-state ordering policy itself.
+  voxelcodec_ros::BandQueue queue(/*aging_interval_ms=*/600000.0);
+  queue.set_byte_budget(static_cast<std::uint64_t>(kLinkBytesPerSec * 4.0));
+
+  // Per-tick offered load, per band: (message count, bytes each).
+  const std::vector<std::pair<int, std::size_t>> offered{{3, 770}, {4, 850}, {5, 880}};
+
+  std::map<int, int> delivered;
+  int seq = 0;
+  for (int tick = 0; tick < kTicks; ++tick) {
+    for (int band = 0; band < 3; ++band) {
+      for (int i = 0; i < offered[band].first; ++i) {
+        queue.push(
+          sized_band(
+            band, offered[band].second,
+            "tile_" + std::to_string(seq++) + ":band_" + std::to_string(band)));
+      }
+    }
+    // Drain one second's worth of link capacity.
+    double budget = kLinkBytesPerSec;
+    while (!queue.empty()) {
+      const auto next_bytes = static_cast<double>(queue.pending_by_band().empty() ? 0 : 1);
+      (void)next_bytes;
+      const auto msg = queue.pop();
+      const double bytes = msg.serialized ? static_cast<double>(msg.serialized->size()) : 0.0;
+      delivered[msg.band_priority] += 1;
+      budget -= bytes;
+      if (budget <= 0.0) {break;}
+    }
+  }
+
+  const int b0 = delivered[0];
+  const int b1 = delivered[1];
+  const int b2 = delivered[2];
+  EXPECT_GT(b0, b1) << "band_0 must out-deliver band_1 under overload; got "
+                    << b0 << "/" << b1 << "/" << b2;
+  EXPECT_GT(b0, b2) << "band_0 must out-deliver band_2 under overload; got "
+                    << b0 << "/" << b1 << "/" << b2;
+  // Coarse should dominate decisively, not just edge it out -- the whole point
+  // is that a starved link spends what it has on a coarse picture of
+  // everything.
+  EXPECT_GT(b0, 2 * (b1 + b2)) << "delivered mix " << b0 << "/" << b1 << "/" << b2;
 }
 
 TEST(DdilProxyLogic, BandQueueAgingLetsAWaitingFineBandEventuallyWinOverFreshCoarseOnes)

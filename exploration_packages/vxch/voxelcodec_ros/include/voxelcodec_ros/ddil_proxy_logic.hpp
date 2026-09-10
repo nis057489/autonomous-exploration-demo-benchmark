@@ -228,39 +228,72 @@ struct QueuedMessage
   EpochRole epoch_role{EpochRole::kNone};
 };
 
-// Priority queue with latest-wins deduplication for band messages, and wait-time
-// aging so a sustained stream of fresh low-index (coarse) arrivals can't starve
-// out higher-index (fine detail) messages indefinitely.
+// Priority queue with latest-wins deduplication for band messages, a bounded
+// backlog that sheds finest-band content first when the link can't keep up,
+// and an absolute starvation deadline so a waiting fine band can't be held
+// behind fresh coarse arrivals forever.
 //
 // A pure strict-priority ordering (pop always returns the lowest band_priority
-// queued, full stop) looks right in isolation, but under real bandwidth pressure
-// it's a bug: if content anywhere in the map keeps nudging some tile's band_0,
-// every fresh band_0 arrival jumps the (insertion_seq-ordered) queue ahead of
-// whatever higher-index band has been sitting there waiting -- and there is no
-// mechanism that ever lets the waiting one catch up. Observed for real: one bag
-// capture recorded 6925 band messages sent over a whole run, every single one
-// band_0, zero of band_1..5 ever delivered -- not a fluke, a guaranteed outcome
-// of unbounded strict priority whenever coarse content keeps regenerating faster
-// than the link drains the queue.
+// queued, full stop) looks right in isolation, but with an UNBOUNDED queue it's
+// a bug: if content anywhere in the map keeps nudging some tile's band_0, every
+// fresh band_0 arrival jumps ahead of whatever higher-index band has been
+// sitting there waiting, and nothing ever lets the waiting one catch up.
+// Observed for real: one bag capture recorded 6925 band messages sent over a
+// whole run, every single one band_0, zero of band_1..5 ever delivered.
 //
-// Aging fixes this by improving a message's *effective* priority the longer it
-// waits: every aging_interval_ms of wait time knocks 1 off its band_priority,
-// floored at 0 (a band can catch up to band_0's priority but never leapfrog the
-// manifest, which is exempt from aging -- see effective_priority below). This
-// bounds worst-case wait instead of allowing indefinite starvation, at the cost
-// of pop() being O(n) in queue depth (an explicit scan, since the effective
-// order changes continuously with wall-clock time and can't be precomputed into
-// a static sorted key at push time). Fine at this scale: queue depth is bounded
-// by distinct (tile, band) slots currently dirty, not by message rate.
+// The first fix for that was *continuous* aging: every aging_interval_ms of
+// wait knocked 1 off a message's effective band_priority, floored at 0. That
+// cured the starvation and introduced a worse bug, because it made the
+// priority ordering itself evaporate under exactly the conditions it existed
+// for. With haar_levels=2 (bands 0..2) and the 250ms default, any message that
+// had waited 750ms was floored to effective priority 0 -- so once the backlog
+// was deeper than 750ms of drain time, EVERY queued band tied at 0 and pop()'s
+// tie-break (insertion order) turned the whole queue into plain FIFO.
+// Measured on a live 5 kbps link with a 4 MB backlog: bands 0/1/2 sent
+// 73/91/107 messages respectively -- i.e. the scarce link spent MORE on fine
+// detail than on coarse, the exact inverse of progressive transmission, and no
+// receiver ever saw a coarse-then-refine progression. (The bias toward fine
+// bands is not chance: fine bands carry larger payloads, so MTU-splitting in
+// occupancy_grid_vxch_node emits more sub-MTU messages per band per tick for
+// them, and FIFO hands out link share per message.)
+//
+// So the ordering and the backlog have to be fixed together, and in this order:
+//
+//   1. Bound the backlog (set_byte_budget). A queue capped at a few seconds of
+//      the link's own capacity is what actually prevents starvation now --
+//      nothing can wait longer than the budget takes to drain. Over budget,
+//      shed_to_budget_locked() drops the FINEST pending band first (highest
+//      band_priority, oldest among equals), never the manifest and never
+//      non-band relay traffic. That is the load-shedding policy that matches
+//      what the scheme is for: keep coarse coverage of the whole map rather
+//      than full detail of whatever happened to arrive first. Unbounded (the
+//      old behavior) is still available with a budget of 0.
+//   2. Keep band ordering STRICT (effective_priority returns band_priority
+//      unchanged), so coarsest-first genuinely holds, with an absolute
+//      starvation deadline instead of a continuous decay: a band that has
+//      waited aging_interval_ms * band_priority is promoted, in one step, to a
+//      tier ahead of every band but still behind the manifest. Set the
+//      deadline above the byte budget's drain time and it never fires in
+//      normal operation (the budget bounds waits first); it stays as the
+//      backstop for an unbounded/unlimited-bandwidth link, which is the case
+//      the two starvation regression tests cover.
+//
+// pop() is O(n) in queue depth (an explicit scan, since promotion depends on
+// wall-clock time and can't be precomputed into a static sorted key at push
+// time). Fine at this scale, and the byte budget now bounds n directly.
 class BandQueue
 {
 public:
-  // aging_interval_ms: see class comment. 250ms default means a tile's finest
-  // band (haar_levels=5 -> band index 5) needs ~1.25s of waiting to fully catch
-  // up to a never-before-waited band_0 -- long enough that a genuinely transient
-  // burst of coarse traffic still gets to go first, short enough that starvation
-  // is bounded to about a second on top of whatever the token bucket already
-  // imposes, not "for the rest of the run."
+  // aging_interval_ms: the per-band-index step of the absolute starvation
+  // deadline (see class comment) -- a queued band_k is promoted ahead of every
+  // other band once it has waited aging_interval_ms * k. It is NOT a
+  // continuous decay rate any more; between enqueue and that deadline a band
+  // keeps its exact band_priority, which is what makes coarsest-first hold.
+  //
+  // Pick it comfortably ABOVE how long the byte budget takes to drain, or the
+  // deadline fires routinely and reintroduces the FIFO flattening it replaced.
+  // ddil_proxy_node's default does exactly that; the 250ms kept here is only
+  // the header's own standalone default.
   explicit BandQueue(double aging_interval_ms = 250.0)
   : aging_interval_ms_(aging_interval_ms)
   {}
@@ -269,6 +302,26 @@ public:
   std::size_t size() const {return entries_.size();}
 
   void set_aging_interval_ms(double aging_interval_ms) {aging_interval_ms_ = aging_interval_ms;}
+
+  // Maximum bytes of queued band traffic to hold before shedding. 0 = unbounded
+  // (the pre-bounding behavior). Shrinking the budget sheds immediately rather
+  // than waiting for the next push, so lowering the link's bandwidth from the
+  // RViz panel takes effect on the existing backlog too.
+  void set_byte_budget(std::uint64_t bytes)
+  {
+    byte_budget_ = bytes;
+    shed_to_budget_locked();
+  }
+
+  std::uint64_t queued_bytes() const {return total_bytes_;}
+  std::uint64_t byte_budget() const {return byte_budget_;}
+
+  // Cumulative messages/bytes dropped by the byte budget since construction.
+  // Reported by ddil_proxy_node so a run's logs/stats say plainly how much map
+  // detail the link couldn't afford, instead of it silently piling up in an
+  // ever-growing backlog nobody will ever receive.
+  std::uint64_t shed_count() const {return shed_count_;}
+  std::uint64_t shed_bytes() const {return shed_bytes_;}
 
   // Aggregate currently-queued (not-yet-sent) count/bytes per band index,
   // across all tiles. Manifest (band_priority -1) and non-band relay traffic
@@ -302,16 +355,21 @@ public:
         // has to keep accruing from the original enqueue, or a slot whose content
         // keeps getting refreshed before its turn comes up would dodge aging
         // forever, reintroducing the exact starvation this class exists to avoid.
+        total_bytes_ -= entry_bytes(it->second->msg);
         it->second->msg.serialized = std::move(msg.serialized);
+        total_bytes_ += entry_bytes(it->second->msg);
+        shed_to_budget_locked();
         return true;
       }
     }
 
+    total_bytes_ += entry_bytes(msg);
     entries_.push_back(Entry{std::move(msg), std::chrono::steady_clock::now()});
     auto it = std::prev(entries_.end());
     if (!it->msg.dedup_key.empty()) {
       dedup_index_[it->msg.dedup_key] = it;
     }
+    shed_to_budget_locked();
     return false;
   }
 
@@ -329,6 +387,7 @@ public:
     }
 
     QueuedMessage msg = std::move(best->msg);
+    total_bytes_ -= std::min<std::uint64_t>(total_bytes_, entry_bytes(msg));
     if (!msg.dedup_key.empty()) {
       dedup_index_.erase(msg.dedup_key);
     }
@@ -346,24 +405,99 @@ private:
   double effective_priority(const Entry & entry, std::chrono::steady_clock::time_point now) const
   {
     // Manifest (band_priority -1) and any non-band traffic through this same
-    // relay (band_priority INT_MAX) sit at fixed priority tiers that aging must
-    // never touch: the manifest has to stay ahead of every band regardless of
-    // how long bands have been waiting (the decoder can't parse coefficients
-    // without it), and non-band traffic has no coarse/fine notion to age toward.
+    // relay (band_priority INT_MAX) sit at fixed priority tiers that promotion
+    // must never touch: the manifest has to stay ahead of every band regardless
+    // of how long bands have been waiting (the decoder can't parse coefficients
+    // without it), and non-band traffic has no coarse/fine notion to promote
+    // toward.
     if (entry.msg.band_priority < 0 ||
       entry.msg.band_priority == std::numeric_limits<int>::max())
     {
       return static_cast<double>(entry.msg.band_priority);
     }
+    // Absolute starvation deadline, not a continuous decay -- see the class
+    // comment for why the decay had to go. Below the deadline a band keeps its
+    // exact band_priority, so coarsest-first is strict and a 4 MB backlog can
+    // no longer flatten every band to one tier. At the deadline the band jumps
+    // in ONE step to kPromotedPriority: ahead of band_0 (0), still behind the
+    // manifest (-1), so a promoted band can never delay the geometry its own
+    // decode depends on.
     const double wait_ms =
       std::chrono::duration<double, std::milli>(now - entry.enqueued_at).count();
-    const double aged = static_cast<double>(entry.msg.band_priority) - wait_ms / aging_interval_ms_;
-    return std::max(aged, 0.0);
+    const double deadline_ms =
+      aging_interval_ms_ * static_cast<double>(entry.msg.band_priority);
+    if (entry.msg.band_priority > 0 && wait_ms >= deadline_ms) {
+      return kPromotedPriority;
+    }
+    return static_cast<double>(entry.msg.band_priority);
   }
+
+  // Drops the least valuable queued band traffic until the backlog is inside
+  // byte_budget_: finest band first (highest band_priority), oldest first
+  // among equals. Manifest (band_priority < 0) and non-band relay traffic
+  // (INT_MAX) are never shed -- the manifest because a decoder cannot place
+  // any tile without it, non-band traffic because this budget is a statement
+  // about map-detail value and says nothing about whatever else shares the
+  // relay.
+  //
+  // Dropping the finest band is what preserves the property the whole scheme
+  // exists for. The alternative (drop oldest regardless of band, i.e. plain
+  // tail-drop) throws away coarse coverage of newly explored ground to keep
+  // fine detail of ground the peer already has a picture of -- which is how a
+  // peer ends up, as measured, holding 64 of a robot's 468 explored tiles
+  // while the link burned its capacity refining those same 64.
+  void shed_to_budget_locked()
+  {
+    if (byte_budget_ == 0) {
+      return;
+    }
+    while (total_bytes_ > byte_budget_) {
+      auto victim = entries_.end();
+      int worst_priority = -1;
+      for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+        const int bp = it->msg.band_priority;
+        if (bp < 0 || bp == std::numeric_limits<int>::max()) {
+          continue;  // manifest / non-band traffic is never shed
+        }
+        // Strictly-greater keeps the FIRST (oldest, since entries_ is in
+        // insertion order) entry at the worst band index.
+        if (bp > worst_priority) {
+          worst_priority = bp;
+          victim = it;
+        }
+      }
+      if (victim == entries_.end()) {
+        return;  // nothing sheddable left -- budget can't be met, stop trying
+      }
+      const std::uint64_t bytes = entry_bytes(victim->msg);
+      total_bytes_ -= std::min(total_bytes_, bytes);
+      shed_count_ += 1;
+      shed_bytes_ += bytes;
+      if (!victim->msg.dedup_key.empty()) {
+        dedup_index_.erase(victim->msg.dedup_key);
+      }
+      entries_.erase(victim);
+    }
+  }
+
+  static std::uint64_t entry_bytes(const QueuedMessage & msg)
+  {
+    // Tests construct QueuedMessages with no payload attached at all; a null
+    // serialized just contributes nothing to the budget.
+    return msg.serialized ? static_cast<std::uint64_t>(msg.serialized->size()) : 0U;
+  }
+
+  // Tier a starvation-promoted band lands on: ahead of band_0, behind the
+  // manifest's -1.
+  static constexpr double kPromotedPriority = -0.5;
 
   std::list<Entry> entries_;
   std::map<std::string, std::list<Entry>::iterator> dedup_index_;
   double aging_interval_ms_;
+  std::uint64_t total_bytes_{0};
+  std::uint64_t byte_budget_{0};
+  std::uint64_t shed_count_{0};
+  std::uint64_t shed_bytes_{0};
 };
 
 }  // namespace voxelcodec_ros

@@ -176,6 +176,7 @@ public:
     // meaning; that still clears.
     if (new_tile_size_cells != 0 && new_tile_size_cells != geometry_.tile_size_cells) {
       tiles_.clear();
+      stale_tiles_.clear();  // keys mean something different under a new partition
     }
     geometry_.grid_width = new_width;
     geometry_.grid_height = new_height;
@@ -226,6 +227,37 @@ public:
       if (tile.width != tile_w || tile.height != tile_h || tile.levels != haar_levels_ ||
         tile.offset_row != tile_off_r || tile.offset_col != tile_off_c)
       {
+        // The wipe itself is unavoidable: every band's coefficient count is
+        // derived from this tile's (width, height) through the Haar pyramid, so
+        // bands encoded at one extent cannot be mixed with bands encoded at
+        // another -- reconstruct_haar_from_bands would be fed mismatched
+        // arrays. What IS avoidable is losing the *picture*.
+        //
+        // reconstruct() renders a tile only from a contiguous prefix of its
+        // bands starting at band 0, so a wipe whose triggering arrival is a
+        // FINE band leaves the tile with no band 0 and therefore invisible --
+        // it renders nothing at all, replacing a perfectly good (if slightly
+        // older) coarse approximation with a hole. Measured on
+        // experiment_runs/20260910_004301_vxch_office (robot3 -> robot2): of
+        // 238 geometry resets, 133 (56%) blinded the tile immediately, causing
+        // 112 renderable -> invisible transitions lasting a median of 21s
+        // each, 2054 tile-seconds in total -- 7.1% of all tile-time spent
+        // rendering nothing while the receiver held decodable data for that
+        // exact tile. 39 of those resets were to a shape the tile had ALREADY
+        // been seen at, i.e. pure thrash from slam_toolbox nudging its origin
+        // back and forth by sub-cell amounts.
+        //
+        // So the outgoing state is retained as a fallback whenever it was
+        // renderable, and reconstruct() falls back to it until the new
+        // geometry has its own band 0. That keeps the class's stated contract
+        // ("the best-available full-resolution grid at any point") true across
+        // a reshape instead of only between them. The fallback carries its own
+        // extent/offset, so it is still placed at the world position it was
+        // encoded for -- tile keys are world-anchored, so an older extent is
+        // spatially faithful, just coarser or slightly differently clipped.
+        if (!tile.received.empty() && tile.received[0]) {
+          stale_tiles_[key] = tile;
+        }
         tile = TileBandState{};
         tile.width = tile_w;
         tile.height = tile_h;
@@ -248,6 +280,11 @@ public:
         zigzag_varint_decode(raw, descriptor.element_count) :
         fixed_width_decode(raw, descriptor.element_count);
       tile.received[idx] = true;
+      if (idx == 0) {
+        // Current geometry can render on its own now; the older state is
+        // strictly worse from here on.
+        stale_tiles_.erase(key);
+      }
       return std::nullopt;
     } catch (const std::exception & e) {
       return std::string("band decode failed: ") + e.what();
@@ -283,18 +320,21 @@ public:
     const long long origin_cell_y =
       resolution_d > 0.0 ? std::llround(geometry_.origin_y / resolution_d) : 0;
 
-    for (const auto & [key, tile] : tiles_) {
-      if (tile.width <= 0 || tile.height <= 0) {continue;}
-
-      int bands_received = 0;
-      for (int k = 0; k < tile.total_bands; ++k) {
-        if (tile.received[static_cast<std::size_t>(k)]) {
-          bands_received = k + 1;
-        } else {
-          break;
-        }
+    for (const auto & [key, current] : tiles_) {
+      // Prefer the current geometry's own bands; if a reshape wiped them and
+      // the replacement band 0 hasn't arrived yet, render the state retained
+      // at the reshape instead of leaving a hole. See ingest_band's reset.
+      const TileBandState * chosen = &current;
+      int bands_received = renderable_prefix(current);
+      if (bands_received == 0) {
+        const auto stale_it = stale_tiles_.find(key);
+        if (stale_it == stale_tiles_.end()) {continue;}
+        chosen = &stale_it->second;
+        bands_received = renderable_prefix(*chosen);
+        if (bands_received == 0) {continue;}
       }
-      if (bands_received == 0) {continue;}
+      const TileBandState & tile = *chosen;
+      if (tile.width <= 0 || tile.height <= 0) {continue;}
 
       HaarReconstruction recon;
       try {
@@ -366,6 +406,23 @@ public:
   const GridGeometry & geometry() const {return geometry_;}
 
 private:
+  // Number of bands usable for reconstruction: the contiguous run starting at
+  // band 0. A gap means everything past it is unusable (each level's inverse
+  // step needs the level below it), and no band 0 at all means the tile cannot
+  // be rendered.
+  static int renderable_prefix(const TileBandState & tile)
+  {
+    int bands = 0;
+    for (int k = 0; k < tile.total_bands; ++k) {
+      if (tile.received[static_cast<std::size_t>(k)]) {
+        bands = k + 1;
+      } else {
+        break;
+      }
+    }
+    return bands;
+  }
+
   int haar_levels_;
   GridGeometry geometry_;
   // Not actively pruned if the grid ever shrinks below a tile's offset --
@@ -373,6 +430,12 @@ private:
   // here is a correctness no-op, only a minor unbounded-growth risk. Not observed in
   // practice (grids only grow as SLAM explores); revisit if that changes.
   std::map<TileKey, TileBandState> tiles_;
+  // Per tile, the last state that could still be rendered (had band 0) before a
+  // geometry reshape wiped tiles_'s entry. Only populated for a tile whose
+  // extent/offset actually changed while it was renderable, and dropped the
+  // moment the new geometry receives its own band 0 -- so this holds at most
+  // one extra state per currently-reshaping tile, not a full history.
+  std::map<TileKey, TileBandState> stale_tiles_;
 };
 
 }  // namespace voxelcodec_ros

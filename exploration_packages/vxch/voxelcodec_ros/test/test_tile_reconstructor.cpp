@@ -55,6 +55,21 @@ std::vector<EncodedChannel> encode_tile(
   return bands;
 }
 
+// encode_tile plus explicit in-tile offsets, for the reshape cases where a
+// tile's clipped extent AND its offset inside the lattice tile both change.
+std::vector<EncodedChannel> encode_tile_at(
+  const std::vector<std::int8_t> & occupancy, int width, int height, int levels,
+  int tile_row, int tile_col, int tile_size_cells, int offset_row, int offset_col)
+{
+  auto bands = encode_tile(
+    occupancy, width, height, levels, tile_row, tile_col, tile_size_cells);
+  for (auto & band : bands) {
+    band.descriptor.metadata["tile_offset_row"] = std::to_string(offset_row);
+    band.descriptor.metadata["tile_offset_col"] = std::to_string(offset_col);
+  }
+  return bands;
+}
+
 std::vector<std::int8_t> make_occupancy(int w, int h, int seed = 0)
 {
   std::vector<std::int8_t> values(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
@@ -65,6 +80,136 @@ std::vector<std::int8_t> make_occupancy(int w, int h, int seed = 0)
 }
 
 }  // namespace
+
+// A tile's clipped extent/offset changes constantly at the sender's array edge
+// (slam_toolbox moves the origin every tick, often by sub-cell amounts), and
+// each change has to wipe that tile's accumulated bands -- coefficient counts
+// are tied to the extent, so bands from two extents cannot be mixed.
+//
+// What must NOT happen is the tile going blank. Because reconstruct() renders
+// only a contiguous prefix starting at band 0, a wipe whose triggering arrival
+// is a FINE band used to leave the tile with no band 0 and therefore render
+// nothing at all -- replacing a good coarse picture with a hole. Measured on
+// experiment_runs/20260910_004301_vxch_office (robot3 -> robot2): 133 of 238
+// geometry resets blinded the tile, for 2054 tile-seconds (7.1% of all
+// tile-time) of rendering nothing while holding decodable data.
+TEST(TileReconstructor, ReshapeArrivingAsAFineBandKeepsRenderingThePreviousState)
+{
+  constexpr int levels = 2;
+  TileReconstructor reconstructor(levels);
+  reconstructor.ingest_manifest(manifest_metadata(4, 4, 4), Stamp{1, 0});
+
+  // Full 4x4 tile delivered and renderable.
+  const auto occupancy = make_occupancy(4, 4);
+  const auto bands = encode_tile_at(occupancy, 4, 4, levels, 0, 0, 4, 0, 0);
+  for (int k = 0; k <= levels; ++k) {
+    ASSERT_FALSE(reconstructor.ingest_band(k, bands[k].descriptor, bands[k].payload).has_value());
+  }
+  const auto before = reconstructor.reconstruct();
+  ASSERT_TRUE(before.has_value());
+
+  // The tile reshapes (array edge re-clipped to 2x4) and the FIRST arrival
+  // under the new shape is band 2, the finest -- so the new state has no
+  // band 0 of its own and cannot be rendered yet.
+  const auto clipped = make_occupancy(2, 4, /*seed=*/3);
+  const auto reshaped = encode_tile_at(clipped, 2, 4, levels, 0, 0, 4, 0, 1);
+  ASSERT_FALSE(
+    reconstructor.ingest_band(2, reshaped[2].descriptor, reshaped[2].payload).has_value());
+
+  const auto after = reconstructor.reconstruct();
+  ASSERT_TRUE(after.has_value()) <<
+    "tile went blank on reshape -- the previous renderable state must be kept "
+    "until the new geometry has its own band 0";
+  EXPECT_EQ(after->data, before->data) <<
+    "should still be showing exactly the pre-reshape reconstruction";
+}
+
+// Once the new geometry has its own band 0, it takes over -- the retained
+// fallback must not keep masking fresher content.
+TEST(TileReconstructor, NewGeometryTakesOverOnceItsBandZeroArrives)
+{
+  constexpr int levels = 2;
+  TileReconstructor reconstructor(levels);
+  reconstructor.ingest_manifest(manifest_metadata(4, 4, 4), Stamp{1, 0});
+
+  const auto occupancy = make_occupancy(4, 4);
+  const auto bands = encode_tile_at(occupancy, 4, 4, levels, 0, 0, 4, 0, 0);
+  for (int k = 0; k <= levels; ++k) {
+    reconstructor.ingest_band(k, bands[k].descriptor, bands[k].payload);
+  }
+  const auto before = reconstructor.reconstruct();
+  ASSERT_TRUE(before.has_value());
+
+  // Reshape, fine band first (falls back), then the new band 0 arrives.
+  const auto clipped = make_occupancy(2, 4, /*seed=*/3);
+  const auto reshaped = encode_tile_at(clipped, 2, 4, levels, 0, 0, 4, 0, 1);
+  reconstructor.ingest_band(2, reshaped[2].descriptor, reshaped[2].payload);
+  ASSERT_FALSE(
+    reconstructor.ingest_band(0, reshaped[0].descriptor, reshaped[0].payload).has_value());
+
+  const auto after = reconstructor.reconstruct();
+  ASSERT_TRUE(after.has_value());
+  EXPECT_NE(after->data, before->data) <<
+    "the fallback should have been dropped in favour of the new geometry";
+}
+
+// Geometry oscillation (A -> B -> A) is common: sub-cell origin jitter flips a
+// clipped edge tile's offset back and forth. Each flip is a wipe, so without a
+// fallback such a tile can spend most of its life invisible -- 39 of the 238
+// measured resets were reverts to a shape the tile had already been seen at.
+TEST(TileReconstructor, OscillatingGeometryNeverLeavesTheTileBlank)
+{
+  constexpr int levels = 2;
+  TileReconstructor reconstructor(levels);
+  reconstructor.ingest_manifest(manifest_metadata(4, 4, 4), Stamp{1, 0});
+
+  const auto full = make_occupancy(4, 4);
+  const auto bands_a = encode_tile_at(full, 4, 4, levels, 0, 0, 4, 0, 0);
+  for (int k = 0; k <= levels; ++k) {
+    reconstructor.ingest_band(k, bands_a[k].descriptor, bands_a[k].payload);
+  }
+  ASSERT_TRUE(reconstructor.reconstruct().has_value());
+
+  const auto clipped = make_occupancy(3, 4, /*seed=*/5);
+  const auto bands_b = encode_tile_at(clipped, 3, 4, levels, 0, 0, 4, 0, 1);
+
+  // Flip back and forth, each time delivering only a fine band first. The
+  // tile must remain renderable throughout.
+  for (int i = 0; i < 4; ++i) {
+    const auto & shape = (i % 2 == 0) ? bands_b : bands_a;
+    reconstructor.ingest_band(2, shape[2].descriptor, shape[2].payload);
+    EXPECT_TRUE(reconstructor.reconstruct().has_value())
+      << "tile blanked on oscillation iteration " << i;
+    reconstructor.ingest_band(1, shape[1].descriptor, shape[1].payload);
+    EXPECT_TRUE(reconstructor.reconstruct().has_value())
+      << "tile blanked on oscillation iteration " << i << " after band 1";
+  }
+}
+
+// A tile-partition change genuinely invalidates every key's meaning, so the
+// retained fallbacks must go with the primary state rather than resurrecting
+// tiles under a partition they were never encoded for.
+TEST(TileReconstructor, TileSizeChangeAlsoClearsRetainedFallbacks)
+{
+  constexpr int levels = 2;
+  TileReconstructor reconstructor(levels);
+  reconstructor.ingest_manifest(manifest_metadata(4, 4, 4), Stamp{1, 0});
+
+  const auto occupancy = make_occupancy(4, 4);
+  const auto bands = encode_tile_at(occupancy, 4, 4, levels, 0, 0, 4, 0, 0);
+  for (int k = 0; k <= levels; ++k) {
+    reconstructor.ingest_band(k, bands[k].descriptor, bands[k].payload);
+  }
+  // Reshape with a fine band so a fallback is now held.
+  const auto clipped = make_occupancy(2, 4, /*seed=*/3);
+  const auto reshaped = encode_tile_at(clipped, 2, 4, levels, 0, 0, 4, 0, 1);
+  reconstructor.ingest_band(2, reshaped[2].descriptor, reshaped[2].payload);
+  ASSERT_TRUE(reconstructor.reconstruct().has_value());
+
+  // New partition -- everything, fallbacks included, is meaningless now.
+  reconstructor.ingest_manifest(manifest_metadata(4, 4, 2), Stamp{2, 0});
+  EXPECT_FALSE(reconstructor.reconstruct().has_value());
+}
 
 TEST(TileReconstructor, EmbeddedToOccupancyRoundTripsOccupancyToEmbeddedRange)
 {

@@ -7,13 +7,16 @@
 
 #include <rviz_common/panel.hpp>
 
+#include <QDoubleSpinBox>
 #include <QLabel>
 #include <QProgressBar>
+#include <QPushButton>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/parameter_client.hpp>
 #include <voxelcodec_msgs/msg/ddil_stats.hpp>
 
 namespace voxelcodec_ros
@@ -40,6 +43,10 @@ public:
 private Q_SLOTS:
   void onRescan();
   void onRefresh();
+  // Pushes the "all links" spinbox value to every discovered link at once --
+  // the common case, since a run's links are configured identically and a
+  // sweep is about the whole team's radio conditions, not one pair's.
+  void onApplyAll();
 
 private:
   // One band's row of widgets inside a LinkCard, plus enough client-side
@@ -65,6 +72,23 @@ private:
     QLabel * totals_label{nullptr};
     QVBoxLayout * rows_layout{nullptr};
     std::map<int, BandRow> band_rows;  // keyed by band_index, Qt-thread only
+
+    // Live bandwidth control for this link. bandwidth_kbps is a dynamically
+    // reconfigurable parameter on ddil_proxy_node, so setting it re-creates
+    // that node's token bucket (and resizes its queue budget) in place -- no
+    // relaunch, and the effect on per-band queue drain shows up in this same
+    // card within a second or two.
+    QDoubleSpinBox * bandwidth_spin{nullptr};
+    QPushButton * bandwidth_apply{nullptr};
+    QLabel * bandwidth_note{nullptr};
+    // Suppresses overwriting the spinbox out from under a user who is mid-edit:
+    // the value is seeded from the first stats message and from then on only
+    // the user (or an Apply-all) changes it.
+    bool bandwidth_seeded{false};
+    bool externally_shaped{false};
+    // Async parameter client for this link's proxy node, created lazily on
+    // first Apply. Held so its pending futures outlive the call.
+    std::shared_ptr<rclcpp::AsyncParametersClient> param_client;
   };
 
   // Latest message per topic, filled in on the ROS executor thread; onRefresh()
@@ -81,6 +105,12 @@ private:
   void ensureLinkCard(const std::string & topic, const std::string & link_name);
   void updateLinkCard(LinkCard & card, const voxelcodec_msgs::msg::DdilStats & msg);
   void updateBandRow(BandRow & row, const voxelcodec_msgs::msg::DdilBandStatus & bs);
+  // Sets bandwidth_kbps on one link's proxy node. `topic` is that link's
+  // DdilStats topic, which is "<fully-qualified node name>/ddil_stats" (the
+  // publisher is created as "~/ddil_stats"), so the node name to address the
+  // parameter service at is derivable from it -- no extra discovery needed.
+  void applyBandwidth(const std::string & topic, LinkCard & card, double kbps);
+  static std::string nodeNameFromStatsTopic(const std::string & topic);
 
   static QString fmtBytes(uint64_t b);
   static QString fmtRate(double bytes_per_sec);
@@ -90,6 +120,9 @@ private:
   QWidget * cards_container_{nullptr};
   QVBoxLayout * cards_layout_{nullptr};
   QLabel * empty_label_{nullptr};
+  QDoubleSpinBox * all_bandwidth_spin_{nullptr};
+  QPushButton * all_bandwidth_apply_{nullptr};
+  QLabel * apply_status_{nullptr};
 
   QTimer * rescan_timer_{nullptr};
   QTimer * refresh_timer_{nullptr};

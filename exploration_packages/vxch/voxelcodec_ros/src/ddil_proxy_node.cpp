@@ -66,14 +66,45 @@ public:
     }
     loss_pct_ = declare_parameter<double>("loss_pct", 0.0);
     delay_ms_ = declare_parameter<double>("delay_ms", 0.0);
-    // See BandQueue's class comment in ddil_proxy_logic.hpp: without aging, a
-    // sustained stream of fresh band_0 (coarse) traffic anywhere in the map can
-    // starve every tile's higher-index (fine detail) bands indefinitely once the
-    // link is actually bandwidth-constrained -- confirmed in a real run where
-    // 6925/6925 band messages sent were band_0. This is the knob for how many ms
-    // of wait time a queued band needs before its effective priority improves by
-    // one step.
-    priority_aging_ms_ = declare_parameter<double>("priority_aging_ms", 250.0);
+    // Per-band-index step of the absolute starvation deadline (see BandQueue in
+    // ddil_proxy_logic.hpp): a queued band_k jumps ahead of every other band
+    // once it has waited priority_aging_ms * k. It is no longer a continuous
+    // decay -- as a decay at the old 250ms default it flattened every band to
+    // one priority tier within 750ms of queueing, which under a real backlog
+    // turned the whole queue into FIFO and destroyed coarsest-first entirely
+    // (measured: bands 0/1/2 sent 73/91/107 on a live 5 kbps link, i.e. more
+    // fine detail delivered than coarse).
+    //
+    // Default is deliberately far above max_queue_seconds below: the byte
+    // budget is what bounds waiting now, so this deadline should only ever
+    // fire on an unbounded queue (bandwidth_kbps=0, or max_queue_seconds=0).
+    priority_aging_ms_ = declare_parameter<double>("priority_aging_ms", 15000.0);
+    // How many seconds of this link's own capacity the queue may hold before
+    // it shreds its finest queued bands to stay inside that. 0 = unbounded
+    // (pre-shedding behavior).
+    //
+    // An unbounded queue was the single worst failure here. Measured live at
+    // 5 kbps: 4.0 MB queued, band_2's backlog ETA 1h47m, and the peer's
+    // decoder therefore holding 64 of the sender's 468 explored tiles -- it
+    // had effectively frozen on the first ~30 seconds of the run because
+    // everything after that went to the back of a queue draining at 1/12th
+    // the rate it filled. Nothing in the pipeline was shedding load, so the
+    // backlog grew for the whole run and the newest (i.e. only interesting)
+    // map content was always last in line.
+    //
+    // A few seconds is the useful range: it has to be long enough to smooth a
+    // send tick's burst, and short enough that what arrives is still current.
+    max_queue_seconds_ = declare_parameter<double>("max_queue_seconds", 4.0);
+    // Minimum spacing between relayed manifests. The manifest sits at a fixed
+    // priority tier ahead of every band (the decoder cannot place a tile
+    // without geometry), the encoder republishes one on every send tick, and
+    // its ~470 B of ASCII metadata is comparable to a whole band message --
+    // so at 1 Hz on a 625 B/s link it was consuming 51% of the entire link
+    // (measured: 138 KB of the 394 KB this proxy had sent). Since the queue
+    // dedups manifests latest-wins, spacing out the sends just means the
+    // decoder's geometry refreshes a little less often, and hands half the
+    // link back to actual map data.
+    manifest_min_interval_s_ = declare_parameter<double>("manifest_min_interval_s", 3.0);
     {
       std::lock_guard<std::mutex> lock(queue_mutex_);
       queue_.set_aging_interval_ms(priority_aging_ms_);
@@ -86,6 +117,7 @@ public:
       declare_parameter<std::vector<std::string>>("bypass_topics", std::vector<std::string>{});
 
     token_bucket_ = std::make_shared<TokenBucket>(bandwidth_kbps_);
+    apply_queue_budget();
 
     // Register parameter change handler
     param_cb_ = add_on_set_parameters_callback(
@@ -319,6 +351,28 @@ private:
       // is the correct place for this decision.
       const std::size_t nbytes = item.serialized->size();
 
+      // Manifest send-rate gate (see manifest_min_interval_s_). Manifests sit
+      // at a priority tier ahead of every band, so without this they take
+      // whatever share of the link the encoder chooses to republish them at --
+      // which was half of it. Dropping one popped too soon is safe rather than
+      // lossy: BandQueue dedups manifests latest-wins, the encoder republishes
+      // on every send tick, and the relay's own manifest publisher is
+      // TRANSIENT_LOCAL, so a decoder keeps the last relayed geometry and a
+      // fresher manifest is always moments away. Deliberately BEFORE
+      // token_bucket_->consume() -- a gated manifest must cost the link
+      // nothing, which is the entire point.
+      if (item.band_priority < 0 && manifest_min_interval_s_ > 0.0) {
+        const auto now_steady = std::chrono::steady_clock::now();
+        const bool ever_sent = last_manifest_sent_.time_since_epoch().count() != 0;
+        const double since_s =
+          std::chrono::duration<double>(now_steady - last_manifest_sent_).count();
+        if (ever_sent && since_s < manifest_min_interval_s_) {
+          msgs_manifest_gated_.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
+        last_manifest_sent_ = now_steady;
+      }
+
       // queue_.pop() above already removed this item from the queue, but it won't
       // count as "sent" until publish() below actually happens -- and
       // token_bucket_->consume() next is exactly where a throttled link spends
@@ -396,14 +450,22 @@ private:
     const uint64_t stale    = msgs_stale_dropped_.load(std::memory_order_relaxed);
     const uint64_t kb_stale = bytes_stale_dropped_.load(std::memory_order_relaxed) / 1024;
     std::size_t queue_depth;
+    std::uint64_t queued_kb;
+    std::uint64_t shed;
+    std::uint64_t shed_kb;
     {
       std::lock_guard<std::mutex> lock(queue_mutex_);
       queue_depth = queue_.size();
+      queued_kb = queue_.queued_bytes() / 1024;
+      shed = queue_.shed_count();
+      shed_kb = queue_.shed_bytes() / 1024;
     }
     RCLCPP_INFO(
       get_logger(),
-      "stats | rcvd=%lu  sent=%lu (%lu KB)  dropped=%lu  deduped=%lu  stale=%lu (%lu KB)  queued=%zu",
-      received, sent, kb_sent, dropped, deduped, stale, kb_stale, queue_depth);
+      "stats | rcvd=%lu  sent=%lu (%lu KB)  dropped=%lu  deduped=%lu  stale=%lu (%lu KB)  "
+      "queued=%zu (%lu KB)  shed=%lu (%lu KB)  manifest_gated=%lu",
+      received, sent, kb_sent, dropped, deduped, stale, kb_stale, queue_depth, queued_kb,
+      shed, shed_kb, msgs_manifest_gated_.load(std::memory_order_relaxed));
   }
 
   // Builds and publishes one DdilStats snapshot: current queue backlog per
@@ -419,9 +481,15 @@ private:
   void publish_stats()
   {
     std::map<int, std::pair<std::size_t, std::uint64_t>> pending;
+    std::uint64_t shed_count = 0;
+    std::uint64_t shed_bytes = 0;
+    std::uint64_t queue_budget_bytes = 0;
     {
       std::lock_guard<std::mutex> lock(queue_mutex_);
       pending = queue_.pending_by_band();
+      shed_count = queue_.shed_count();
+      shed_bytes = queue_.shed_bytes();
+      queue_budget_bytes = queue_.byte_budget();
     }
 
     std::map<int, BandCounters> sent_counters_copy;
@@ -486,6 +554,15 @@ private:
     msg.msgs_deduped = msgs_deduped_.load(std::memory_order_relaxed);
     msg.msgs_stale_dropped = msgs_stale_dropped_.load(std::memory_order_relaxed);
     msg.sent_bytes = bytes_sent_.load(std::memory_order_relaxed);
+    msg.msgs_shed = shed_count;
+    msg.shed_bytes = shed_bytes;
+    msg.queue_budget_bytes = queue_budget_bytes;
+    // True when this link's shaping happens outside the token bucket (tc netem
+    // in a netns), so bandwidth_kbps above is a report of what the kernel was
+    // told, not something this node can change. The RViz bandwidth control uses
+    // it to refuse to offer a knob that would silently do nothing (or worse,
+    // double-throttle on top of tc).
+    msg.externally_shaped = bandwidth_kbps_ <= 0.0 && display_bandwidth_kbps_ > 0.0;
 
     std::uint64_t queued_bytes = 0;
     std::uint64_t cumulative_ahead_bytes = 0;  // sorted ascending -- see ETA note above
@@ -520,6 +597,19 @@ private:
     stats_pub_->publish(msg);
   }
 
+  // Byte budget = max_queue_seconds_ worth of the link's own capacity. An
+  // unlimited link (bandwidth_kbps_ <= 0) has no meaningful "seconds of
+  // capacity", so it stays unbounded -- including tc mode, where the real
+  // shaping lives in the kernel and this proxy genuinely has no rate to size a
+  // budget against.
+  void apply_queue_budget()
+  {
+    const double budget_bytes = bandwidth_kbps_ > 0.0 && max_queue_seconds_ > 0.0 ?
+      bandwidth_kbps_ * 125.0 * max_queue_seconds_ : 0.0;
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    queue_.set_byte_budget(static_cast<std::uint64_t>(budget_bytes));
+  }
+
   rcl_interfaces::msg::SetParametersResult on_param_change(
     const std::vector<rclcpp::Parameter> & params)
   {
@@ -527,7 +617,27 @@ private:
       if (p.get_name() == "bandwidth_kbps") {
         bandwidth_kbps_ = p.as_double();
         token_bucket_ = std::make_shared<TokenBucket>(bandwidth_kbps_);
+        // The queue budget is expressed in seconds of link capacity, so a
+        // bandwidth change resizes it -- including shedding immediately if the
+        // link was just narrowed, rather than leaving a backlog sized for the
+        // old rate to drain at the new one.
+        apply_queue_budget();
+        // Keep the UI's reported capacity in step with the live token bucket
+        // when this proxy is doing its own shaping. In tc mode
+        // (bandwidth_kbps=0 by construction, display set separately) leave the
+        // externally-configured display value alone -- see the constructor.
+        if (bandwidth_kbps_ > 0.0) {
+          display_bandwidth_kbps_ = bandwidth_kbps_;
+        }
         RCLCPP_INFO(get_logger(), "bandwidth_kbps updated to %.0f", bandwidth_kbps_);
+      } else if (p.get_name() == "max_queue_seconds") {
+        max_queue_seconds_ = p.as_double();
+        apply_queue_budget();
+        RCLCPP_INFO(get_logger(), "max_queue_seconds updated to %.2f", max_queue_seconds_);
+      } else if (p.get_name() == "manifest_min_interval_s") {
+        manifest_min_interval_s_ = p.as_double();
+        RCLCPP_INFO(
+          get_logger(), "manifest_min_interval_s updated to %.2f", manifest_min_interval_s_);
       } else if (p.get_name() == "loss_pct") {
         loss_pct_ = p.as_double();
         RCLCPP_INFO(get_logger(), "loss_pct updated to %.1f%%", loss_pct_);
@@ -553,6 +663,12 @@ private:
   double loss_pct_;
   double delay_ms_;
   double priority_aging_ms_;
+  double max_queue_seconds_;
+  double manifest_min_interval_s_;
+  // Worker-thread-only: when the last manifest was actually relayed. A
+  // default-constructed (epoch) value means "never", so the first manifest is
+  // never gated.
+  std::chrono::steady_clock::time_point last_manifest_sent_{};
 
   std::shared_ptr<TokenBucket> token_bucket_;
   std::vector<std::shared_ptr<rclcpp::GenericPublisher>> publishers_;
@@ -585,6 +701,7 @@ private:
   std::atomic<uint64_t> bytes_sent_{0};
   std::atomic<uint64_t> msgs_stale_dropped_{0};
   std::atomic<uint64_t> bytes_stale_dropped_{0};
+  std::atomic<uint64_t> msgs_manifest_gated_{0};
 
   // Per-band cumulative sent counters + windowed send rate + "currently
   // active band" tracking for publish_stats(). Written only by worker_loop()

@@ -14,5 +14,11 @@ uint64 msgs_received
 uint64 msgs_dropped
 uint64 msgs_deduped
 uint64 msgs_stale_dropped
+uint64 msgs_shed        # band messages dropped by the queue byte budget (link
+                        # couldn't afford them) -- finest band shed first
+uint64 shed_bytes       # cumulative bytes dropped by the queue byte budget
+uint64 queue_budget_bytes  # max queued band bytes before shedding (0 = unbounded)
+bool externally_shaped  # true when the real rate limit is tc netem outside this
+                        # node, so bandwidth_kbps is a report, not a live knob
 
 voxelcodec_msgs/DdilBandStatus[] bands
