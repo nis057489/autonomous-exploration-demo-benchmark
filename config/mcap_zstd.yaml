@@ -1,0 +1,17 @@
+# mcap storage-plugin config for `ros2 bag record --storage-config-file`.
+#
+# Turns on mcap's OWN chunk compression. This is deliberately NOT rosbag2's
+# `--compression-mode message --compression-format zstd`: with mcap storage
+# that path is broken in Jazzy -- SequentialReader returns the still-compressed
+# payload, so deserialize_message() throws a Fast CDR exception and
+# generate_comparison_figure.py's len(data) byte counts would silently become
+# compressed sizes. Verified empirically, both modes, on this container.
+#
+# Because the compression lives inside the mcap chunk records, metadata.yaml's
+# compression_format/compression_mode correctly stay empty. That also makes it
+# survive `ros2 bag reindex -s mcap`, which replay_gui.py runs on a scratch
+# symlink of the .mcap and which regenerates metadata.yaml from scratch --
+# the rosbag2-level fields would be lost there, mcap's internal ones are not.
+compression: "Zstd"
+compressionLevel: "Default"
+chunkSize: 4194304
