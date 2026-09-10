@@ -161,12 +161,23 @@ def default_spawn_preset():
     return "default"
 
 
+# Built from ALL_CONDITIONS rather than a hand-written alternation: a
+# condition added there but forgotten here silently fails to match its run
+# dirs, so world_from_bag_dir returns None, spawn_offsets_for returns {}, and
+# every robot's /map stays in its own SLAM frame -- which inflates team
+# physical coverage to roughly the SUM of the robots' maps and collapses
+# redundant coverage to ~0 for that condition alone. That is exactly what
+# happened to `none`/`oracle` when they were added.
+_RUN_DIR_RE = re.compile(
+    r"^\d{8}_\d{6}_(?:" + "|".join(re.escape(c) for c in ALL_CONDITIONS) + r")_(.+)$")
+
+
 def world_from_bag_dir(bag_dir):
     """Run dirs are experiment_runs/<timestamp>_<condition>_<world>/bag, so the
     world name (which selects a spawn_presets.yaml block) is recoverable from
     the path. Returns None if the path doesn't follow that shape."""
     for part in (Path(bag_dir).resolve()).parts[::-1]:
-        m = re.match(r"^\d{8}_\d{6}_(?:baseline|vxch|zstd)_(.+)$", part)
+        m = re.match(_RUN_DIR_RE, part)
         if m:
             return m.group(1)
     return None
