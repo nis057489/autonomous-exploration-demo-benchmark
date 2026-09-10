@@ -526,6 +526,17 @@ if (( NUM_ROBOTS > 1 )); then
     "${DDIL_NETNS_SCRIPT}" up "${NUM_ROBOTS}"
   fi
 
+  # ros2 launch rejects a bare `name:=` outright ("malformed launch argument"),
+  # so an empty schedule path cannot be passed through as an empty string -- it
+  # has to be omitted entirely, letting the launch file's own "" default stand.
+  # LINK_SCHEDULE_PATH is empty for every LINK_PROFILE=static run, which is the
+  # default and the unshaped control condition, so this is the common path, not
+  # an edge case.
+  LINK_SCHEDULE_ARGS=()
+  if [[ -n "${LINK_SCHEDULE_PATH}" ]]; then
+    LINK_SCHEDULE_ARGS=(link_schedule_path:="${LINK_SCHEDULE_PATH}")
+  fi
+
   ros2 launch bme_ros2_navigation multi_robot_vxch_experiment.launch.py \
     world:="${WORLD}" \
     num_robots:="${NUM_ROBOTS}" \
@@ -538,7 +549,7 @@ if (( NUM_ROBOTS > 1 )); then
     controller_type:="${CONTROLLER_TYPE}" \
     impairment_mode:="${IMPAIRMENT_MODE}" \
     bandwidth_kbps:="${BANDWIDTH_KBPS}" \
-    link_schedule_path:="${LINK_SCHEDULE_PATH}" \
+    "${LINK_SCHEDULE_ARGS[@]}" \
     loss_pct:="${LOSS_PCT}" \
     delay_ms:="${DELAY_MS}" \
     haar_levels:="${HAAR_LEVELS}" \

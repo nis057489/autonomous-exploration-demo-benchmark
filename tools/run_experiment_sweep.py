@@ -3,9 +3,12 @@
 
 Automates the manual loop: set MAP_TRANSPORT in experiment.conf, launch
 ./docker.sh <world>, let it run, Ctrl+C, wait for docker to clean up, repeat.
-Everything else in experiment.conf is left exactly as you set it -- the method
-is the only thing this script changes, and the original value is restored on
-exit.
+Everything else in experiment.conf is left exactly as you set it, with one
+documented exception: the `oracle` arm is the unimpaired control, and the
+launch file refuses to start it while BANDWIDTH_KBPS/LOSS_PCT/DELAY_MS/
+LINK_PROFILE would throttle it, so those four are forced to their no-op values
+for that arm's runs only (and announced when it happens). Every value this
+script touches is restored on exit.
 
 What it adds over doing it by hand:
 
@@ -86,6 +89,20 @@ GOAL_RE = re.compile(r"\[(?:(robot\d+)\.)?lite_frontier_explorer\]:\s*Sending go
 # healthy startup) -- it is surfaced in the log summary to explain a timeout.
 COSTMAP_STALL_RE = re.compile(
     r"\[(?:(robot\d+)\.)?lite_frontier_explorer\]:\s*Still waiting for first costmap")
+# A launch description that raised. This is fatal and INSTANT: ros2 launch has
+# already given up, but docker.sh and the container stay alive, so without this
+# the run just sits there and is reported as the generic "no robot ever started
+# exploring" after the full startup timeout -- with the actual cause (a bad
+# parameter combination, printed once, right here) buried in the log. Every
+# retry then reproduces it exactly, because nothing about it is flaky.
+LAUNCH_ERROR_RE = re.compile(
+    r"\[ERROR\]\s*\[launch\]:\s*Caught exception in launch"
+    r"(?:\s*\([^)]*\))?:\s*(?P<msg>.*)"
+    # The other way launch dies instantly: the ros2 CLI rejects the command
+    # line before any launch file is even loaded, so it never reaches the
+    # [ERROR] [launch] path above. Same signature to the harness -- nothing
+    # starts, the container stays up, and every retry fails identically.
+    r"|(?P<msg2>malformed launch argument\b.*)")
 
 
 def rel(path):
@@ -109,12 +126,18 @@ def parse_conf(path):
     return values
 
 
-def set_conf_method(path, method):
-    """Rewrite only MAP_TRANSPORT's value, preserving its trailing comment."""
+def set_conf_values(path, values, required=()):
+    """Rewrite each given KEY's value in place, preserving trailing comments.
+
+    Only rewrites lines that already exist -- a key absent from the file keeps
+    whatever default the launch file has, which is the same thing that would
+    happen if this script had never touched it.
+    """
     lines = path.read_text().splitlines(keepends=True)
-    found = False
+    seen = set()
     for i, line in enumerate(lines):
-        if not line.lstrip().startswith("MAP_TRANSPORT="):
+        key = line.lstrip().partition("=")[0].strip()
+        if key not in values or key in seen:
             continue
         prefix, _, rest = line.partition("=")
         comment = ""
@@ -124,12 +147,46 @@ def set_conf_method(path, method):
             pad = len(value_part) - len(value_part.rstrip())
             comment = " " * max(pad, 1) + "#" + comment_part.rstrip("\n")
         newline = "\n" if line.endswith("\n") else ""
-        lines[i] = f"{prefix}={method}{comment}{newline}"
-        found = True
-        break
-    if not found:
-        raise SystemExit(f"no MAP_TRANSPORT= line found in {path}")
+        lines[i] = f"{prefix}={values[key]}{comment}{newline}"
+        seen.add(key)
+    missing = [k for k in required if k not in seen]
+    if missing:
+        raise SystemExit(f"no {', '.join(missing)} line(s) found in {path}")
     path.write_text("".join(lines))
+
+
+# The impairment knobs, at the values that mean "no impairment at all".
+# `oracle` is the unimpaired control arm, and the launch file REFUSES to start
+# it while any of these would throttle it -- correctly, since an oracle run
+# that was actually shaped is worse than no oracle run. But that refusal also
+# means a sweep which rewrites MAP_TRANSPORT and nothing else can never launch
+# this arm: every other arm wants the impairment left exactly as configured,
+# and oracle needs it gone. So oracle -- and only oracle -- runs with these
+# written into experiment.conf, and every other arm gets the file's original
+# values written back before it starts.
+UNIMPAIRED = {"BANDWIDTH_KBPS": "0", "LOSS_PCT": "0.0",
+              "DELAY_MS": "0", "LINK_PROFILE": "static"}
+
+
+def conf_original(baseline):
+    """Every value this script may rewrite, at the setting the file arrived with.
+
+    Restore goes through this rather than conf_for_method(original_method): if
+    the file's own MAP_TRANSPORT is already `oracle`, the latter would hand
+    back the forced-unimpaired values and "restoring" would quietly overwrite
+    the user's real BANDWIDTH_KBPS with 0.
+    """
+    return {k: baseline[k] for k in ("MAP_TRANSPORT", *UNIMPAIRED)
+            if k in baseline}
+
+
+def conf_for_method(method, baseline):
+    """What experiment.conf must say to run `method`, given its original values."""
+    values = {"MAP_TRANSPORT": method}
+    for key, unimpaired in UNIMPAIRED.items():
+        if key in baseline:
+            values[key] = unimpaired if method == "oracle" else baseline[key]
+    return values
 
 
 def map_message_counts(bag_dir):
@@ -351,6 +408,7 @@ class DockerRun:
         self.launched_at = None
         self.robots_ready = set()
         self.saw_costmap_stall = set()
+        self.launch_error = None
 
     def start(self):
         self._log = self.log_path.open("wb")
@@ -409,6 +467,9 @@ class DockerRun:
             m = COSTMAP_STALL_RE.search(text)
             if m:
                 self.saw_costmap_stall.add(m.group(1) or "robot1")
+            m = LAUNCH_ERROR_RE.search(text)
+            if m and self.launch_error is None:
+                self.launch_error = (m.group("msg") or m.group("msg2")).strip()
         return True
 
     def alive(self):
@@ -497,7 +558,7 @@ def new_run_dirs(before):
     return sorted(snapshot_runs() - before)
 
 
-def do_one_run(args, method, attempt, num_robots, state):
+def do_one_run(args, method, attempt, num_robots, state, baseline_conf):
     """Execute a single run. Returns a result dict."""
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     SWEEP_DIR.mkdir(parents=True, exist_ok=True)
@@ -506,13 +567,23 @@ def do_one_run(args, method, attempt, num_robots, state):
     print(f"\n=== {method}  attempt {attempt}  ({stamp}) ===", flush=True)
     print(f"    log: {rel(log_path)}", flush=True)
 
+    conf_values = conf_for_method(method, baseline_conf)
+
     if args.dry_run:
-        print("    [dry-run] would set MAP_TRANSPORT and launch ./docker.sh "
-              f"{args.world} for {args.duration}s", flush=True)
+        print("    [dry-run] would set "
+              + ", ".join(f"{k}={v}" for k, v in conf_values.items())
+              + f" and launch ./docker.sh {args.world} for {args.duration}s",
+              flush=True)
         return {"method": method, "attempt": attempt, "valid": True,
                 "dry_run": True, "log": str(log_path), "run_dirs": []}
 
-    set_conf_method(CONF, method)
+    set_conf_values(CONF, conf_values, required=("MAP_TRANSPORT",))
+    if method == "oracle":
+        # Say it out loud in the sweep's own output: this arm did not run at
+        # the impairment the rest of the sweep is configured for, by design.
+        print("    oracle: running unimpaired ("
+              + ", ".join(f"{k}={UNIMPAIRED[k]}" for k in UNIMPAIRED
+                          if k in baseline_conf) + ")", flush=True)
     before = snapshot_runs()
 
     run = DockerRun(args.world, log_path, echo=args.echo, cmd=args.docker_cmd,
@@ -529,6 +600,10 @@ def do_one_run(args, method, attempt, num_robots, state):
             if not run.alive() and not run.pump(0.2):
                 result["reason"] = "docker.sh exited before the container started"
                 return _finish(run, result, args, before)
+            if run.launch_error:
+                result["reason"] = f"launch failed: {run.launch_error}"
+                result["fatal"] = True
+                return _finish(run, result, args, before)
             if time.monotonic() > build_deadline:
                 result["reason"] = f"no '{LAUNCH_ANCHOR}' within {args.build_timeout}s"
                 return _finish(run, result, args, before)
@@ -541,6 +616,13 @@ def do_one_run(args, method, attempt, num_robots, state):
         while len(run.robots_ready) < num_robots:
             if not run.alive() and not run.pump(0.2):
                 result["reason"] = "stack exited during startup"
+                return _finish(run, result, args, before)
+            # Checked before the deadline: ros2 launch has already aborted, so
+            # waiting out the remaining startup timeout only delays a failure
+            # that has already happened and replaces its cause with a symptom.
+            if run.launch_error:
+                result["reason"] = f"launch failed: {run.launch_error}"
+                result["fatal"] = True
                 return _finish(run, result, args, before)
             if time.monotonic() > ready_deadline:
                 missing = num_robots - len(run.robots_ready)
@@ -811,8 +893,23 @@ def main():
                 f"Available: {', '.join(known)}")
 
     conf = parse_conf(CONF)
+    baseline_conf = dict(conf)
     num_robots = int(conf.get("NUM_ROBOTS", "1"))
     original_method = conf.get("MAP_TRANSPORT")
+    # The one oracle conflict this script will NOT fix for you. Zeroing the
+    # bandwidth/loss/delay knobs is just "no impairment", which is what oracle
+    # means. Flipping IMPAIRMENT_MODE from tc to sim is not: under tc every
+    # other arm's traffic crosses a veth pair between network namespaces, and
+    # that path costs something whether or not netem is shaping it. An oracle
+    # that skipped it would differ from the other arms by more than the
+    # impairment, which is exactly the confound the arm exists to rule out.
+    if "oracle" in args.methods and conf.get("IMPAIRMENT_MODE") == "tc":
+        raise SystemExit(
+            "IMPAIRMENT_MODE=tc cannot be swept together with the oracle arm: "
+            "an unimpaired oracle would also skip the netns/veth path the other "
+            "arms run through, so it would not be comparable to them.\n"
+            "Either drop oracle from --methods, or run the sweep with "
+            "IMPAIRMENT_MODE=sim so every arm shares one impairment mechanism.")
     if conf.get("RECORD_METRICS", "false").lower() != "true":
         print("WARNING: RECORD_METRICS is not true in experiment.conf -- runs will "
               "produce no bags to compare.", file=sys.stderr)
@@ -878,7 +975,8 @@ def main():
                     raise RunAborted()
 
                 attempt = sum(1 for r in state["results"] if r["method"] == method) + 1
-                result = do_one_run(args, method, attempt, num_robots, state)
+                result = do_one_run(args, method, attempt, num_robots, state,
+                                    baseline_conf)
                 state["results"].append(result)
                 save()
 
@@ -893,7 +991,11 @@ def main():
                 else:
                     consecutive_failures[method] += 1
                     print(f"    INVALID: {result['reason']}")
-                    if consecutive_failures[method] >= args.max_attempts:
+                    if result.get("fatal"):
+                        print(f"    giving up on {method}: launch rejected the "
+                              "configuration, so every retry fails identically")
+                        give_up.add(method)
+                    elif consecutive_failures[method] >= args.max_attempts:
                         print(f"    giving up on {method} after "
                               f"{args.max_attempts} consecutive failures")
                         give_up.add(method)
@@ -905,8 +1007,9 @@ def main():
         print("\nsweep stopped early.")
     finally:
         if original_method is not None and not args.dry_run:
-            set_conf_method(CONF, original_method)
-            print(f"restored MAP_TRANSPORT={original_method} in experiment.conf")
+            set_conf_values(CONF, conf_original(baseline_conf))
+            print(f"restored MAP_TRANSPORT={original_method} (and the impairment "
+                  "settings) in experiment.conf")
         save()
         summarize(state, args)
         if args.figure and not args.dry_run:
