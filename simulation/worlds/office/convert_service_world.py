@@ -103,13 +103,56 @@ ADDED_BOXES = (
     # rows accounted for 6 of the map's 29 loops.
     ("deadend_blocker_west_32", -22.0, 12.0, 1.0, 2.0, 2.0, 2.0),
     ("deadend_blocker_west_31", -22.0, 7.5, 1.0, 2.0, 2.0, 2.0),
-    # The two remaining openings in the middle corridor: the east-west corridors
-    # at y ~ 9.75 and ~ 14.25 still cross it between the blockers above, which is
-    # what let a robot circle the mid and south cubicle rows. Each spans the gap
-    # between the neighbouring blockers (2.5 m: 8.5..11.0 and 13.0..15.5), so the
-    # middle corridor is continuous obstacle from y 6.5 to 17.5.
-    ("deadend_blocker_gap_south_mid", -13.0, 9.75, 1.0, 2.0, 2.5, 2.0),
-    ("deadend_blocker_gap_mid_north", -13.0, 14.25, 1.0, 2.0, 2.5, 2.0),
+    # The two openings left in a blocker column: the east-west cubicle aisles at
+    # y ~ 9.75 and ~ 14.25 cross it between the blockers above, which is what let
+    # a robot circle the mid and south cubicle rows. Each spans the gap between
+    # its neighbouring blockers (2.5 m: 8.5..11.0 and 13.0..15.5).
+    #
+    # These plug the WEST column (x -22), not the middle one, so west_31/32/33
+    # plus these two are continuous obstacle from y 6.5 to 17.5 while the middle
+    # corridor at x -13 stays open. That choice is what sets trap depth. Sealing
+    # the middle column instead cuts each aisle in half, giving two ~12 m stubs
+    # entered from opposite ends; sealing the west column leaves each aisle as a
+    # single ~15.7 m dead end entered only from the east, so a robot that commits
+    # to one and finds it already explored retraces 31.4 m instead of 24.6 m.
+    # Same loop count (6) and same navigable area either way -- the difference is
+    # purely how far a wrong choice costs, which is the point of the exercise.
+    ("deadend_blocker_gap_south_mid", -22.0, 9.75, 1.0, 2.0, 2.5, 2.0),
+    ("deadend_blocker_gap_mid_north", -22.0, 14.25, 1.0, 2.0, 2.5, 2.0),
+    # The cubicle boxes above left the building's three main circulation rings
+    # intact, and a ring is the same problem in a different place: a robot that
+    # re-enters a teammate's ground can carry on round and come out somewhere
+    # new, so duplicated exploration still costs it almost nothing.  Cutting
+    # each ring once turns it into a single long corridor, where entering from
+    # the wrong end and finding it already explored costs a full retrace --
+    # the property the long_t world's T-intersection already demonstrates.
+    #
+    # Measured on the free space eroded by the robot's 0.19 m inscribed radius
+    # (so only loops it can actually drive are counted): the world had 17 such
+    # loops before any blocker, 9 with the cubicle boxes above, and 6 with
+    # these three.  The remaining 6 are ~1 m^2 islands of furniture in the
+    # spawn hall -- driving around a desk is not re-entering a teammate's
+    # territory, and welding desks to walls would cost navigable area for no
+    # behavioural change, so they are deliberately left alone.
+    #
+    # These are thin (0.40 m) rather than 2 m like the boxes above because
+    # they cut open corridor rather than plugging a cubicle mouth; between
+    # them they cost 8.2 m^2, 1.6% of navigable area.  Detour around each,
+    # i.e. what a wrong turn costs in retrace:
+    #   central_ring  49.1 m each way (98.2 m)  -- the main ring, x -4.9..4.8 y 4.2..16.9
+    #   east_south    32.2 m each way (64.4 m)
+    #   east_north    19.5 m each way (39.0 m)
+    #
+    # Each span is sized against the RAW free run between the walls/desks it
+    # lands on, plus 0.30 m so both ends bury 0.15 m into that geometry --
+    # not against free space eroded by the robot radius.  Sizing to eroded
+    # space leaves a real gap at each end: the robot's centre cannot pass,
+    # but the gap is still open floor in the occupancy grid, so nav2 plans
+    # into it and the lidar sees frontiers through it.  The first cut here
+    # was 1.20 m against a corridor whose true width is 4.30 m.
+    ("deadend_blocker_central_ring", 4.40, 2.20, 1.0, 0.40, 4.60, 2.0),
+    ("deadend_blocker_east_north", 9.20, 10.50, 1.0, 0.40, 2.40, 2.0),
+    ("deadend_blocker_east_south", 10.00, 4.55, 1.0, 0.40, 3.10, 2.0),
 )
 
 
