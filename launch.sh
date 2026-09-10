@@ -399,7 +399,29 @@ if [[ "${RECORD_METRICS}" == true ]]; then
   # cheap; unlike /tf (continuous, ~50 Hz+ per robot), it's not needed here.
   BAG_TOPICS+=("/tf_static")
 
-  ros2 bag record -o "${RUN_DIR}/bag" "${BAG_TOPICS[@]}" \
+  # Compress on the fly: these bags are dominated by full OccupancyGrid
+  # snapshots (/{robot}/map, /{robot}/nav_map, /{robot}/team_map_ddil at SLAM
+  # rate, per robot), which are int8 cells that are overwhelmingly -1
+  # (unknown) in long uniform runs -- near-ideal zstd input. Measured 47x on a
+  # slice of an uncompressed office run, taking a ~1.2 GB run to ~25 MB; a
+  # 30-run sweep goes from ~40 GB to under 1 GB.
+  #
+  # Uses mcap's own chunk compression (config/mcap_zstd.yaml), NOT rosbag2's
+  # --compression-mode/--compression-format. That rosbag2-level path is broken
+  # with mcap storage here: SequentialReader returns the still-compressed
+  # payload, deserialize_message() throws, and len(data) would silently become
+  # a compressed size -- corrupting the bandwidth metrics. Verified on this
+  # container before choosing this route.
+  #
+  # Transparent to analysis and replay: the reader yields full uncompressed
+  # CDR, so generate_comparison_figure.py's len(data) counts are unchanged,
+  # and it survives the `ros2 bag reindex -s mcap` that replay_gui.py runs on
+  # a scratch symlink (mcap's internal compression is not recorded in
+  # metadata.yaml, so regenerating that file cannot lose it). Bags recorded
+  # before this change stay readable alongside compressed ones.
+  ros2 bag record -s mcap \
+    --storage-config-file "${PROJECT_ROOT}/config/mcap_zstd.yaml" \
+    -o "${RUN_DIR}/bag" "${BAG_TOPICS[@]}" \
     >"${RUN_DIR}/bag_record.log" 2>&1 &
   BAG_PID=$!
 fi
