@@ -54,6 +54,11 @@ IMPAIRMENT_DELAY_S="${IMPAIRMENT_DELAY_S:-10}"
 # experiment.conf's "Time-varying link capacity" block for why the varying
 # profiles are shaped the way they are.
 LINK_PROFILE="${LINK_PROFILE:-static}"
+# Seconds between one robot starting to EXPLORE and the next. Only goal-sending
+# waits -- every robot's stack still comes up at t=0, so DDS discovery is
+# unaffected (see explore_start_stagger_s in
+# multi_robot_vxch_experiment.launch.py).
+EXPLORE_START_STAGGER_S="${EXPLORE_START_STAGGER_S:-0}"
 LINK_GOOD_KBPS="${LINK_GOOD_KBPS:-80}"
 LINK_BAD_KBPS="${LINK_BAD_KBPS:-15}"
 LINK_GOOD_DWELL_S="${LINK_GOOD_DWELL_S:-90}"
@@ -546,6 +551,7 @@ if (( NUM_ROBOTS > 1 )); then
     z:="${SPAWN_Z}" \
     yaw:="${SPAWN_YAW}" \
     map_transport:="${MAP_TRANSPORT}" \
+    explore_start_stagger_s:="${EXPLORE_START_STAGGER_S}" \
     controller_type:="${CONTROLLER_TYPE}" \
     impairment_mode:="${IMPAIRMENT_MODE}" \
     bandwidth_kbps:="${BANDWIDTH_KBPS}" \

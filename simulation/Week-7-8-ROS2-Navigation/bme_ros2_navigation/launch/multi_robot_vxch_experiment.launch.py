@@ -126,6 +126,12 @@ def _create_all_actions(context):
     delay_ms = float(LaunchConfiguration("delay_ms").perform(context))
     rng_seed = int(LaunchConfiguration("rng_seed").perform(context))
     num_robots = int(LaunchConfiguration("num_robots").perform(context))
+    explore_start_stagger_s = float(
+        LaunchConfiguration("explore_start_stagger_s").perform(context))
+    if explore_start_stagger_s < 0.0:
+        raise RuntimeError(
+            "explore_start_stagger_s must be >= 0, got "
+            f"{explore_start_stagger_s}")
     use_sim_time_str = LaunchConfiguration("use_sim_time").perform(context)
     use_sim_time = _bool_value(use_sim_time_str)
 
@@ -349,6 +355,7 @@ def _create_all_actions(context):
                 "num_robots": str(num_robots),
                 "use_sim_time": use_sim_time_str,
                 "params_file": frontier_params_file,
+                "start_stagger_s": str(explore_start_stagger_s),
             }.items(),
         )
     )
@@ -690,6 +697,13 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "bandwidth_kbps", default_value="0",
                 description="Token-bucket bandwidth limit for map transport (0 = unlimited)"),
+            DeclareLaunchArgument(
+                "explore_start_stagger_s", default_value="0.0",
+                description="Seconds between one robot starting to EXPLORE and "
+                            "the next (robot1 at 0, robotN at (N-1)*this). The "
+                            "stack comes up for every robot at t=0 either way -- "
+                            "only goal-sending waits -- so DDS discovery still "
+                            "completes during warmup. 0 disables it."),
             DeclareLaunchArgument(
                 "link_schedule_path", default_value="",
                 description="Path to a link_schedule.json (tools/gen_link_schedule.py). "

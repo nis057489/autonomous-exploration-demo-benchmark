@@ -612,7 +612,13 @@ def do_one_run(args, method, attempt, num_robots, state, baseline_conf):
               flush=True)
 
         # --- phase 2: readiness -- every robot must send a frontier goal ----
-        ready_deadline = run.launched_at + args.startup_timeout
+        # A staggered run has robots that are deliberately NOT exploring yet:
+        # robotN only sends its first goal (N-1)*stagger seconds after it is
+        # otherwise ready. Charging that against the startup timeout would fail
+        # the run for doing exactly what it was configured to do.
+        stagger_allowance = (num_robots - 1) * args.explore_start_stagger
+        ready_deadline = (run.launched_at + args.startup_timeout
+                          + stagger_allowance)
         while len(run.robots_ready) < num_robots:
             if not run.alive() and not run.pump(0.2):
                 result["reason"] = "stack exited during startup"
@@ -629,7 +635,8 @@ def do_one_run(args, method, attempt, num_robots, state, baseline_conf):
                 stalled = sorted(run.saw_costmap_stall)
                 result["reason"] = (
                     f"{missing} robot(s) never started exploring within "
-                    f"{args.startup_timeout}s (ready: {sorted(run.robots_ready) or 'none'}"
+                    f"{args.startup_timeout + stagger_allowance:.0f}s "
+                    f"(ready: {sorted(run.robots_ready) or 'none'}"
                     + (f"; stuck waiting for costmap: {stalled}" if stalled else "")
                     + ")")
                 return _finish(run, result, args, before)
@@ -813,6 +820,11 @@ def main():
                         "(default, keeps runs comparable) or from container start")
     p.add_argument("--cooldown", type=float, default=60.0,
                    help="seconds to wait after each run for docker cleanup (default 60)")
+    p.add_argument("--explore-start-stagger", type=float, default=None,
+                   help="Seconds of deliberate per-robot exploration delay to "
+                        "allow for on top of --startup-timeout. Defaults to "
+                        "EXPLORE_START_STAGGER_S from experiment.conf, so a "
+                        "staggered run does not need this passed by hand.")
     p.add_argument("--startup-timeout", type=float, default=90.0,
                    help="seconds after container start for every robot to begin "
                         "exploring before the run is called invalid (default 90)")
@@ -894,6 +906,9 @@ def main():
 
     conf = parse_conf(CONF)
     baseline_conf = dict(conf)
+    if args.explore_start_stagger is None:
+        args.explore_start_stagger = float(
+            conf.get("EXPLORE_START_STAGGER_S", 0) or 0)
     num_robots = int(conf.get("NUM_ROBOTS", "1"))
     original_method = conf.get("MAP_TRANSPORT")
     # The one oracle conflict this script will NOT fix for you. Zeroing the

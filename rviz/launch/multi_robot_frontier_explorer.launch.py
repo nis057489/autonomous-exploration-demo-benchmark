@@ -95,6 +95,11 @@ def _create_explorer_actions(context):
     params_file = _resolve_params_file(LaunchConfiguration("params_file").perform(context), package_share)
     use_sim_time = _bool_value(LaunchConfiguration("use_sim_time").perform(context))
     log_level = LaunchConfiguration("log_level").perform(context)
+    # Seconds between one robot starting to explore and the next. robot1 always
+    # starts immediately; robotN waits (N-1) * stagger. 0 disables it.
+    start_stagger_s = float(LaunchConfiguration("start_stagger_s").perform(context))
+    if start_stagger_s < 0.0:
+        raise RuntimeError("start_stagger_s must be >= 0")
 
     if num_robots < 1:
         raise RuntimeError("num_robots must be at least 1")
@@ -104,6 +109,7 @@ def _create_explorer_actions(context):
         namespace = f"robot{index + 1}"
         color_255 = _MARKER_COLORS_255[min(index, len(_MARKER_COLORS_255) - 1)]
         generated_params = _frontier_params(params_file, namespace, use_sim_time, color_255)
+        generated_params["explore_start_delay_s"] = index * start_stagger_s
         actions.append(
             Node(
                 package="lite_frontier_explorer",
@@ -131,6 +137,7 @@ def generate_launch_description():
                 default_value="config/lite_frontier_explorer/config_visit_once.yaml"),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
             DeclareLaunchArgument("log_level", default_value="info"),
+            DeclareLaunchArgument("start_stagger_s", default_value="0.0"),
             OpaqueFunction(function=_create_explorer_actions),
         ]
     )

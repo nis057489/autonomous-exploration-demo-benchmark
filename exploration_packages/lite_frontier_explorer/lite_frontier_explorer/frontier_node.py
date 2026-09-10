@@ -124,6 +124,20 @@ class LiteFrontierExplorer(Node):
         self.declare_parameter('frontier_marker_color_r', 0.15)
         self.declare_parameter('frontier_marker_color_g', 0.9)
         self.declare_parameter('frontier_marker_color_b', 0.2)
+        # Staggered start: hold this robot still for N seconds after it first
+        # becomes ABLE to explore, so a teammate can map a region before this
+        # one chooses where to go. That knowledge asymmetry is the whole point
+        # -- with every robot starting from an empty map at once, what a peer
+        # can tell you is always small and incremental.
+        #
+        # Deliberately gates goal-sending rather than delaying node startup.
+        # A robot whose stack comes up late does its DDS discovery late, under
+        # whatever link conditions happen to be live then, and FastDDS does not
+        # reliably retry a handshake that failed -- an unmatched pair stays
+        # silently unmatched for the whole run and looks exactly like "the
+        # transport was bad". Here the full stack is up and discovered from
+        # t=0; only the driving waits.
+        self.declare_parameter('explore_start_delay_s', 0.0)
 
         self._costmap_topic = self.get_parameter('costmap_topic').value
         self._global_frame = self.get_parameter('global_frame').value
@@ -151,6 +165,14 @@ class LiteFrontierExplorer(Node):
             self.get_parameter('frontier_marker_color_g').value,
             self.get_parameter('frontier_marker_color_b').value,
         )
+
+        self._explore_start_delay_s = float(
+            self.get_parameter('explore_start_delay_s').value)
+        # Measured from readiness, not construction: bringup is already
+        # staggered per robot (ROBOT_STAGGER_S) and nav2 activation time
+        # varies, so timing from __init__ would fold that jitter into the
+        # experimental variable.
+        self._ready_since = None
 
         self._latest_costmap = None
         self._goal_active = False
@@ -210,6 +232,21 @@ class LiteFrontierExplorer(Node):
         robot_pose = self._lookup_robot_pose()
         if robot_pose is None:
             return
+
+        if self._explore_start_delay_s > 0.0:
+            now = self.get_clock().now()
+            if self._ready_since is None:
+                self._ready_since = now
+                self.get_logger().info(
+                    f"Staggered start: holding for "
+                    f"{self._explore_start_delay_s:.0f}s before exploring.")
+            waited = (now - self._ready_since).nanoseconds / 1e9
+            if waited < self._explore_start_delay_s:
+                self.get_logger().info(
+                    f"Staggered start: holding, {waited:.0f}s of "
+                    f"{self._explore_start_delay_s:.0f}s elapsed.",
+                    throttle_duration_sec=15.0)
+                return
 
         clusters = find_frontier_clusters(
             costmap.data, costmap.info.width, costmap.info.height,
