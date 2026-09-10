@@ -47,7 +47,15 @@ REPO = Path(__file__).resolve().parent.parent
 # 2: added per-link ddil_stats series (link_stats), so a varying-capacity run
 #    can be read against the capacity that produced it. Version 1 caches still
 #    load -- link_stats comes back empty for them.
-SUMMARY_VERSION = 2
+# 3: read_bag now diffs each /map message against a running union rather than
+#    against only the previous message. Versions 1-2 cached the pre-fix cell
+#    series, in which pose-graph re-anchoring re-emitted whole maps (up to 17x
+#    the distinct cell count on one robot), so any redundancy figure built
+#    from them is inflated. Those caches are REJECTED rather than loaded --
+#    unlike the version-2 bump, the payload itself is wrong, not just absent,
+#    and silently loading it would keep reporting the old numbers.
+SUMMARY_VERSION = 3
+MIN_LOADABLE_VERSION = 3
 
 
 def _import_figure_module():
@@ -180,10 +188,24 @@ def export_run(bags, condition, out_path, max_duration=None, spawn_preset=None,
     return meta
 
 
+class StaleSummary(Exception):
+    """Cache predates a fix that changed what the cached arrays mean."""
+
+
 def load_summary(path):
-    """Return (meta, {robot: read_bag()-shaped tuple}) from a cache file."""
+    """Return (meta, {robot: read_bag()-shaped tuple}) from a cache file.
+
+    Raises StaleSummary for caches older than MIN_LOADABLE_VERSION; callers
+    should fall back to re-reading the bag.
+    """
     with np.load(path, allow_pickle=False) as data:
         meta = json.loads(str(data["meta"]))
+        if meta.get("version", 1) < MIN_LOADABLE_VERSION:
+            raise StaleSummary(
+                f"{path}: summary version {meta.get('version', 1)} predates the "
+                f"read_bag redundancy fix (need >= {MIN_LOADABLE_VERSION}); "
+                f"re-export it from the bag."
+            )
         results = {}
         for robot in meta["robots"]:
             rmeta = meta["per_robot"][robot]
@@ -228,7 +250,8 @@ def main():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--bag", nargs="+", metavar="robot=bag_dir", required=True)
-    p.add_argument("--condition", required=True, choices=("baseline", "vxch", "zstd"))
+    p.add_argument("--condition", required=True,
+                   choices=("baseline", "vxch", "zstd", "none", "oracle"))
     p.add_argument("--out", required=True, type=Path)
     p.add_argument("--max-duration", type=float, default=None)
     p.add_argument("--spawn-preset", default=None)

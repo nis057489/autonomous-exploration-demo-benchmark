@@ -368,6 +368,12 @@ if [[ "${RECORD_METRICS}" == true ]]; then
   echo "Recording metrics to ${RUN_DIR} (RECORD_METRICS=true)"
 
   BAG_TOPICS=()
+  # The `none` control arm launches no encoders, proxies or fusion, so every
+  # peer/DDIL topic below is never advertised. `ros2 bag record` tolerates a
+  # missing topic silently, but listing them anyway fills bag_record.log with
+  # "topic not found" lines that read like a broken run later.
+  MAP_SHARING=true
+  [[ "${MAP_TRANSPORT}" == "none" ]] && MAP_SHARING=false
   if (( NUM_ROBOTS > 1 )); then
     for ((i = 1; i <= NUM_ROBOTS; i++)); do
       name="robot${i}"
@@ -375,9 +381,9 @@ if [[ "${RECORD_METRICS}" == true ]]; then
         "/${name}/explore/traversed_path"
         "/${name}/explore/frontiers"
         "/${name}/map"
-        "/${name}/team_map_ddil"
         "/${name}/nav_map"
       )
+      [[ "${MAP_SHARING}" == true ]] && BAG_TOPICS+=("/${name}/team_map_ddil")
       # Per-link DDIL telemetry: bandwidth_kbps (the capacity actually applied,
       # including anything a LINK_PROFILE schedule set), send_rate_bps,
       # queued_bytes, msgs_shed, shed_bytes -- at 5 Hz per link. This is what
@@ -388,10 +394,12 @@ if [[ "${RECORD_METRICS}" == true ]]; then
       # time-resolved record of shedding/backlog, which the scalar byte totals
       # in the run summary cannot show. ~6 links x 5 Hz x run length of small
       # messages, a few MB before mcap's zstd against ~25 MB bags.
-      for ((j = 1; j <= NUM_ROBOTS; j++)); do
-        (( j == i )) && continue
-        BAG_TOPICS+=("/ddil_proxy_${name}_from_robot${j}/ddil_stats")
-      done
+      if [[ "${MAP_SHARING}" == true ]]; then
+        for ((j = 1; j <= NUM_ROBOTS; j++)); do
+          (( j == i )) && continue
+          BAG_TOPICS+=("/ddil_proxy_${name}_from_robot${j}/ddil_stats")
+        done
+      fi
       if [[ "${MAP_TRANSPORT}" == "vxch" ]]; then
         for ((band = 0; band <= HAAR_LEVELS; band++)); do
           BAG_TOPICS+=("/${name}/vxch/map/band_${band}")
@@ -417,7 +425,7 @@ if [[ "${RECORD_METRICS}" == true ]]; then
           BAG_TOPICS+=("/${name}/incoming/${peer}/zstd_map")
         done
       fi
-      if [[ "${MAP_TRANSPORT}" != "vxch" && "${MAP_TRANSPORT}" != "zstd" ]]; then
+      if [[ "${MAP_TRANSPORT}" == "baseline" || "${MAP_TRANSPORT}" == "oracle" ]]; then
         # baseline: ddil_proxy relays /{peer}/map straight to
         # /{name}/incoming/{peer}/map (see multi_robot_vxch_experiment.launch.py's
         # "else" branch) -- record it too, or generate_comparison_figure.py's

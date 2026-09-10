@@ -35,10 +35,11 @@ FIGURES_DIR = os.path.join(PROJECT_ROOT, "figures")
 REPLAY_SCRIPT = os.path.join(PROJECT_ROOT, "replay_compare.sh")
 FIGURE_SCRIPT = os.path.join(PROJECT_ROOT, "generate_comparison_figure.py")
 
-RUN_DIR_RE = re.compile(r"^(\d{8}_\d{6})_(baseline|vxch|zstd)_(\w+)$")
+RUN_DIR_RE = re.compile(r"^(\d{8}_\d{6})_(baseline|vxch|zstd|none|oracle)_(\w+)$")
 SESSION_GAP_SECONDS = 90  # runs across robots within this gap = one session
-CONDITIONS = ("baseline", "vxch", "zstd")
-CONDITION_LABELS = {"baseline": "Baseline run", "vxch": "Wavestream run", "zstd": "Zstd run"}
+CONDITIONS = ("none", "baseline", "vxch", "zstd", "oracle")
+CONDITION_LABELS = {"baseline": "Baseline run", "vxch": "Wavestream run", "zstd": "Zstd run",
+                    "none": "No-sharing run (control)", "oracle": "Perfect-sharing run (control)"}
 
 
 def in_container():

@@ -49,10 +49,13 @@ RATE="${1:-8}"
 
 IFS=',' read -ra CONDITIONS <<< "${REPLAY_CONDITIONS:-baseline,vxch}"
 for c in "${CONDITIONS[@]}"; do
-  if [[ "${c}" != "baseline" && "${c}" != "vxch" && "${c}" != "zstd" ]]; then
-    echo "REPLAY_CONDITIONS entries must be baseline, vxch, or zstd -- got '${c}'." >&2
-    exit 1
-  fi
+  case "${c}" in
+    baseline|vxch|zstd|none|oracle) ;;
+    *)
+      echo "REPLAY_CONDITIONS entries must be baseline, vxch, zstd, none or oracle -- got '${c}'." >&2
+      exit 1
+      ;;
+  esac
 done
 if [[ ${#CONDITIONS[@]} -lt 2 ]]; then
   echo "REPLAY_CONDITIONS needs at least 2 conditions to compare." >&2
@@ -62,6 +65,10 @@ fi
 declare -A RUN_OVERRIDES_baseline=()
 declare -A RUN_OVERRIDES_vxch=()
 declare -A RUN_OVERRIDES_zstd=()
+# Control arms. These are reached by indirect expansion on the condition name,
+# so a missing declaration fails at use rather than at validation.
+declare -A RUN_OVERRIDES_none=()
+declare -A RUN_OVERRIDES_oracle=()
 
 parse_overrides() {
   local -n _out=$1
@@ -161,6 +168,8 @@ done
 declare -A LATEST_NAME_baseline=()
 declare -A LATEST_NAME_vxch=()
 declare -A LATEST_NAME_zstd=()
+declare -A LATEST_NAME_none=()
+declare -A LATEST_NAME_oracle=()
 for entry in "${RUNS_DIR}"/*/; do
   [[ -d "${entry}" ]] || continue
   name="$(basename "${entry}")"

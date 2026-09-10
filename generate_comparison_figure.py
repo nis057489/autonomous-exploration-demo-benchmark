@@ -92,9 +92,14 @@ except ImportError:  # workspace not sourced, or a bag predating ddil_stats reco
 TEXT_PRIMARY = "#1a1a1a"
 TEXT_SECONDARY = "#52514e"
 GRID_COLOR = "#cccccc"
-ALL_CONDITIONS = ("baseline", "vxch", "zstd")  # internal keys -- match run-dir/CLI naming, unrelated to display
-DISPLAY_NAMES = {"baseline": "Baseline", "vxch": "Wavestream", "zstd": "Zstd"}
-CONDITION_COLORS = {"baseline": "#eb6834", "vxch": "#2a78d6", "zstd": "#3fa15c"}
+ALL_CONDITIONS = ("none", "baseline", "vxch", "zstd", "oracle")  # internal keys -- match run-dir/CLI naming, unrelated to display
+DISPLAY_NAMES = {"baseline": "Baseline", "vxch": "Wavestream", "zstd": "Zstd",
+                 "none": "No sharing", "oracle": "Perfect sharing"}
+# none/oracle are the control arms that bracket what map sharing can buy, not
+# competing methods -- greyed and gold rather than another saturated hue, so a
+# plot reads as "the three transports, between these two bounds".
+CONDITION_COLORS = {"baseline": "#eb6834", "vxch": "#2a78d6", "zstd": "#3fa15c",
+                    "none": "#8a8a8a", "oracle": "#d4a017"}
 LINESTYLES = ("-", "--", ":", "-.")
 
 
@@ -398,19 +403,37 @@ def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
             t = (t_ns - start_ns) / 1e9
             local_coverage.append((t, known_area_m2(msg)))
             # Store only the cells newly known since this robot's last /map
-            # message, not a full snapshot every time -- occupancy grids are
-            # cumulative (once known, cells stay known), so a full-set
-            # snapshot per message would retain O(cells * messages) instead
-            # of O(final cell count) and OOM on longer runs. Diffs union
-            # together identically to full snapshots downstream since set
-            # union already dedupes across messages/robots.
+            # message, not a full snapshot every time: a full-set snapshot per
+            # message would retain O(cells * messages) instead of O(final cell
+            # count) and OOM on longer runs.
+            #
+            # seen_cells must be a running UNION of everything this robot has
+            # ever reported, not just the previous message's cells. An
+            # occupancy grid is cumulative in its OWN frame, but known_cells
+            # keys by world position, and slam_toolbox is a pose-graph SLAM:
+            # every loop closure re-optimises the graph and shifts where the
+            # map believes the ground is, so the same physical cell re-keys
+            # and setdiff1d re-emits the entire map as "new". Diffing against
+            # only the previous message therefore leaks a full map's worth of
+            # cells per re-anchoring -- measured at 17x on one robot of
+            # 20260910_040102_baseline_office (3.42M cells emitted, 200k
+            # distinct), while a robot that happened not to close a loop came
+            # out at 1.1x. union_coverage_over_time survives that because a
+            # set dedupes the re-emissions, but cumulative_count_series sums
+            # diff sizes and cannot, which inflated run_redundant_series past
+            # its own (n_robots - 1) * union ceiling.
             # Offset applied: /map is this robot's private SLAM frame.
             cells_now = known_cells(msg, offset=map_offset)
             new_cells = np.setdiff1d(cells_now, seen_cells, assume_unique=True)
             if new_cells.size:
                 local_cell_series.append((t, new_cells))
-            seen_cells = cells_now
-            if condition == "baseline":
+            # union1d returns sorted-unique, which is what the
+            # assume_unique=True setdiff1d above needs next iteration.
+            seen_cells = np.union1d(seen_cells, cells_now)
+            # oracle relays the same raw OccupancyGrid as baseline, just
+            # unimpaired, so its own-published bytes are counted identically.
+            # `none` matches no branch here and correctly reports 0 sent.
+            if condition in ("baseline", "oracle"):
                 sent_bytes += len(data)
         elif condition == "vxch" and vxch_own_re.match(topic):
             sent_bytes += len(data)
@@ -835,10 +858,16 @@ def team_known_coverage_series(run):
 
 
 def cumulative_count_series(cell_series):
-    """Turn one robot's local_cell_series ((t, new_cells) diffs, already
-    deduped against that robot's own earlier observations) into a running
-    (t, cumulative_count) series -- how many cells *this robot alone* has
-    now seen, ignoring what any teammate has seen."""
+    """Turn one robot's local_cell_series ((t, new_cells) diffs) into a
+    running (t, cumulative_count) series -- how many cells *this robot alone*
+    has now seen, ignoring what any teammate has seen.
+
+    Summing diff sizes is only valid because read_bag builds those diffs
+    against a running union of everything the robot has reported, so no cell
+    is ever emitted twice. If that ever regresses to diffing against just the
+    previous message, pose-graph re-anchoring re-emits whole maps and this
+    count inflates without bound -- see the comment in read_bag, and the
+    ceiling assertion in run_redundant_series."""
     total = 0
     out = []
     for t, cells in cell_series:
@@ -870,6 +899,21 @@ def run_redundant_series(run, cell_index):
     for series in cell_series_by_robot.values():
         total += resample_step(cumulative_count_series(series), grid)
     redundant_vals = total - union_vals
+    # A cell counted as redundant was seen by at least two robots, so the most
+    # redundancy possible is every robot seeing the whole union:
+    # n * union - union. Breaching that means the per-robot cumulative counts
+    # are double-counting -- the failure mode read_bag's running-union diff
+    # exists to prevent. Cheap invariant, and the only thing that made the
+    # original 6-17x inflation visible without recomputing from the bags.
+    ceiling = (len(cell_series_by_robot) - 1) * union_vals
+    breach = redundant_vals > ceiling + 1e-6
+    if breach.any():
+        i = int(np.argmax(redundant_vals - ceiling))
+        print(f"warning: redundant area {redundant_vals[i]:.1f} cells exceeds its "
+              f"{ceiling[i]:.1f} ceiling at t={grid[i]:.0f}s "
+              f"({int(breach.sum())}/{len(grid)} samples) -- per-robot cell "
+              f"series are double-counting; re-export summaries from the bags",
+              file=sys.stderr)
     return list(zip(grid.tolist(), redundant_vals.tolist()))
 
 
@@ -1069,6 +1113,10 @@ def main():
                          help="One run's robot=bag_dir set. Repeat --vxch for additional runs to average.")
     parser.add_argument("--zstd", nargs="+", metavar="robot=bag_dir", action="append",
                          help="One run's robot=bag_dir set. Repeat --zstd for additional runs to average.")
+    parser.add_argument("--none", nargs="+", metavar="robot=bag_dir", action="append",
+                         help="Control arm: no map sharing at all. Repeat for additional runs to average.")
+    parser.add_argument("--oracle", nargs="+", metavar="robot=bag_dir", action="append",
+                         help="Control arm: unimpaired map sharing. Repeat for additional runs to average.")
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--max-duration", type=float, default=None,
                          help="Clip each bag to this many seconds of bag time since its start.")
@@ -1102,7 +1150,8 @@ def main():
         if runs:
             robot_paths[condition] = [parse_robot_paths(pairs) for pairs in runs]
     if len(robot_paths) < 2:
-        print("error: need at least 2 of --baseline/--vxch/--zstd to compare", file=sys.stderr)
+        print("error: need at least 2 of "
+              "--none/--baseline/--vxch/--zstd/--oracle to compare", file=sys.stderr)
         sys.exit(1)
     conditions = tuple(c for c in ALL_CONDITIONS if c in robot_paths)
 

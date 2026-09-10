@@ -138,9 +138,10 @@ def _create_all_actions(context):
     spacing = LaunchConfiguration("spacing").perform(context)
     rviz = LaunchConfiguration("rviz").perform(context)
 
-    if map_transport not in ("baseline", "vxch", "zstd"):
+    if map_transport not in ("baseline", "vxch", "zstd", "none", "oracle"):
         raise ValueError(
-            f"map_transport must be 'baseline', 'vxch', or 'zstd', got '{map_transport}'"
+            f"map_transport must be 'baseline', 'vxch', 'zstd', 'none' or "
+            f"'oracle', got '{map_transport}'"
         )
 
     impairment_mode = LaunchConfiguration("impairment_mode").perform(context)
@@ -169,6 +170,44 @@ def _create_all_actions(context):
     # end -- isolates what generic compression alone buys vs. baseline, with
     # no wavelet/tiling/scheduling from vxch involved.
     is_zstd = map_transport == "zstd"
+
+    # The two control arms. They bracket the maximum effect map sharing can
+    # have on exploration: `none` is the floor (each robot explores on its own
+    # SLAM alone) and `oracle` the ceiling (every peer map arrives instantly and
+    # intact). If a real transport's coverage does not sit between them, the
+    # difference is not coming from map sharing -- and if the two brackets
+    # themselves do not separate, no transport can, and the scenario rather than
+    # the codec is what needs changing.
+    is_none = map_transport == "none"
+    is_oracle = map_transport == "oracle"
+    # Everything that carries a peer's map: encoders, DDIL proxies, fusion.
+    # `oracle` still runs all of it -- it is baseline at zero impairment, not a
+    # separate pipeline -- so only `none` opts out.
+    is_shared = not is_none
+
+    if is_oracle:
+        # Deliberately a forced-parameter alias of baseline rather than its own
+        # branch: an unimpaired pass-through is exactly what ddil_params_for
+        # already produces at these values, and a second implementation is a
+        # second thing to get subtly wrong in the direction that flatters one
+        # arm. Refuse contradictory settings instead of silently ignoring them,
+        # so a run labelled "oracle" cannot have been impaired.
+        conflicting = [n for n, v in (("bandwidth_kbps", bandwidth_kbps),
+                                      ("loss_pct", loss_pct),
+                                      ("delay_ms", delay_ms)) if v]
+        if link_schedule_path:
+            conflicting.append("link_schedule_path")
+        if is_tc:
+            conflicting.append("impairment_mode=tc")
+        if conflicting:
+            raise RuntimeError(
+                "map_transport=oracle is the unimpaired control arm, but "
+                f"{', '.join(conflicting)} would impair it. Clear those (or set "
+                "LINK_PROFILE=static with BANDWIDTH_KBPS=0) rather than running "
+                "a run labelled 'oracle' that was actually throttled.")
+        bandwidth_kbps = 0.0   # 0 = unlimited, per experiment.conf
+        loss_pct = 0.0
+        delay_ms = 0.0
 
     robot_names = [f"robot{i + 1}" for i in range(num_robots)]
 
@@ -377,7 +416,7 @@ def _create_all_actions(context):
                     }],
                 )
             )
-    elif is_tc:
+    elif is_tc and is_shared:
         # Baseline mode has no encode step, just a rename to /{name}/map_uplink
         # so ddil_proxy below has a stable topic name to pull regardless of
         # mode. See the vxch encoder's comment above for why this deliberately
@@ -421,7 +460,8 @@ def _create_all_actions(context):
         for offset in range(1, num_robots)
         for i in range(num_robots)
     ]
-    for i, peer_index in pair_order:
+    # `none` carries no peer maps at all, so there are no links to build.
+    for i, peer_index in (pair_order if is_shared else []):
         name = robot_names[i]
         peer_name = robot_names[peer_index]
         robot_ddil_base = f"/{name}/incoming/{peer_name}"
@@ -531,7 +571,12 @@ def _create_all_actions(context):
     # Separate from the interleaved relay loop above (team_map_fusion runs in the
     # main netns and isn't part of the discovery race that loop's ordering
     # exists to defuse, so its own creation order doesn't matter).
-    for i, name in enumerate(robot_names):
+    # Skipped entirely under `none`: with no /{name}/incoming/{peer}/map there is
+    # nothing to fuse, and per_robot_map_compositor already handles the absence
+    # -- its no-team-map branch falls back to this robot's own SLAM transformed
+    # into the shared frame, so /{name}/nav_map keeps publishing and nav2 and the
+    # frontier explorer are unaffected.
+    for i, name in (enumerate(robot_names) if is_shared else []):
         peer_indices = [p for p in range(num_robots) if p != i]
         # Placed at each peer's spawn offset so a peer's map lands in the right
         # place in this robot's "map" frame regardless of which robot is doing
@@ -561,7 +606,12 @@ def _create_all_actions(context):
             )
         )
 
-    if link_schedule is not None and num_robots > 1:
+    # is_shared guard is load-bearing, not tidiness: expected_links below is
+    # num_robots * (num_robots - 1), and the scheduler holds the run clock until
+    # it has discovered that many proxies. Under `none` those proxies are never
+    # launched, so without this the run would block forever waiting for links
+    # that cannot appear.
+    if link_schedule is not None and num_robots > 1 and is_shared:
         actions.append(
             Node(
                 package="bme_ros2_navigation",
