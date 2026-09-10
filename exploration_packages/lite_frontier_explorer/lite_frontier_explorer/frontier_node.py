@@ -96,6 +96,29 @@ class LiteFrontierExplorer(Node):
         # in-flight goal and switch to the new one instead of riding out the
         # stale goal until it succeeds/aborts.
         self.declare_parameter('goal_preempt_distance_m', 1.0)
+        # ...and only if the new frontier is genuinely CLOSER by this margin.
+        #
+        # goal_preempt_distance_m on its own tests that the new pick is in a
+        # different PLACE, not that it is a better one, so any instability in
+        # the selector's ranking is enough to trigger a swap. Measured on the
+        # 20260911 office run that is exactly what happens: robot2 ping-ponged
+        # between frontiers ~19 m apart, preempting 33 of its 34 goals and
+        # never travelling far enough to reach any of them. Every flip cleared
+        # a 1 m bar by 19 m.
+        #
+        # Requiring the new goal to be materially closer to the robot than the
+        # one already in flight breaks that symmetry: A -> B needs B nearer
+        # than A by the margin, so B -> A cannot also qualify.
+        self.declare_parameter('goal_preempt_improvement_m', 2.0)
+        # Backstop for any oscillation the margin above does not catch (the
+        # robot is moving, so both distances change every tick). After this
+        # many preemptions with no goal ever reaching a terminal state, commit
+        # to the current goal and stop preempting until nav2 succeeds/aborts
+        # it or goal_stuck_timeout_s fires. Committing is what lets a goal
+        # FAIL, and a failure is the only thing that puts an unreachable
+        # frontier in the blacklist -- thrashing forever never does.
+        # 0 disables the backstop.
+        self.declare_parameter('max_consecutive_preemptions', 3)
         # Give up on an in-flight goal the robot is making no headway toward.
         #
         # Without this the explorer sends a goal, sets _goal_active, and then
@@ -155,6 +178,10 @@ class LiteFrontierExplorer(Node):
         self._turn_penalty_m = self.get_parameter('turn_penalty_m').value
         self._hysteresis_bonus_m = self.get_parameter('hysteresis_bonus_m').value
         self._goal_preempt_distance_m = self.get_parameter('goal_preempt_distance_m').value
+        self._goal_preempt_improvement_m = float(
+            self.get_parameter('goal_preempt_improvement_m').value)
+        self._max_consecutive_preemptions = int(
+            self.get_parameter('max_consecutive_preemptions').value)
         self._goal_stuck_timeout_s = self.get_parameter('goal_stuck_timeout_s').value
         self._goal_stuck_epsilon_m = self.get_parameter('goal_stuck_epsilon_m').value
         replan_period_s = self.get_parameter('replan_period_s').value
@@ -181,6 +208,8 @@ class LiteFrontierExplorer(Node):
         self._pending_goal_xy = None
         self._blacklisted_goals = []
         self._last_goal_direction = None  # (dx, dy) of the most recently sent goal
+        # Consecutive preemptions since the last goal reached a terminal state.
+        self._preempt_streak = 0
         # No-progress tracking for the active goal (see goal_stuck_timeout_s).
         self._progress_ref_xy = None      # last pose we counted as progress
         self._progress_ref_time = None    # when we counted it
@@ -353,18 +382,43 @@ class LiteFrontierExplorer(Node):
             # the markers show the newly identified frontier while the
             # robot keeps executing whatever goal was in flight when it was
             # found, which looks like it's ignoring the frontier entirely.
+            committed = (self._max_consecutive_preemptions > 0
+                         and self._preempt_streak >= self._max_consecutive_preemptions)
             if (not self._preempting and goal is not None
                     and self._pending_goal_xy is not None
+                    and not committed
                     and math.hypot(goal[0] - self._pending_goal_xy[0],
                                     goal[1] - self._pending_goal_xy[1])
                     >= self._goal_preempt_distance_m):
+                # Distance from where the robot actually is, not between the
+                # two goals -- "somewhere else" is not a reason to abandon a
+                # goal, "materially closer" is.
+                current_dist = math.hypot(
+                    self._pending_goal_xy[0] - robot_pose[0],
+                    self._pending_goal_xy[1] - robot_pose[1])
+                new_dist = math.hypot(goal[0] - robot_pose[0],
+                                      goal[1] - robot_pose[1])
+                if current_dist - new_dist >= self._goal_preempt_improvement_m:
+                    self._preempt_streak += 1
+                    self.get_logger().info(
+                        f"Preempting in-flight goal ({self._pending_goal_xy[0]:.2f}, "
+                        f"{self._pending_goal_xy[1]:.2f}) at {current_dist:.1f}m for "
+                        f"closer frontier ({goal[0]:.2f}, {goal[1]:.2f}) at "
+                        f"{new_dist:.1f}m [streak {self._preempt_streak}].")
+                    self._preempting = True
+                    if self._goal_handle is not None:
+                        self._goal_handle.cancel_goal_async()
+            elif (committed and not self._preempting
+                    and self._pending_goal_xy is not None):
+                # The not-None guard is repeated deliberately: it lives in the
+                # `if` above, so without it here this branch would dereference
+                # a None goal and kill the explorer outright.
                 self.get_logger().info(
-                    f"Preempting in-flight goal ({self._pending_goal_xy[0]:.2f}, "
-                    f"{self._pending_goal_xy[1]:.2f}) for closer/better frontier "
-                    f"({goal[0]:.2f}, {goal[1]:.2f}).")
-                self._preempting = True
-                if self._goal_handle is not None:
-                    self._goal_handle.cancel_goal_async()
+                    f"Committed to goal ({self._pending_goal_xy[0]:.2f}, "
+                    f"{self._pending_goal_xy[1]:.2f}) after "
+                    f"{self._preempt_streak} preemptions -- riding it out so it "
+                    "can succeed, fail, or trip the stuck timer.",
+                    throttle_duration_sec=15.0)
             return  # still navigating -- _on_result() clears this when nav2 is done
 
         if not clusters:
@@ -506,6 +560,7 @@ class LiteFrontierExplorer(Node):
         if not goal_handle.accepted:
             self.get_logger().warn("Goal rejected by nav2.")
             self._blacklist_pending_goal()
+            self._preempt_streak = 0
             self._goal_active = False
             self._preempting = False
             self._abandoning_stuck = False
@@ -524,14 +579,19 @@ class LiteFrontierExplorer(Node):
         status = future.result().status
         if status == GoalStatus.STATUS_SUCCEEDED:
             self._pending_goal_xy = None
+            self._preempt_streak = 0
         elif status == GoalStatus.STATUS_CANCELED and self._preempting:
             # Cancelled by us to switch to a better frontier, not a real
             # failure -- don't blacklist a perfectly reachable goal.
+            # _preempt_streak is deliberately NOT reset here: this is the
+            # outcome it exists to count, and clearing it would let the
+            # explorer preempt forever without ever reaching the backstop.
             self._pending_goal_xy = None
         else:
             self.get_logger().warn(
                 f"Goal did not succeed (status={status}) -- blacklisting it.")
             self._blacklist_pending_goal()
+            self._preempt_streak = 0
         self._goal_active = False
         self._goal_handle = None
         self._preempting = False

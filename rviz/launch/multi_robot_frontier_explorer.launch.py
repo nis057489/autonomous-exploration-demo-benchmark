@@ -60,6 +60,13 @@ _LITE_PARAM_KEYS = (
     # is a filter, not documentation.
     "goal_stuck_timeout_s",
     "goal_stuck_epsilon_m",
+    # Preempt gating. Without these in the allowlist a config.yaml that tunes
+    # them is silently ignored and the node defaults stand -- which is how the
+    # 33-of-34-goals-preempted oscillation stayed invisible.
+    "goal_preempt_distance_m",
+    "goal_preempt_improvement_m",
+    "max_consecutive_preemptions",
+    "goal_blacklist_radius_m",
     "navigate_to_pose_action_name",
     "frontier_marker_scale",
 )

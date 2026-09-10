@@ -32,7 +32,7 @@ frontier_explorer:
     # gain/distance and drop unreachable ones via the BFS path check, so a
     # tiny sliver frontier only gets driven to if it's genuinely the best
     # (or only) reachable option -- no separate size gate needed to avoid it.
-    min_frontier_size_cells: 1
+    min_frontier_size_cells: 3
 
     # Minimum distance in meters between the robot and a candidate frontier.
     min_frontier_distance_m: 2.0
