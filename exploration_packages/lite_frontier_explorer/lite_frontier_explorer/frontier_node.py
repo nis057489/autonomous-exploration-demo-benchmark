@@ -119,6 +119,29 @@ class LiteFrontierExplorer(Node):
         # frontier in the blacklist -- thrashing forever never does.
         # 0 disables the backstop.
         self.declare_parameter('max_consecutive_preemptions', 3)
+        # Distinguishing "this frontier is unreachable" from "this ROBOT is
+        # wedged". Both look identical to the no-progress timer -- the robot
+        # stops moving -- but they need opposite responses, and getting it
+        # wrong is destructive. Measured on the 20260911 office run: robot1
+        # jammed in a doorway at (4.65, 14.05), sat at that exact pose for
+        # five consecutive goals, and blacklisted frontiers at (19.41, 0.63),
+        # (0.88, 11.01), (2.34, 21.43) and (-5.95, 16.58) -- scattered across
+        # the whole building, every one of them perfectly reachable. It was
+        # poisoning its own blacklist with the entire map because it could not
+        # move at all.
+        #
+        # If two consecutive no-progress events happen within this radius of
+        # each other, the robot has not moved between them, so the frontier is
+        # not what failed. Blame nothing, and let nav2's recovery chain (spin /
+        # back-up / clear-costmap) actually run instead of cancelling it at
+        # goal_stuck_timeout_s -- recovery is exactly what frees a wedged
+        # footprint, and cancelling early is what prevents it.
+        self.declare_parameter('wedge_detect_radius_m', 0.5)
+        # How many times to let recovery try before giving up on the goal
+        # anyway. Still never blacklists it -- a different goal means a
+        # different approach direction, which is itself often what unwedges
+        # the robot.
+        self.declare_parameter('max_wedge_cycles', 3)
         # Give up on an in-flight goal the robot is making no headway toward.
         #
         # Without this the explorer sends a goal, sets _goal_active, and then
@@ -182,6 +205,9 @@ class LiteFrontierExplorer(Node):
             self.get_parameter('goal_preempt_improvement_m').value)
         self._max_consecutive_preemptions = int(
             self.get_parameter('max_consecutive_preemptions').value)
+        self._wedge_detect_radius_m = float(
+            self.get_parameter('wedge_detect_radius_m').value)
+        self._max_wedge_cycles = int(self.get_parameter('max_wedge_cycles').value)
         self._goal_stuck_timeout_s = self.get_parameter('goal_stuck_timeout_s').value
         self._goal_stuck_epsilon_m = self.get_parameter('goal_stuck_epsilon_m').value
         replan_period_s = self.get_parameter('replan_period_s').value
@@ -210,6 +236,10 @@ class LiteFrontierExplorer(Node):
         self._last_goal_direction = None  # (dx, dy) of the most recently sent goal
         # Consecutive preemptions since the last goal reached a terminal state.
         self._preempt_streak = 0
+        # Where the robot was when the no-progress timer last fired, and how
+        # many times it has fired without the robot moving away from there.
+        self._last_stuck_xy = None
+        self._wedge_cycles = 0
         # No-progress tracking for the active goal (see goal_stuck_timeout_s).
         self._progress_ref_xy = None      # last pose we counted as progress
         self._progress_ref_time = None    # when we counted it
@@ -366,6 +396,49 @@ class LiteFrontierExplorer(Node):
                         goal_desc = (
                             f"({self._pending_goal_xy[0]:.2f}, {self._pending_goal_xy[1]:.2f})"
                             if self._pending_goal_xy is not None else "(unknown)")
+
+                        # Did the robot move at all since the LAST time this
+                        # fired? If not it is wedged, and the frontier is
+                        # innocent -- see wedge_detect_radius_m.
+                        wedged = (
+                            self._last_stuck_xy is not None
+                            and math.hypot(
+                                robot_pose[0] - self._last_stuck_xy[0],
+                                robot_pose[1] - self._last_stuck_xy[1])
+                            < self._wedge_detect_radius_m)
+                        self._last_stuck_xy = (robot_pose[0], robot_pose[1])
+
+                        if wedged:
+                            self._wedge_cycles += 1
+                            if self._wedge_cycles <= self._max_wedge_cycles:
+                                # Leave the goal in flight deliberately: nav2's
+                                # recovery behaviours are what free a jammed
+                                # footprint, and cancelling here is precisely
+                                # what has been stopping them finishing.
+                                self.get_logger().warn(
+                                    f"Robot has not moved from ({robot_pose[0]:.2f}, "
+                                    f"{robot_pose[1]:.2f}) since the last stall -- WEDGED, "
+                                    f"not a bad frontier. Holding goal {goal_desc} so nav2 "
+                                    f"recovery can run (cycle {self._wedge_cycles}/"
+                                    f"{self._max_wedge_cycles}).")
+                                self._progress_ref_xy = (robot_pose[0], robot_pose[1])
+                                self._progress_ref_time = now
+                                return
+                            # Recovery has had its chances. Switch goals for a
+                            # different approach angle, but still do NOT blame
+                            # the frontier.
+                            self.get_logger().warn(
+                                f"Still wedged at ({robot_pose[0]:.2f}, {robot_pose[1]:.2f}) "
+                                f"after {self._wedge_cycles} recovery cycles -- switching "
+                                f"goals for a new approach angle. {goal_desc} is NOT "
+                                f"blacklisted; the robot is what is stuck.")
+                            self._wedge_cycles = 0
+                            self._preempting = True   # cancel WITHOUT blacklisting
+                            if self._goal_handle is not None:
+                                self._goal_handle.cancel_goal_async()
+                            return
+
+                        self._wedge_cycles = 0
                         self.get_logger().warn(
                             f"No progress toward goal {goal_desc} for {stalled_s:.1f}s "
                             f"(moved < {self._goal_stuck_epsilon_m}m) -- abandoning and "
