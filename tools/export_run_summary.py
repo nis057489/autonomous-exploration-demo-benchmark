@@ -12,6 +12,10 @@ What is stored, per robot, is precisely read_bag()'s return value:
     coverage, local_coverage            (t, known_area_m2) series
     local_cell_series, nav_cell_series  (t, newly-known packed cell keys)
     resolution                          metres per cell
+    link_stats                          per-peer (t, value) series for the
+                                        capacity actually applied to each
+                                        downlink plus the response to it
+                                        (send rate, backlog, bytes shed)
 The cell series are diffs (new cells per message), not snapshots, so they stay
 small -- they are what the union/redundant-coverage plots need in order to
 combine robots without double-counting.
@@ -40,7 +44,10 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parent.parent
-SUMMARY_VERSION = 1
+# 2: added per-link ddil_stats series (link_stats), so a varying-capacity run
+#    can be read against the capacity that produced it. Version 1 caches still
+#    load -- link_stats comes back empty for them.
+SUMMARY_VERSION = 2
 
 
 def _import_figure_module():
@@ -117,7 +124,7 @@ def export_run(bags, condition, out_path, max_duration=None, spawn_preset=None,
                   file=sys.stderr)
             continue
         (received, sent, coverage, local_coverage,
-         local_cells, nav_cells, resolution) = result
+         local_cells, nav_cells, resolution, link_stats) = result
 
         cov_t, cov_a = _pack_xy(coverage)
         loc_t, loc_a = _pack_xy(local_coverage)
@@ -131,6 +138,15 @@ def export_run(bags, condition, out_path, max_duration=None, spawn_preset=None,
             f"{robot}/nav_cells_t": nc_t, f"{robot}/nav_cells_o": nc_o,
             f"{robot}/nav_cells_k": nc_k,
         })
+        # One key group per (robot, peer) downlink. Kept per-link rather than
+        # averaged: a link the scheduler never reached shows as a flat
+        # bandwidth line here, and collapsing the links together would hide
+        # exactly that failure.
+        for peer, series in sorted(link_stats.items()):
+            for field, points in sorted(series.items()):
+                t_arr, v_arr = _pack_xy(points)
+                arrays[f"{robot}/link/{peer}/{field}_t"] = t_arr
+                arrays[f"{robot}/link/{peer}/{field}_v"] = v_arr
         per_robot_meta[robot] = {
             "received_bytes": int(received),
             "sent_bytes": int(sent),
@@ -140,6 +156,8 @@ def export_run(bags, condition, out_path, max_duration=None, spawn_preset=None,
             "coverage_points": int(cov_t.size),
             "local_cell_messages": int(lc_t.size),
             "nav_cell_messages": int(nc_t.size),
+            "links": sorted(link_stats),
+            "link_fields": sorted(next(iter(link_stats.values()))) if link_stats else [],
         }
 
     if not per_robot_meta:
@@ -179,10 +197,19 @@ def load_summary(path):
             nav_cells = _unpack_cell_series(data[f"{robot}/nav_cells_t"],
                                             data[f"{robot}/nav_cells_o"],
                                             data[f"{robot}/nav_cells_k"])
+            # .get() so a version-1 cache (no link keys, no "links" entry)
+            # still loads, just with nothing to say about capacity over time.
+            link_stats = {}
+            for peer in rmeta.get("links", []):
+                link_stats[peer] = {
+                    field: list(zip(data[f"{robot}/link/{peer}/{field}_t"].tolist(),
+                                    data[f"{robot}/link/{peer}/{field}_v"].tolist()))
+                    for field in rmeta.get("link_fields", [])
+                }
             results[robot] = (
                 rmeta["received_bytes"], rmeta["sent_bytes"],
                 coverage, local_coverage, local_cells, nav_cells,
-                rmeta["resolution"],
+                rmeta["resolution"], link_stats,
             )
     return meta, results
 

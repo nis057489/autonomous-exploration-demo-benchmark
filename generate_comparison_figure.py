@@ -78,10 +78,16 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
 from rclpy.serialization import deserialize_message
 from nav_msgs.msg import OccupancyGrid
+
+try:
+    from voxelcodec_msgs.msg import DdilStats
+except ImportError:  # workspace not sourced, or a bag predating ddil_stats recording
+    DdilStats = None
 
 TEXT_PRIMARY = "#1a1a1a"
 TEXT_SECONDARY = "#52514e"
@@ -211,7 +217,7 @@ def _reindexed_copy(bag_dir):
 
 def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
     """Returns (received_bytes, sent_bytes, coverage, local_coverage,
-    local_cell_series, nav_cell_series, resolution) where coverage and
+    local_cell_series, nav_cell_series, resolution, link_stats) where coverage and
     local_coverage are each a list of (seconds_since_start, known_area_m2) -- coverage
     from /<robot>/nav_map (post-fusion team map), local_coverage from
     /<robot>/map (this robot's own raw SLAM output, never touched by
@@ -233,6 +239,13 @@ def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
     nav_cell_series' packed keys, for converting union "tile" counts back to
     m^2 downstream -- 0.0 if this robot never published a /map or /nav_map
     message with any known cells.
+
+    link_stats is {peer: {"bandwidth"|"send_rate"|"queued"|"shed": [(t, value)]}}
+    read off /ddil_proxy_<robot>_from_<peer>/ddil_stats -- the capacity actually
+    applied to each of this robot's downlinks over time (which a LINK_PROFILE
+    schedule varies during the run) together with the transport's response to
+    it. Empty for bags recorded before that topic was bagged, or when
+    voxelcodec_msgs is not importable.
 
     map_offset is this robot's spawn pose (x, y, yaw) -- the pose of its
     private SLAM `map` frame within the shared team frame -- and is required
@@ -260,6 +273,11 @@ def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
         return None
 
     incoming_re = re.compile(rf"^/{re.escape(robot)}/incoming/")
+    # /ddil_proxy_{robot}_from_{peer}/ddil_stats -- this robot's own downlink
+    # from each peer, i.e. the links whose capacity a LINK_PROFILE schedule
+    # drives and whose backlog/shedding is the response to it.
+    ddil_stats_re = re.compile(
+        rf"^/ddil_proxy_{re.escape(robot)}_from_(?P<peer>[^/]+)/ddil_stats$")
     vxch_own_re = re.compile(rf"^/{re.escape(robot)}/vxch/map/")
     zstd_own_topic = f"/{robot}/zstd/map"
     nav_map_topic = f"/{robot}/nav_map"
@@ -353,6 +371,7 @@ def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
 
     local_cell_series = []
     nav_cell_series = []
+    link_stats = {}
     seen_cells = np.empty(0, dtype=np.int64)
     seen_nav_cells = np.empty(0, dtype=np.int64)
     while reader.has_next():
@@ -397,6 +416,20 @@ def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
             sent_bytes += len(data)
         elif condition == "zstd" and topic == zstd_own_topic:
             sent_bytes += len(data)
+        elif DdilStats is not None and ddil_stats_re.match(topic):
+            peer = ddil_stats_re.match(topic).group("peer")
+            msg = deserialize_message(data, DdilStats)
+            t = (t_ns - start_ns) / 1e9
+            link = link_stats.setdefault(
+                peer, {"bandwidth": [], "send_rate": [], "queued": [], "shed": []})
+            # bandwidth_kbps is the capacity ACTUALLY in force at this instant,
+            # read back from the proxy rather than from the schedule file --
+            # so a link the scheduler failed to reach shows up here as a flat
+            # line instead of silently being assumed to have followed along.
+            link["bandwidth"].append((t, float(msg.bandwidth_kbps)))
+            link["send_rate"].append((t, float(msg.send_rate_bps)))
+            link["queued"].append((t, float(msg.queued_bytes)))
+            link["shed"].append((t, float(msg.shed_bytes)))
 
     del reader
     if scratch_dir is not None:
@@ -406,8 +439,15 @@ def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
     local_coverage.sort(key=lambda p: p[0])
     local_cell_series.sort(key=lambda p: p[0])
     nav_cell_series.sort(key=lambda p: p[0])
+    for link in link_stats.values():
+        for series in link.values():
+            series.sort(key=lambda p: p[0])
     resolution = resolution_seen[0] if resolution_seen else 0.0
-    return received_bytes, sent_bytes, coverage, local_coverage, local_cell_series, nav_cell_series, resolution
+    # link_stats appended LAST so every existing positional index into this
+    # tuple (see plot_bandwidth's byte_index / plot_coverage's series_index)
+    # keeps meaning what it did.
+    return (received_bytes, sent_bytes, coverage, local_coverage,
+            local_cell_series, nav_cell_series, resolution, link_stats)
 
 
 def style_ax(ax):
@@ -505,6 +545,100 @@ def plot_bandwidth(ax, results, conditions, byte_index, title, ylabel):
     style_ax(ax)
 
 
+def _step_value_at(series, t):
+    """Value of a piecewise-constant (t, value) series at time t (0 before it starts)."""
+    lo, hi = 0, len(series)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if series[mid][0] <= t:
+            lo = mid + 1
+        else:
+            hi = mid
+    return series[lo - 1][1] if lo else 0.0
+
+
+def capacity_timeline(results, conditions):
+    """The run's shared link-capacity (t, kbps) step series, or None.
+
+    Built from the bagged ddil_stats rather than from link_schedule.json, so it
+    reports the capacity the proxies ACTUALLY had, not the capacity they were
+    asked to have.
+
+    Returns None if the links disagree with each other. That is not a fallback
+    to be papered over: LINK_PROFILE drives every link with one shared schedule,
+    so disagreement means some link was never reached and the run has no single
+    capacity timeline. Shading one anyway would assert something false about the
+    conditions the other links were under.
+    """
+    all_series = [link["bandwidth"]
+                  for cond in conditions
+                  for run in results.get(cond, [])
+                  for entry in run.values()
+                  if len(entry) > 7
+                  for link in entry[7].values()
+                  if link.get("bandwidth")]
+    if not all_series:
+        return None
+
+    ref = all_series[0]
+    # Probe on the reference's own transition times, plus a second after each,
+    # which is where any disagreement shows up.
+    probes = sorted({t for t, _ in ref} | {t + 1.0 for t, _ in ref})
+    for other in all_series[1:]:
+        for t in probes:
+            a, b = _step_value_at(ref, t), _step_value_at(other, t)
+            # 1 kbps tolerance: these are floats round-tripped through a message.
+            if abs(a - b) > 1.0:
+                print(f"warning: DDIL links disagree on capacity at t={t:.0f}s "
+                      f"({a:.0f} vs {b:.0f} kbps) -- some link was not driven by "
+                      "the schedule, so this run has no single capacity timeline "
+                      "and is not comparable to one that does. Not shading.",
+                      file=sys.stderr)
+                return None
+
+    # Collapse the 5 Hz samples down to the transitions themselves.
+    collapsed = []
+    for t, kbps in ref:
+        if not collapsed or abs(collapsed[-1][1] - kbps) > 1.0:
+            collapsed.append((t, kbps))
+    return collapsed
+
+
+def capacity_spans(timeline, t_end):
+    """[(t0, t1, kbps)] from a capacity timeline."""
+    if not timeline:
+        return []
+    spans = []
+    for i, (t, kbps) in enumerate(timeline):
+        end = timeline[i + 1][0] if i + 1 < len(timeline) else t_end
+        if end > t:
+            spans.append((t, end, kbps))
+    return spans
+
+
+def shade_capacity(ax, spans):
+    """Grey out every stretch where the link was below its best capacity.
+
+    This is what makes a varying-capacity run readable at a glance: whether a
+    transport's coverage curve keeps climbing through the shaded stretches, or
+    flattens and then dumps a stale burst on the far side, IS the
+    graceful-degradation claim.
+    """
+    if not spans:
+        return
+    best = max(kbps for _, _, kbps in spans)
+    constrained = [sp for sp in spans if sp[2] < best - 1.0]
+    if not constrained:
+        return
+    worst = min(kbps for _, _, kbps in constrained)
+    for t0, t1, kbps in constrained:
+        # Deeper cut = darker band, so a staircase profile reads as a gradient
+        # instead of one undifferentiated block.
+        depth = (best - kbps) / (best - worst) if best > worst else 1.0
+        ax.axvspan(t0, t1, color="#7a7a7a", alpha=0.06 + 0.10 * depth,
+                   linewidth=0, zorder=0)
+
+
 def plot_coverage(ax, results, conditions, series_index, title, ylabel):
     """series_index selects which per-robot coverage series to plot out of
     the (received_bytes, sent_bytes, coverage, local_coverage, ...) tuple --
@@ -515,6 +649,13 @@ def plot_coverage(ax, results, conditions, series_index, title, ylabel):
     when more than one run contributes."""
     robots = sorted({r for run in results.values() for entry in run for r in entry})
     robot_style = {r: LINESTYLES[i % len(LINESTYLES)] for i, r in enumerate(robots)}
+
+    timeline = capacity_timeline(results, conditions)
+    all_max_ts = [entry[series_index][-1][0]
+                  for runs in results.values() for run in runs
+                  for entry in run.values() if entry[series_index]]
+    if timeline and all_max_ts:
+        shade_capacity(ax, capacity_spans(timeline, max(all_max_ts)))
 
     for cond in conditions:
         runs = results[cond]
@@ -544,8 +685,68 @@ def plot_coverage(ax, results, conditions, series_index, title, ylabel):
 
     handles = [Line2D([0], [0], color=CONDITION_COLORS[c], lw=2, label=DISPLAY_NAMES[c])
                for c in conditions if results[c]]
+    if timeline and len({kbps for _, kbps in timeline}) > 1:
+        handles.append(Patch(facecolor="#7a7a7a", alpha=0.16, linewidth=0,
+                             label="Reduced link capacity"))
     if handles:
         ax.legend(handles=handles, frameon=False, fontsize=10, loc="lower right")
+
+
+def report_degradation(results, conditions):
+    """Print how much of each transport's healthy coverage rate survives an outage.
+
+    This is the transient a constant-bandwidth run cannot show, stated as a
+    number. For each condition: mean rate of communicated-coverage growth
+    (m^2/s, off /nav_map) while the link was at its best capacity, versus while
+    it was constrained. The ratio between the two IS the graceful-degradation
+    claim -- a transport that keeps delivering coarse coverage of the whole map
+    through an outage retains a large fraction of its healthy rate; one that
+    stalls and then dumps a stale burst on the far side does not.
+
+    Deliberately NOT a slope-matched "time to recover": the coverage curves are
+    step functions sampled at SLAM's own irregular cadence, so fitting a slope
+    to them and asking when a later slope matches it is dominated by the choice
+    of smoothing window rather than by the transport. A ratio of areas over
+    spans whose boundaries the schedule defines exactly has no such free
+    parameter.
+    """
+    timeline = capacity_timeline(results, conditions)
+    if not timeline or len({kbps for _, kbps in timeline}) < 2:
+        return  # constant-capacity run: nothing to say
+
+    max_ts = [entry[2][-1][0] for cond in conditions
+              for run in results.get(cond, []) for entry in run.values() if entry[2]]
+    if not max_ts:
+        return
+    spans = capacity_spans(timeline, max(max_ts))
+    best = max(kbps for _, _, kbps in spans)
+    healthy = [(a, b) for a, b, k in spans if k >= best - 1.0]
+    starved = [(a, b) for a, b, k in spans if k < best - 1.0]
+    if not healthy or not starved:
+        return
+
+    def rate_over(series, windows):
+        """m^2 gained per second across the given windows of a cumulative series."""
+        gained = sum(max(_step_value_at(series, b) - _step_value_at(series, a), 0.0)
+                     for a, b in windows)
+        secs = sum(b - a for a, b in windows)
+        return gained / secs if secs > 0 else 0.0
+
+    print()
+    print("Coverage growth vs link capacity "
+          f"(healthy = {best:.0f} kbps, {sum(b - a for a, b in healthy):.0f}s; "
+          f"constrained, {sum(b - a for a, b in starved):.0f}s):")
+    for condition in conditions:
+        runs = results.get(condition, [])
+        pairs = [(rate_over(e[2], healthy), rate_over(e[2], starved))
+                 for run in runs for e in run.values() if e[2]]
+        if not pairs:
+            continue
+        h = float(np.mean([x for x, _ in pairs]))
+        c = float(np.mean([y for _, y in pairs]))
+        retained = f"{100.0 * c / h:.0f}% retained" if h > 0 else "n/a"
+        print(f"{DISPLAY_NAMES[condition]:>10}: {h:7.2f} m²/s healthy, "
+              f"{c:7.2f} m²/s constrained -- {retained}")
 
 
 def union_coverage_over_time(cell_series_by_robot):
@@ -1015,6 +1216,7 @@ def main():
             std_local_suffix = f" ± {np.std(finals_local):.1f}" if len(finals_local) > 1 else ""
             print(f"{DISPLAY_NAMES[condition]} {robot}: final known map area {final:.1f}{std_suffix} m^2 "
                   f"(communicated, incl. peer-relayed cells), {final_local:.1f}{std_local_suffix} m^2 self-observed")
+    report_degradation(results, conditions)
     for condition in conditions:
         n = summary[condition]["runs"]
         physical_mean, physical_std = summary[condition]["physical"]

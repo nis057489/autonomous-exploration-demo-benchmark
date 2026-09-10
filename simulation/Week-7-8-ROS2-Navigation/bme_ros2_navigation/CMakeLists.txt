@@ -50,6 +50,7 @@ endif()
 install(PROGRAMS
   scripts/team_map_fusion.py
   scripts/per_robot_map_compositor.py
+  scripts/link_scheduler_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -110,6 +110,18 @@ def _create_all_actions(context):
     tile_size_m = float(LaunchConfiguration("tile_size_m").perform(context))
     schedule_mode = LaunchConfiguration("schedule_mode").perform(context)
     bandwidth_kbps = float(LaunchConfiguration("bandwidth_kbps").perform(context))
+    link_schedule_path = LaunchConfiguration("link_schedule_path").perform(context)
+    link_schedule = None
+    if link_schedule_path:
+        with open(link_schedule_path) as _f:
+            link_schedule = json.load(_f)
+        # Launch the proxies at the schedule's OWN opening capacity rather than
+        # the static bandwidth_kbps. Otherwise the warmup window -- the stretch
+        # that exists precisely so DDS discovery can complete before anything is
+        # throttled -- would run at whatever bandwidth_kbps happened to be set
+        # to, which is not the condition the schedule describes and is not what
+        # link_schedule.json would claim happened.
+        bandwidth_kbps = float(link_schedule["segments"][0]["kbps"])
     loss_pct = float(LaunchConfiguration("loss_pct").perform(context))
     delay_ms = float(LaunchConfiguration("delay_ms").perform(context))
     rng_seed = int(LaunchConfiguration("rng_seed").perform(context))
@@ -135,6 +147,21 @@ def _create_all_actions(context):
     if impairment_mode not in ("sim", "tc"):
         raise ValueError(f"impairment_mode must be 'sim' or 'tc', got '{impairment_mode}'")
     is_tc = impairment_mode == "tc"
+
+    # A link schedule drives the software token bucket via bandwidth_kbps. In tc
+    # mode that parameter is deliberately pinned to 0 (real tc netem does the
+    # shaping) precisely so the token bucket cannot double-throttle on top of
+    # the kernel -- see ddil_params_for below and set_wifi_bandwidth.sh's header.
+    # Replaying a schedule onto it would reintroduce exactly the double-limiting
+    # that pinning exists to prevent, and the run would be shaped twice at two
+    # different rates with nothing reporting it. Refuse rather than mislead.
+    if link_schedule_path and is_tc:
+        raise RuntimeError(
+            "link_schedule_path is only supported with IMPAIRMENT_MODE=sim. In tc "
+            "mode the shaping lives in the kernel and bandwidth_kbps is pinned to "
+            "0 to avoid double-throttling; a schedule would re-engage the token "
+            "bucket on top of tc netem. Vary the rate with setup_ddil_netns.sh "
+            "instead, or set LINK_PROFILE=static.")
 
     is_vxch = map_transport == "vxch"
     # zstd: same relayed OccupancyGrid as baseline, but the serialized message
@@ -534,6 +561,25 @@ def _create_all_actions(context):
             )
         )
 
+    if link_schedule is not None and num_robots > 1:
+        actions.append(
+            Node(
+                package="bme_ros2_navigation",
+                executable="link_scheduler_node.py",
+                name="link_scheduler",
+                output="screen",
+                parameters=[{
+                    "schedule_path": link_schedule_path,
+                    # One proxy per ordered (robot, peer) pair -- the scheduler
+                    # holds the run clock until it has found all of them, so a
+                    # slow-starting link cannot spend the first stretch of the
+                    # run at a different capacity than its peers.
+                    "expected_links": num_robots * (num_robots - 1),
+                    "use_sim_time": use_sim_time,
+                }],
+            )
+        )
+
     return actions
 
 
@@ -594,6 +640,14 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "bandwidth_kbps", default_value="0",
                 description="Token-bucket bandwidth limit for map transport (0 = unlimited)"),
+            DeclareLaunchArgument(
+                "link_schedule_path", default_value="",
+                description="Path to a link_schedule.json (tools/gen_link_schedule.py). "
+                            "When set, link_scheduler_node replays it onto every "
+                            "ddil_proxy's bandwidth_kbps during the run, and the "
+                            "schedule's t=0 value -- not bandwidth_kbps -- is what the "
+                            "proxies launch at. Empty (default) = constant bandwidth_kbps, "
+                            "unchanged behavior"),
             DeclareLaunchArgument(
                 "loss_pct", default_value="0.0",
                 description="Per-message drop probability 0–100"),

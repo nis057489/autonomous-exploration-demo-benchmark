@@ -103,6 +103,10 @@ COPY launch_real_hardware.sh launch_real_hardware.sh
 COPY docker.sh docker.sh
 COPY spawn_presets.yaml spawn_presets.yaml
 COPY experiment.conf experiment.conf
+# launch.sh runs tools/gen_link_schedule.py in here when LINK_PROFILE != static,
+# so the tools dir has to exist in the image too -- otherwise the run aborts at
+# startup rather than silently proceeding unshaped.
+COPY tools tools
 
 RUN chmod +x ${WORKSPACE_DIR}/launch.sh ${WORKSPACE_DIR}/docker/entrypoint.sh
 

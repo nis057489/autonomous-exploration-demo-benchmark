@@ -49,9 +49,38 @@ IMPAIRMENT_MODE="${IMPAIRMENT_MODE:-sim}"
 # multiple SPDP announce/response round-trips; applying tight bandwidth/loss/
 # delay limits before it completes can prevent it from ever completing.
 IMPAIRMENT_DELAY_S="${IMPAIRMENT_DELAY_S:-10}"
+# Time-varying link capacity. static (default) = one constant BANDWIDTH_KBPS for
+# the whole run, i.e. unchanged behavior and no scheduler node. See
+# experiment.conf's "Time-varying link capacity" block for why the varying
+# profiles are shaped the way they are.
+LINK_PROFILE="${LINK_PROFILE:-static}"
+LINK_GOOD_KBPS="${LINK_GOOD_KBPS:-80}"
+LINK_BAD_KBPS="${LINK_BAD_KBPS:-15}"
+LINK_GOOD_DWELL_S="${LINK_GOOD_DWELL_S:-90}"
+LINK_BAD_DWELL_S="${LINK_BAD_DWELL_S:-30}"
+LINK_MIN_DWELL_S="${LINK_MIN_DWELL_S:-15}"
+LINK_WARMUP_S="${LINK_WARMUP_S:-60}"
+LINK_DURATION_S="${LINK_DURATION_S:-900}"
 
 if [[ "${IMPAIRMENT_MODE}" != "sim" && "${IMPAIRMENT_MODE}" != "tc" ]]; then
   echo "IMPAIRMENT_MODE must be 'sim' or 'tc' (got '${IMPAIRMENT_MODE}')." >&2
+  exit 1
+fi
+
+case "${LINK_PROFILE}" in
+  static|gilbert_elliott|staircase) ;;
+  *)
+    echo "LINK_PROFILE must be 'static', 'gilbert_elliott' or 'staircase' (got '${LINK_PROFILE}')." >&2
+    exit 1
+    ;;
+esac
+
+# The schedule replays onto ddil_proxy's software token bucket, which tc mode
+# pins to 0 so it cannot double-throttle on top of the kernel's own shaping.
+# Caught here as well as in the launch file so it fails before Gazebo starts.
+if [[ "${LINK_PROFILE}" != "static" && "${IMPAIRMENT_MODE}" == "tc" ]]; then
+  echo "LINK_PROFILE=${LINK_PROFILE} needs IMPAIRMENT_MODE=sim -- in tc mode the shaping" >&2
+  echo "lives in the kernel and bandwidth_kbps is pinned to 0 to avoid double-throttling." >&2
   exit 1
 fi
 
@@ -320,6 +349,9 @@ cleanup() {
   if [[ "${IMPAIRMENT_MODE}" == "tc" && "${NUM_ROBOTS}" -gt 1 ]]; then
     "${DDIL_NETNS_SCRIPT}" down "${NUM_ROBOTS}" 2>/dev/null || true
   fi
+  # Only ever the throwaway copy made when RECORD_METRICS=false -- the one
+  # written into RUN_DIR is a run artifact and stays put.
+  [[ -n "${LINK_SCHEDULE_TMPDIR:-}" ]] && rm -rf "${LINK_SCHEDULE_TMPDIR}" || true
 }
 trap cleanup EXIT INT TERM
 
@@ -346,6 +378,20 @@ if [[ "${RECORD_METRICS}" == true ]]; then
         "/${name}/team_map_ddil"
         "/${name}/nav_map"
       )
+      # Per-link DDIL telemetry: bandwidth_kbps (the capacity actually applied,
+      # including anything a LINK_PROFILE schedule set), send_rate_bps,
+      # queued_bytes, msgs_shed, shed_bytes -- at 5 Hz per link. This is what
+      # makes a varying-capacity run readable: the applied capacity and the
+      # transport's response to it land in one bag on ONE clock, so no separate
+      # schedule log with its own timebase has to be reconciled afterwards.
+      # Also worth having on constant-bandwidth runs -- it is the only
+      # time-resolved record of shedding/backlog, which the scalar byte totals
+      # in the run summary cannot show. ~6 links x 5 Hz x run length of small
+      # messages, a few MB before mcap's zstd against ~25 MB bags.
+      for ((j = 1; j <= NUM_ROBOTS; j++)); do
+        (( j == i )) && continue
+        BAG_TOPICS+=("/ddil_proxy_${name}_from_robot${j}/ddil_stats")
+      done
       if [[ "${MAP_TRANSPORT}" == "vxch" ]]; then
         for ((band = 0; band <= HAAR_LEVELS; band++)); do
           BAG_TOPICS+=("/${name}/vxch/map/band_${band}")
@@ -426,6 +472,46 @@ if [[ "${RECORD_METRICS}" == true ]]; then
   BAG_PID=$!
 fi
 
+# ── Link capacity schedule (LINK_PROFILE != static) ─────────────────────────
+# Generated HERE, before the stack launches, rather than sampled live inside the
+# scheduler node. That makes the trace a pre-run *input* that can be inspected
+# before the run and diffed byte-for-byte against another arm's to prove both
+# saw identical conditions -- which is the whole basis for comparing them. A
+# live-sampled schedule would instead be a side effect of whatever that process
+# happened to do, and could drift with node-startup jitter.
+LINK_SCHEDULE_PATH=""
+LINK_SCHEDULE_TMPDIR=""
+if [[ "${LINK_PROFILE}" != "static" ]]; then
+  if [[ -n "${RUN_DIR:-}" ]]; then
+    # Lives with the metrics it explains -- recover_metrics.sh picks it up with
+    # the rest of the run.
+    LINK_SCHEDULE_PATH="${RUN_DIR}/link_schedule.json"
+  else
+    LINK_SCHEDULE_TMPDIR="$(mktemp -d)"
+    LINK_SCHEDULE_PATH="${LINK_SCHEDULE_TMPDIR}/link_schedule.json"
+  fi
+
+  echo "Generating ${LINK_PROFILE} link schedule (seed=${RANDOM_SEED}, ${LINK_DURATION_S}s)..."
+  if ! python3 "${PROJECT_ROOT}/tools/gen_link_schedule.py" \
+      --profile "${LINK_PROFILE}" \
+      --duration "${LINK_DURATION_S}" \
+      --seed "${RANDOM_SEED}" \
+      --bandwidth-kbps "${BANDWIDTH_KBPS}" \
+      --good-kbps "${LINK_GOOD_KBPS}" \
+      --bad-kbps "${LINK_BAD_KBPS}" \
+      --good-dwell-s "${LINK_GOOD_DWELL_S}" \
+      --bad-dwell-s "${LINK_BAD_DWELL_S}" \
+      --min-dwell-s "${LINK_MIN_DWELL_S}" \
+      --warmup-s "${LINK_WARMUP_S}" \
+      --out "${LINK_SCHEDULE_PATH}" \
+      --describe; then
+    echo "Failed to generate link schedule -- refusing to start an unshaped run" >&2
+    echo "that would be silently incomparable to the shaped ones." >&2
+    [[ -n "${LINK_SCHEDULE_TMPDIR}" ]] && rm -rf "${LINK_SCHEDULE_TMPDIR}"
+    exit 1
+  fi
+fi
+
 if (( NUM_ROBOTS > 1 )); then
   if [[ "${IMPAIRMENT_MODE}" == "tc" ]]; then
     echo "Setting up per-robot netns links (unshaped)..."
@@ -444,6 +530,7 @@ if (( NUM_ROBOTS > 1 )); then
     controller_type:="${CONTROLLER_TYPE}" \
     impairment_mode:="${IMPAIRMENT_MODE}" \
     bandwidth_kbps:="${BANDWIDTH_KBPS}" \
+    link_schedule_path:="${LINK_SCHEDULE_PATH}" \
     loss_pct:="${LOSS_PCT}" \
     delay_ms:="${DELAY_MS}" \
     haar_levels:="${HAAR_LEVELS}" \
