@@ -54,6 +54,65 @@ MESH_URI_REMAP = {
 #     fully open passages. This makes the floorplan more connected than
 #     upstream ServiceSim intended; if closed doors matter for a run, add box
 #     collisions for them rather than restoring this entry.
+# Models removed from the world outright, by include URI. Unlike MISSING_MESHES
+# (assets that simply are not in this repo), these have working assets and are
+# dropped on purpose:
+#
+#   reception_desk -- two curved desks, one in FrontEntrance and one in
+#     BackEntrance. Their collision geometry is a concave curve right in the
+#     doorway-adjacent traffic path, and robots wedge against it repeatedly.
+#     That is the exact failure lite_frontier_explorer's goal_stuck_timeout_s
+#     was added to paper over ("a robot that jams on the curved reception
+#     desk"), and it costs a stuck robot one-to-several minutes of nav2
+#     recovery every time it happens -- noise the benchmark does not need.
+#
+# Both are nested inside room-level models, so gz sim's GUI cannot delete them
+# (UserCommands only removes direct children of the world); dropping them here
+# is also what keeps the removal alive across regeneration.
+DROP_MODEL_URIS = (
+    "model://reception_desk",
+)
+
+# Plain boxes added to the world after conversion, as (name, x, y, z, sx, sy, sz)
+# in world coordinates.
+#
+# The private-cubicle area is a 3-wide x 4-tall corridor grid: cubicle blocks at
+# x -21..-14 and x -12..-7, a north-south corridor between them at x ~ -13, and
+# east-west corridors at y ~ 18.5, 14.5, 9.5 and 5.5. Every one of those
+# openings is a cycle, so a robot that re-enters explored ground can always loop
+# back out -- re-covering a teammate's area costs it almost nothing, which is
+# exactly the property that makes map sharing look unimportant in the benchmark.
+#
+# These three boxes plug the middle corridor where it passes each row of
+# cubicles, leaving four dead-end stubs instead of a through route. Each spans
+# x -14..-12, which is the full corridor width (free space measures about
+# -13.75..-12.25), so they seal rather than leave a gap a robot could squeeze
+# through, and 2 m tall so they are seen by the lidar at any sensible height.
+ADDED_BOXES = (
+    ("deadend_blocker_north", -13.0, 16.5, 1.0, 2.0, 2.0, 2.0),
+    ("deadend_blocker_mid", -13.0, 12.0, 1.0, 2.0, 2.0, 2.0),
+    ("deadend_blocker_south", -13.0, 7.5, 1.0, 2.0, 2.0, 2.0),
+    # Fourth box: the gap between PrivateCubicle_33's west face (x -21) and the
+    # thin wall at x ~ -22.9, so the northern cubicle row cannot be entered from
+    # the west either. Without it that row is still a through route rather than
+    # a trap, since blocking only the middle corridor leaves both ends open.
+    ("deadend_blocker_west_33", -22.0, 16.5, 1.0, 2.0, 2.0, 2.0),
+    # Same for the other two rows: without these, blocking only the middle
+    # corridor merges each row's two cubicle blocks into one bigger island that
+    # a robot can still circle. Measured on the navigable free space, the three
+    # rows accounted for 6 of the map's 29 loops.
+    ("deadend_blocker_west_32", -22.0, 12.0, 1.0, 2.0, 2.0, 2.0),
+    ("deadend_blocker_west_31", -22.0, 7.5, 1.0, 2.0, 2.0, 2.0),
+    # The two remaining openings in the middle corridor: the east-west corridors
+    # at y ~ 9.75 and ~ 14.25 still cross it between the blockers above, which is
+    # what let a robot circle the mid and south cubicle rows. Each spans the gap
+    # between the neighbouring blockers (2.5 m: 8.5..11.0 and 13.0..15.5), so the
+    # middle corridor is continuous obstacle from y 6.5 to 17.5.
+    ("deadend_blocker_gap_south_mid", -13.0, 9.75, 1.0, 2.0, 2.5, 2.0),
+    ("deadend_blocker_gap_mid_north", -13.0, 14.25, 1.0, 2.0, 2.5, 2.0),
+)
+
+
 MISSING_MESHES = (
     "model://door/meshes/",
     "model://cubicle_corner/meshes/",
@@ -450,6 +509,49 @@ def drop_servicesim_robot(world):
     return False
 
 
+def drop_unwanted_models(world):
+    """Remove every <include> whose uri is in DROP_MODEL_URIS, at any depth.
+
+    Recursive on purpose: these sit inside room-level <model> elements, not at
+    world level, so world.findall("include") -- what drop_servicesim_robot uses
+    for its one top-level include -- would not see them.
+    """
+    dropped = []
+    for include in list(world.iter("include")):
+        uri = include.find("uri")
+        if uri is None or (uri.text or "").strip() not in DROP_MODEL_URIS:
+            continue
+        parent = include.getparent()
+        dropped.append((parent.get("name") or parent.tag, (uri.text or "").strip()))
+        parent.remove(include)
+    return dropped
+
+
+def add_blocker_boxes(world):
+    """Append ADDED_BOXES as static box models at world level.
+
+    World-level (not nested in a room model) on purpose: gz sim's GUI can only
+    delete direct children of the world, so these stay removable/movable by hand
+    while every cubicle's own furniture does not.
+    """
+    added = []
+    for name, x, y, z, sx, sy, sz in ADDED_BOXES:
+        model = etree.SubElement(world, "model")
+        model.set("name", name)
+        etree.SubElement(model, "static").text = "true"
+        etree.SubElement(model, "pose").text = f"{x} {y} {z} 0 0 0"
+        link = etree.SubElement(model, "link")
+        link.set("name", "link")
+        for kind in ("collision", "visual"):
+            element = etree.SubElement(link, kind)
+            element.set("name", kind)
+            geometry = etree.SubElement(element, "geometry")
+            box = etree.SubElement(geometry, "box")
+            etree.SubElement(box, "size").text = f"{sx} {sy} {sz}"
+        added.append((name, x, y))
+    return added
+
+
 def main():
     if not os.path.isfile(SRC):
         raise SystemExit(f"source world not found: {SRC}\nExtract office_part1.zip first.")
@@ -482,6 +584,12 @@ def main():
 
     if drop_servicesim_robot(world):
         print("  robot: removed ServiceSim's own turtlebot3_waffle_pi include")
+
+    for parent_name, uri in drop_unwanted_models(world):
+        print(f"  models: dropped {uri} from {parent_name}")
+
+    for name, x, y in add_blocker_boxes(world):
+        print(f"  models: added box {name} at ({x}, {y})")
 
     tree.write(DST, xml_declaration=True, encoding="UTF-8", pretty_print=False)
     with open(DST, "a") as handle:
