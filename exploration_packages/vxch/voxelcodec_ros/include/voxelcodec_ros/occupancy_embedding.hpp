@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include "wavestream/codec.hpp"
 
 // Encoder/decoder-shared mapping between OccupancyGrid's int8 cell values
 // (-1 = unknown, 0..100 = occupancy percent) and the uint32 domain the Haar
@@ -46,18 +47,7 @@
 namespace voxelcodec_ros
 {
 
-inline std::uint32_t occupancy_to_embedded(std::int8_t v)
-{
-  return static_cast<std::uint32_t>(static_cast<int>(v) + 1);
-}
-
-// Inverse of occupancy_to_embedded. Values outside the legitimate [0,101]
-// range (e.g. from a corrupted/foreign payload) clamp into OccupancyGrid's
-// valid [-1,100] range rather than wrapping or producing garbage.
-inline std::int8_t embedded_to_occupancy(std::uint32_t e)
-{
-  const int shifted = static_cast<int>(e) - 1;
-  return static_cast<std::int8_t>(std::max(-1, std::min(100, shifted)));
-}
+using wavestream::occupancy_to_embedded;
+using wavestream::embedded_to_occupancy;
 
 }  // namespace voxelcodec_ros

@@ -27,43 +27,11 @@ namespace voxelcodec_ros
 {
 
 // Zigzag-varint decode (mirrors zigzag_varint_encode in haar_forward.hpp).
-inline std::vector<std::int64_t> zigzag_varint_decode(
-  const std::vector<std::uint8_t> & raw, std::size_t count)
-{
-  std::vector<std::int64_t> out;
-  out.reserve(count);
-  std::size_t offset = 0;
-  while (out.size() < count) {
-    std::uint64_t value = 0;
-    int shift = 0;
-    while (offset < raw.size()) {
-      const std::uint8_t byte = raw[offset++];
-      value |= static_cast<std::uint64_t>(byte & 0x7FU) << shift;
-      if ((byte & 0x80U) == 0) {break;}
-      shift += 7;
-      if (shift >= 64) {throw std::runtime_error("varint overflow");}
-    }
-    const std::int64_t decoded = (value & 1U)
-      ? -static_cast<std::int64_t>((value >> 1U) + 1U)
-      : static_cast<std::int64_t>(value >> 1U);
-    out.push_back(decoded);
-  }
-  return out;
-}
+using wavestream::zigzag_varint_decode;
 
 // Mirrors fixed_width_encode in haar_forward.hpp -- the ablation-mode counterpart to
 // zigzag_varint_decode above, selected per band via the descriptor's kHaarVarintKey.
-inline std::vector<std::int64_t> fixed_width_decode(
-  const std::vector<std::uint8_t> & raw, std::size_t count)
-{
-  std::vector<std::int64_t> out(count);
-  for (std::size_t i = 0; i < count; ++i) {
-    std::int32_t v;
-    std::memcpy(&v, &raw[i * 4], 4);
-    out[i] = v;
-  }
-  return out;
-}
+using wavestream::fixed_width_decode;
 
 using TileKey = std::pair<int, int>;
 
@@ -347,8 +315,7 @@ public:
 
       const std::size_t tw = static_cast<std::size_t>(tile.width);
       const std::size_t th = static_cast<std::size_t>(tile.height);
-      const std::size_t w_prime = recon.width;
-      const std::size_t h_prime = recon.height;
+      const auto occupancy = wavestream::upsample_occupancy(recon, tw, th);
 
       // This tile's world-cell coordinate (key * lattice quantum) minus this
       // array's own origin (in cells) gives its LOCAL offset in the grid
@@ -373,17 +340,15 @@ public:
       // of this tile -- a real (blurry but spatially faithful) downsampled
       // patch, pasted at this tile's place in the full-resolution output grid.
       for (std::size_t r = 0; r < th; ++r) {
-        const std::size_t r_src = (w_prime == tw && h_prime == th) ? r : (r * h_prime / th);
         const long long dst_row = row0 + static_cast<long long>(r);
         if (dst_row < 0) {continue;}
         if (dst_row >= static_cast<long long>(geometry_.grid_height)) {break;}
         for (std::size_t c = 0; c < tw; ++c) {
-          const std::size_t c_src = (w_prime == tw && h_prime == th) ? c : (c * w_prime / tw);
           const long long dst_col = col0 + static_cast<long long>(c);
           if (dst_col < 0 || dst_col >= static_cast<long long>(geometry_.grid_width)) {continue;}
           grid_data[static_cast<std::size_t>(dst_row) * geometry_.grid_width +
             static_cast<std::size_t>(dst_col)] =
-            embedded_to_occupancy(recon.values[r_src * w_prime + c_src]);
+            occupancy[r * tw + c];
         }
       }
       any_tile_rendered = true;

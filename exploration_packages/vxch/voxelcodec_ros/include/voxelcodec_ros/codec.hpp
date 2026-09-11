@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "voxelcodec_ros/types.hpp"
+#include "wavestream/codec.hpp"
 
 namespace voxelcodec_ros
 {
@@ -44,40 +45,22 @@ int haar_max_bands(const ChannelDescriptor & descriptor);
 
 /// Per-level dimensions of the LL (recursed) quadrant in the 2D Haar pyramid.
 /// dims[0] = (width, height); dims[levels] = final coarsest LL dimensions.
-struct HaarLevelDims
-{
-  std::size_t width;
-  std::size_t height;
-};
+using wavestream::HaarLevelDims;
 
-std::vector<HaarLevelDims> compute_haar_level_dims(
-  std::size_t width, std::size_t height, int levels);
+using wavestream::compute_haar_level_dims;
 
 /// Per-band layout of the 2D Haar pyramid, coarsest-first (band 0 = final LL).
 /// For band k>=1, (level_w, level_h) is the pre-transform size at the pass
 /// this band's detail quadrants (HL,LH,HH) came from, and (new_w, new_h) is
 /// that pass's LL size -- together these determine each quadrant's extent.
-struct HaarBandLayout
-{
-  std::size_t element_count;
-  std::size_t level_w;
-  std::size_t level_h;
-  std::size_t new_w;
-  std::size_t new_h;
-};
+using wavestream::HaarBandLayout;
 
-std::vector<HaarBandLayout> compute_haar_band_layout(
-  std::size_t width, std::size_t height, int levels);
+using wavestream::compute_haar_band_layout;
 
 /// Result of a (possibly partial) 2D Haar reconstruction: row-major values of
 /// size width*height, where width/height may be smaller than the original
 /// grid if fewer than levels+1 bands were supplied (caller upsamples).
-struct HaarReconstruction
-{
-  std::vector<std::uint32_t> values;
-  std::size_t width;
-  std::size_t height;
-};
+using wavestream::HaarReconstruction;
 
 /// Reconstruct a 2D grid from per-band coefficient arrays, as received from
 /// separate band messages (no pre-assembly into a flat buffer required).
@@ -88,12 +71,7 @@ struct HaarReconstruction
 /// @param levels        Number of Haar levels used during encoding.
 /// @param bands_received Number of leading bands available (1=coarsest only,
 ///                        levels+1=full resolution).
-HaarReconstruction reconstruct_haar_from_bands(
-  const std::vector<std::vector<std::int64_t> > & band_coeffs,
-  std::size_t width,
-  std::size_t height,
-  int levels,
-  int bands_received);
+using wavestream::reconstruct_haar_from_bands;
 
 std::unordered_map<std::string, DecodedChannel> decode_selected(
   const Archive & archive,

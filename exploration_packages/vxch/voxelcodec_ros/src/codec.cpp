@@ -7,7 +7,6 @@
 #include <unordered_set>
 
 #include <nlohmann/json.hpp>
-#include <zstd.h>
 
 namespace voxelcodec_ros
 {
@@ -561,29 +560,7 @@ namespace voxelcodec_ros
       return values;
     }
 
-    void haar_inverse_level(std::vector<std::int64_t> &coeffs, std::size_t full_len, std::size_t smooth_len)
-    {
-      if (full_len < 2)
-      {
-        return;
-      }
-      const std::size_t num_pairs = full_len / 2;
-      std::vector<std::int64_t> smooth(coeffs.begin(), coeffs.begin() + static_cast<std::ptrdiff_t>(smooth_len));
-      std::vector<std::int64_t> detail(
-          coeffs.begin() + static_cast<std::ptrdiff_t>(smooth_len),
-          coeffs.begin() + static_cast<std::ptrdiff_t>(smooth_len + num_pairs));
-      for (std::size_t i = 0; i < num_pairs; ++i)
-      {
-        const std::int64_t a = smooth[i] - (detail[i] >> 1);
-        const std::int64_t b = a + detail[i];
-        coeffs[2 * i] = a;
-        coeffs[2 * i + 1] = b;
-      }
-      if (full_len % 2 == 1)
-      {
-        coeffs[full_len - 1] = smooth[smooth_len - 1];
-      }
-    }
+    using wavestream::haar_inverse_level;
 
     ScalarBuffer decode_haar_wavelet_channel_1d(
         const ChannelDescriptor &descriptor,
@@ -647,103 +624,8 @@ namespace voxelcodec_ros
       return values;
     }
 
-    // ── 2D separable Haar pyramid inverse (occupancy-grid channels only) ──────
-    //
-    // A grid buffer is a tightly-packed row-major vector<int64_t> of size
-    // stride*rows (stride == its own width unless noted). At level i the LL
-    // (recursed) quadrant occupies the top-left w_i x h_i block. The forward
-    // transform (row pass then column pass) lives in haar_forward.hpp, next to
-    // haar_forward_level -- this is its inverse: column-inverse first, then
-    // row-inverse (reversed order undoes the forward pass correctly).
-
-    void haar_inverse_2d_level(
-      std::vector<std::int64_t> & grid, std::size_t stride,
-      std::size_t w_i, std::size_t h_i, std::size_t new_w, std::size_t new_h)
-    {
-      std::vector<std::int64_t> col(h_i);
-      for (std::size_t c = 0; c < w_i; ++c) {
-        for (std::size_t r = 0; r < h_i; ++r) {col[r] = grid[r * stride + c];}
-        haar_inverse_level(col, h_i, new_h);
-        for (std::size_t r = 0; r < h_i; ++r) {grid[r * stride + c] = col[r];}
-      }
-      std::vector<std::int64_t> row(w_i);
-      for (std::size_t r = 0; r < h_i; ++r) {
-        std::copy_n(grid.begin() + static_cast<std::ptrdiff_t>(r * stride), w_i, row.begin());
-        haar_inverse_level(row, w_i, new_w);
-        std::copy(row.begin(), row.end(), grid.begin() + static_cast<std::ptrdiff_t>(r * stride));
-      }
-    }
-
-    // Scatter a flat [HL|LH|HH] detail band (as gathered by haar_forward.hpp's
-    // encoder in that fixed order, row-major within each quadrant) back into
-    // grid at level (w_i,h_i)->(new_w,new_h).
-    void scatter_detail_quadrants(
-      std::vector<std::int64_t> & grid, std::size_t stride,
-      std::size_t w_i, std::size_t h_i, std::size_t new_w, std::size_t new_h,
-      const std::vector<std::int64_t> & flat)
-    {
-      std::size_t idx = 0;
-      for (std::size_t r = 0; r < new_h; ++r) {
-        for (std::size_t c = new_w; c < w_i; ++c) {grid[r * stride + c] = flat[idx++];}
-      }
-      for (std::size_t r = new_h; r < h_i; ++r) {
-        for (std::size_t c = 0; c < new_w; ++c) {grid[r * stride + c] = flat[idx++];}
-      }
-      for (std::size_t r = new_h; r < h_i; ++r) {
-        for (std::size_t c = new_w; c < w_i; ++c) {grid[r * stride + c] = flat[idx++];}
-      }
-    }
-
-    // Core 2D partial/full reconstruction shared by reconstruct_haar_from_bands
-    // and the monolithic-payload decode paths below.
-    HaarReconstruction reconstruct_haar_2d_impl(
-      const std::vector<std::vector<std::int64_t> > & band_coeffs,
-      std::size_t width, std::size_t height, int levels, int bands_received)
-    {
-      const auto dims = compute_haar_level_dims(width, height, levels);
-      const auto layout = compute_haar_band_layout(width, height, levels);
-
-      const int bands = std::max(1, std::min(bands_received, levels + 1));
-      const int out_level = levels - bands + 1;
-
-      if (band_coeffs.empty() ||
-        band_coeffs[0].size() != layout[0].element_count)
-      {
-        throw std::runtime_error("reconstruct_haar_2d_impl: band 0 (LL) missing or wrong size");
-      }
-
-      std::size_t cur_level = static_cast<std::size_t>(levels);
-      std::vector<std::int64_t> buf = band_coeffs[0];  // tightly packed dims[levels]
-
-      while (static_cast<int>(cur_level) > out_level) {
-        const std::size_t k = static_cast<std::size_t>(levels) - cur_level + 1;
-        if (k >= band_coeffs.size() || band_coeffs[k].size() != layout[k].element_count) {
-          throw std::runtime_error("reconstruct_haar_2d_impl: missing/wrong-size detail band");
-        }
-        const auto & lvl = dims[cur_level - 1];
-        const auto & nxt = dims[cur_level];
-
-        std::vector<std::int64_t> next_buf(lvl.width * lvl.height, 0);
-        for (std::size_t r = 0; r < nxt.height; ++r) {
-          std::copy_n(
-            buf.begin() + static_cast<std::ptrdiff_t>(r * nxt.width), nxt.width,
-            next_buf.begin() + static_cast<std::ptrdiff_t>(r * lvl.width));
-        }
-        scatter_detail_quadrants(
-          next_buf, lvl.width, lvl.width, lvl.height, nxt.width, nxt.height, band_coeffs[k]);
-        haar_inverse_2d_level(next_buf, lvl.width, lvl.width, lvl.height, nxt.width, nxt.height);
-
-        buf = std::move(next_buf);
-        --cur_level;
-      }
-
-      const auto & out_dims = dims[cur_level];
-      std::vector<std::uint32_t> values(out_dims.width * out_dims.height);
-      for (std::size_t i = 0; i < values.size(); ++i) {
-        values[i] = static_cast<std::uint32_t>(buf[i] & 0xFFFFFFFFU);
-      }
-      return HaarReconstruction{std::move(values), out_dims.width, out_dims.height};
-    }
+    // Archive decoding and the tile receiver share the header-only inverse.
+    using wavestream::reconstruct_haar_2d_impl;
 
     // Split a monolithic (archive-style) concatenated-bands coefficient array
     // into per-band slices, mirroring how make_haar_bands lays them out.
@@ -962,52 +844,13 @@ namespace voxelcodec_ros
   }
 
   std::vector<std::uint8_t> compress_payload(
-      const std::string &compression,
-      const std::vector<std::uint8_t> &raw_payload)
-  {
-    validate_compression(compression);
-    if (compression == kCompressionNone)
-    {
-      return raw_payload;
-    }
-
-    std::vector<std::uint8_t> compressed(ZSTD_compressBound(raw_payload.size()));
-    const auto result = ZSTD_compress(
-        compressed.data(), compressed.size(), raw_payload.data(), raw_payload.size(), 9);
-    if (ZSTD_isError(result))
-    {
-      throw std::runtime_error(ZSTD_getErrorName(result));
-    }
-    compressed.resize(result);
-    return compressed;
-  }
+    const std::string & compression, const std::vector<std::uint8_t> & raw)
+  { return wavestream::compress_payload(compression, raw); }
 
   std::vector<std::uint8_t> decompress_payload(
-      const ChannelDescriptor &descriptor,
-      const std::vector<std::uint8_t> &compressed_payload)
-  {
-    if (descriptor.compression == kCompressionNone)
-    {
-      return compressed_payload;
-    }
-    if (descriptor.compression != kCompressionZstd)
-    {
-      throw std::runtime_error("unsupported compression: " + descriptor.compression);
-    }
-
-    std::vector<std::uint8_t> raw(descriptor.uncompressed_size);
-    const auto result = ZSTD_decompress(
-        raw.data(), raw.size(), compressed_payload.data(), compressed_payload.size());
-    if (ZSTD_isError(result))
-    {
-      throw std::runtime_error(ZSTD_getErrorName(result));
-    }
-    if (result != descriptor.uncompressed_size)
-    {
-      throw std::runtime_error("decompressed payload size mismatch");
-    }
-    return raw;
-  }
+    const ChannelDescriptor & descriptor, const std::vector<std::uint8_t> & payload)
+  { return wavestream::decompress_payload(
+      descriptor.compression, descriptor.uncompressed_size, payload); }
 
   std::vector<std::uint8_t> encode_archive(
       const Manifest &input_manifest,
@@ -1223,57 +1066,6 @@ namespace voxelcodec_ros
       return decode_haar_progressive_2d(descriptor, raw, max_bands);
     }
     return decode_haar_progressive_1d(descriptor, raw, max_bands);
-  }
-
-  std::vector<HaarLevelDims> compute_haar_level_dims(
-    std::size_t width, std::size_t height, int levels)
-  {
-    if (levels < 1) {
-      throw std::runtime_error("compute_haar_level_dims: levels must be >= 1");
-    }
-    std::vector<HaarLevelDims> dims(static_cast<std::size_t>(levels) + 1);
-    dims[0] = HaarLevelDims{width, height};
-    for (int i = 1; i <= levels; ++i) {
-      const auto & prev = dims[static_cast<std::size_t>(i - 1)];
-      dims[static_cast<std::size_t>(i)] =
-        HaarLevelDims{(prev.width + 1) / 2, (prev.height + 1) / 2};
-    }
-    return dims;
-  }
-
-  std::vector<HaarBandLayout> compute_haar_band_layout(
-    std::size_t width, std::size_t height, int levels)
-  {
-    const auto dims = compute_haar_level_dims(width, height, levels);
-    std::vector<HaarBandLayout> layout(static_cast<std::size_t>(levels) + 1);
-
-    const auto & ll = dims[static_cast<std::size_t>(levels)];
-    layout[0] = HaarBandLayout{ll.width * ll.height, ll.width, ll.height, ll.width, ll.height};
-
-    for (int k = 1; k <= levels; ++k) {
-      const int i = levels - k;
-      const auto & lvl = dims[static_cast<std::size_t>(i)];
-      const auto & nxt = dims[static_cast<std::size_t>(i + 1)];
-      const std::size_t hl = nxt.height * (lvl.width - nxt.width);
-      const std::size_t lh = (lvl.height - nxt.height) * nxt.width;
-      const std::size_t hh = (lvl.height - nxt.height) * (lvl.width - nxt.width);
-      layout[static_cast<std::size_t>(k)] =
-        HaarBandLayout{hl + lh + hh, lvl.width, lvl.height, nxt.width, nxt.height};
-    }
-    return layout;
-  }
-
-  HaarReconstruction reconstruct_haar_from_bands(
-    const std::vector<std::vector<std::int64_t> > & band_coeffs,
-    std::size_t width,
-    std::size_t height,
-    int levels,
-    int bands_received)
-  {
-    if (levels < 1 || width == 0 || height == 0) {
-      throw std::runtime_error("reconstruct_haar_from_bands: invalid levels or dimensions");
-    }
-    return reconstruct_haar_2d_impl(band_coeffs, width, height, levels, bands_received);
   }
 
 } // namespace voxelcodec_ros
