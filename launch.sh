@@ -270,6 +270,13 @@ num_robots = int(os.environ["NUM_ROBOTS"])
 with open(path) as f:
     data = yaml.safe_load(f)
 positions = data.get(world, {}).get(preset)
+if world == "long_t" and preset == "default" and num_robots > 1:
+    # The redesigned world has three narrow, separate start branches. A grid
+    # around the single-robot default would place robots in dividing walls.
+    positions = data[world]["distributed"]
+if world == "long_t" and positions and num_robots > len(positions):
+    raise SystemExit("long_t supports at most three robots with these presets; "
+                     "refusing to cycle spawn positions onto another robot")
 if positions is None:
     if preset != "default":
         print(f"[spawn_presets] WARNING: preset '{preset}' not found for world '{world}'."
@@ -286,7 +293,7 @@ if positions is None:
 # than robots still cycle through them on purpose (see the module comment
 # -- e.g. corridor's "distributed" list intentionally reused once
 # num_robots exceeds its 8 entries), so only "default" is special-cased.
-if preset == "default" and num_robots > 1 and positions:
+if preset == "default" and num_robots > 1 and positions and world != "long_t":
     print(f"[spawn_presets] NUM_ROBOTS={num_robots} with SPAWN_PRESET=default "
           "(a single-robot position) -- using the automatic grid/line offset "
           "instead of stacking every robot on the same spot. Set SPAWN_PRESET "

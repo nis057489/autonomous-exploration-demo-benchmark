@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import re
 import sys
+from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -105,6 +106,27 @@ def test_spawn_yaml_matches_geometry():
     assert records == generator.STARTS
 
 
+@pytest.mark.parametrize('preset,count', [('default', 1), ('default', 3), ('distributed', 3), ('reversed', 3)])
+def test_launch_resolves_separate_starts(preset, count, monkeypatch, capsys):
+    config = {'long_t': {'default': [generator.STARTS[1]],
+                         'distributed': generator.STARTS,
+                         'reversed': generator.STARTS[::-1]}}
+    monkeypatch.setitem(sys.modules, 'yaml', SimpleNamespace(safe_load=lambda _: config))
+    for key, value in {'WORLD': 'long_t', 'SPAWN_PRESET': preset, 'NUM_ROBOTS': str(count),
+                       'SPAWN_PRESETS_FILE': str(ROOT / 'spawn_presets.yaml')}.items():
+        monkeypatch.setenv(key, value)
+    source = (ROOT / 'launch.sh').read_text().split('SPAWN_POSITIONS_JSON=$(WORLD=')[1]
+    source = source.split("<<'PYEOF'\n", 1)[1].split('\nPYEOF', 1)[0]
+    exec(compile(source, 'launch.sh:spawn-resolution', 'exec'), {})
+    positions = json.loads(capsys.readouterr().out)
+    expected = ([generator.STARTS[1]] if count == 1 else
+                generator.STARTS[::-1] if preset == 'reversed' else generator.STARTS)
+    assert positions == expected
+    monkeypatch.setenv('NUM_ROBOTS', '4')
+    with pytest.raises(SystemExit, match='at most three'):
+        exec(compile(source, 'launch.sh:spawn-resolution', 'exec'), {})
+
+
 @pytest.fixture(scope='module')
 def decisions():
     return check()['results']
@@ -119,4 +141,5 @@ def test_oracle_enters_unfinished_work_in_all_checkpoints(decisions):
 def test_none_revisits_peer_branches_before_work(decisions):
     for radius in (3.5, 10.0):
         rows = [r for r in decisions if r['arm'] == 'none' and r['sensor_range_m'] == radius]
-        assert sum(r['outcome'] == 'peer_start' for r in rows) >= 2
+        assert len(rows) == 3
+        assert all(r['outcome'] == 'peer_start' for r in rows)

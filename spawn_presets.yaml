@@ -9,6 +9,7 @@
 # "default" preset: single base position matching the hardcoded defaults in launch.sh.
 #   Multi-robot runs with the default preset still use the automatic grid/line offset
 #   logic (the list is ignored for multi-robot when SPAWN_PRESET=default).
+#   Exception: long_t uses its three distributed positions for multi-robot default.
 #
 # "distributed" preset: each robot placed in a distinct section of the map so they
 #   explore independently without overlapping initial frontiers.
