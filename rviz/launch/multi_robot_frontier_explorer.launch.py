@@ -45,7 +45,7 @@ def _load_yaml(path):
 
 
 # The parameter keys lite_frontier_explorer's node actually declares -- it's a
-# nearest-frontier-only node with no autostart/control_service/team-awareness,
+# frontier-selection node with no autostart/control_service/team-awareness,
 # and no peer coordination of its own.
 _LITE_PARAM_KEYS = (
     "costmap_topic",
@@ -54,6 +54,15 @@ _LITE_PARAM_KEYS = (
     "min_frontier_size_cells",
     "min_frontier_distance_m",
     "occ_threshold",
+    "path_occ_threshold",
+    "selection_strategy",
+    "sensor_range_m",
+    "gain_max_viewpoints",
+    "gain_distance_weight",
+    "gain_threshold_ratio",
+    "gain_region_cap",
+    "turn_penalty_m",
+    "hysteresis_bonus_m",
     "replan_period_s",
     # Without these two in the allowlist the node falls back to its declared
     # defaults and the values in config.yaml are silently ignored -- this tuple
@@ -65,7 +74,10 @@ _LITE_PARAM_KEYS = (
     # 33-of-34-goals-preempted oscillation stayed invisible.
     "goal_preempt_distance_m",
     "goal_preempt_improvement_m",
+    "goal_preempt_utility_ratio",
     "max_consecutive_preemptions",
+    "wedge_detect_radius_m",
+    "max_wedge_cycles",
     "goal_blacklist_radius_m",
     "navigate_to_pose_action_name",
     "frontier_marker_scale",

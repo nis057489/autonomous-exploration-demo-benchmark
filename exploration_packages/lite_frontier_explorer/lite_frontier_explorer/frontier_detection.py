@@ -5,10 +5,110 @@ without a running node. Operates on a nav2-style costmap: -1 unknown,
 
 import math
 from collections import deque
+from functools import lru_cache
 
 import numpy as np
 
 _NEIGHBOR_OFFSETS = ((-1, 0), (1, 0), (0, -1), (0, 1))
+
+
+@lru_cache(maxsize=8)
+def _visibility_rays(radius_cells):
+    # Half-cell radial samples and <= half-cell angular spacing at the rim.
+    # Cache geometry only, never visibility: peer updates must change gain.
+    angles = np.linspace(0, 2 * math.pi, max(8, math.ceil(4 * math.pi * radius_cells)),
+                         endpoint=False)
+    steps = np.arange(0.0, radius_cells + 0.001, 0.5)
+    rows = np.rint(np.sin(angles[:, None]) * steps).astype(int)
+    cols = np.rint(np.cos(angles[:, None]) * steps).astype(int)
+    return rows, cols
+
+
+def visible_unknown_area(grid, row, col, resolution, sensor_range_m,
+                         obstacle_threshold=100):
+    """Optimistic observable unknown area, stopped by known lethal obstacles.
+
+    Unknown cells do not stop rays: their occupancy is not yet known. This is
+    an area proxy, not a prediction of exact laser returns. Inflation costs
+    are not physical walls. Each cell gets credit once, independently of
+    other candidate viewpoints. Out-of-map space gets no credit.
+    """
+    dr, dc = _visibility_rays(sensor_range_m / resolution)
+    rows, cols = row + dr, col + dc
+    height, width = grid.shape
+    valid = (rows >= 0) & (rows < height) & (cols >= 0) & (cols < width)
+    values = grid[np.clip(rows, 0, height - 1), np.clip(cols, 0, width - 1)]
+    blocked = ~valid | (values >= obstacle_threshold)
+    # Supercover corner handling: rays cannot leak diagonally between walls.
+    prev_rows = np.concatenate((rows[:, :1], rows[:, :-1]), axis=1)
+    prev_cols = np.concatenate((cols[:, :1], cols[:, :-1]), axis=1)
+    diagonal = (prev_rows != rows) & (prev_cols != cols)
+    side_a = grid[np.clip(prev_rows, 0, height - 1), np.clip(cols, 0, width - 1)]
+    side_b = grid[np.clip(rows, 0, height - 1), np.clip(prev_cols, 0, width - 1)]
+    blocked |= diagonal & ((side_a >= obstacle_threshold) | (side_b >= obstacle_threshold))
+    visible = ~np.maximum.accumulate(blocked, axis=1)
+    unknown = visible & (values == -1) & (dr * dr + dc * dc <= (sensor_range_m / resolution) ** 2)
+    return np.unique(rows[unknown] * width + cols[unknown]).size * resolution ** 2
+
+
+def select_visible_gain_frontier(clusters, data, width, height, robot_x, robot_y,
+                                 resolution, origin_x, origin_y,
+                                 path_occ_threshold=99, min_distance_m=0.0,
+                                 sensor_range_m=3.0, distance_weight=1.0,
+                                 max_viewpoints=5, diagnostics=None,
+                                 active_goal=None, active_score=None):
+    """Maximize observable unknown m² / (1 + distance_weight * path metres).
+
+    Sample actual reachable frontier cells, not a potentially occupied
+    centroid. Farthest-point sampling covers extended/curved clusters; always
+    include their nearest reachable cell. Legacy selectors remain available
+    for controlled comparisons. No region cap, gain gate or direction bonus.
+    """
+    if resolution <= 0 or sensor_range_m <= 0 or distance_weight < 0 or max_viewpoints < 1:
+        raise ValueError('invalid visible-gain geometry or scoring parameters')
+    grid = np.asarray(data, dtype=np.int8).reshape(height, width)
+    distances = _free_space_distances(data, width, height, robot_x, robot_y,
+                                      resolution, origin_x, origin_y, path_occ_threshold)
+    if active_score is not None:
+        active_score.clear()
+        if active_goal is not None:
+            row = math.floor((active_goal[1] - origin_y) / resolution)
+            col = math.floor((active_goal[0] - origin_x) / resolution)
+            if (0 <= row < height and 0 <= col < width and distances[row, col] >= 0
+                    and 0 <= grid[row, col] < path_occ_threshold):
+                gain = visible_unknown_area(grid, row, col, resolution, sensor_range_m)
+                distance = float(distances[row, col]) * resolution
+                active_score.update(gain_m2=gain, path_m=distance,
+                                    utility=gain / (1.0 + distance_weight * distance))
+    best = None
+    for cluster in clusters:
+        cells = sorted((r, c) for r, c in cluster
+                       if distances[r, c] >= 0
+                       and 0 <= grid[r, c] < path_occ_threshold
+                       and distances[r, c] * resolution >= min_distance_m)
+        if not cells:
+            continue
+        points = np.asarray(cells)
+        first = min(range(len(cells)), key=lambda i: (distances[cells[i]], cells[i]))
+        indices = [first]
+        separation = np.sum((points - points[first]) ** 2, axis=1)
+        while len(indices) < min(max_viewpoints, len(cells)):
+            index = int(np.argmax(separation))
+            indices.append(index)
+            separation = np.minimum(separation, np.sum((points - points[index]) ** 2, axis=1))
+        for index in indices:
+            row, col = cells[index]
+            gain = visible_unknown_area(grid, row, col, resolution, sensor_range_m)
+            distance = float(distances[row, col]) * resolution
+            utility = gain / (1.0 + distance_weight * distance)
+            xy = (origin_x + (col + 0.5) * resolution, origin_y + (row + 0.5) * resolution)
+            if diagnostics is not None:
+                diagnostics.append(dict(x=xy[0], y=xy[1], gain_m2=gain,
+                                        path_m=distance, utility=utility))
+            rank = (utility, -distance, -row, -col)
+            if gain > 0 and (best is None or rank > best[0]):
+                best = (rank, xy)
+    return best[1] if best is not None else None
 
 
 def find_frontier_clusters(data, width, height, occ_threshold=50, min_size=6):

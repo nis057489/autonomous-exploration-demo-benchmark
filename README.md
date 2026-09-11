@@ -34,6 +34,8 @@ The current benchmark layout contains:
 - utility tooling for easier launch, RViz interaction, and benchmark support
 - a results section intended to present both visual outputs and comparison tables
 
+The [WaveStream header-only codec](wavestream/README.md) exposes the paper's tile encoding and progressive reconstruction pipeline without ROS.
+
 ## Resources and Citation
 
 This benchmark uses upstream packages and simulation resources. **Care has been taken to respect the licenses of all packages without making unauthorized modifications.**

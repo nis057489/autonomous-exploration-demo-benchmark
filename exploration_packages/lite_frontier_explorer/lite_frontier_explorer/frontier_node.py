@@ -1,5 +1,5 @@
-"""Minimal frontier explorer: watches nav2's global costmap, picks the
-nearest frontier cluster, and hands it to nav2 via a plain NavigateToPose
+"""Minimal frontier explorer: watches nav2's global costmap, selects a
+reachable viewpoint by observable gain, and hands it to a NavigateToPose
 action client. No peer coordination, no map fusion of its own -- the
 costmap it reads already reflects whatever teammates' data has been
 relayed in by the active map_transport (baseline/vxch/zstd) and fused into
@@ -25,6 +25,7 @@ from lite_frontier_explorer.frontier_detection import (
     select_best_frontier,
     select_nearest_frontier,
     select_nearest_high_gain_frontier,
+    select_visible_gain_frontier,
 )
 
 
@@ -47,11 +48,11 @@ class LiteFrontierExplorer(Node):
         self.declare_parameter('goal_blacklist_radius_m', 1.0)
         self.declare_parameter('occ_threshold', 50)
         self.declare_parameter('path_occ_threshold', 99)
-        # 'nearest', 'best_gain' (global argmax gain/cost -- tends to send every
-        # robot at the same richest frontier), or 'nearest_high_gain' (nearest
-        # frontier whose gain clears gain_threshold_ratio * best gain seen).
-        self.declare_parameter('selection_strategy', 'nearest_high_gain')
-        self.declare_parameter('sensor_range_m', 3.0)  # used by 'best_gain' only
+        # visible_gain scores wall-occluded unknown area at reachable viewpoints.
+        # nearest, best_gain and nearest_high_gain remain as legacy comparisons.
+        self.declare_parameter('selection_strategy', 'visible_gain')
+        self.declare_parameter('sensor_range_m', 3.0)
+        self.declare_parameter('gain_max_viewpoints', 5)
         self.declare_parameter('gain_distance_weight', 1.0)
         self.declare_parameter('gain_threshold_ratio', 0.75)
         # Cap on the connected-unknown-region flood fill used by
@@ -110,6 +111,9 @@ class LiteFrontierExplorer(Node):
         # one already in flight breaks that symmetry: A -> B needs B nearer
         # than A by the margin, so B -> A cannot also qualify.
         self.declare_parameter('goal_preempt_improvement_m', 2.0)
+        # visible_gain compares the same utility used to select destinations,
+        # so a farther but much more informative goal can replace a poor one.
+        self.declare_parameter('goal_preempt_utility_ratio', 1.25)
         # Backstop for any oscillation the margin above does not catch (the
         # robot is moving, so both distances change every tick). After this
         # many preemptions with no goal ever reaching a terminal state, commit
@@ -195,7 +199,13 @@ class LiteFrontierExplorer(Node):
         self._path_occ_threshold = self.get_parameter('path_occ_threshold').value
         self._selection_strategy = self.get_parameter('selection_strategy').value
         self._sensor_range_m = self.get_parameter('sensor_range_m').value
+        self._gain_max_viewpoints = self.get_parameter('gain_max_viewpoints').value
         self._gain_distance_weight = self.get_parameter('gain_distance_weight').value
+        if self._selection_strategy not in ('visible_gain', 'nearest_high_gain', 'best_gain', 'nearest'):
+            raise ValueError(f'Unknown selection_strategy: {self._selection_strategy}')
+        if (self._sensor_range_m <= 0 or self._gain_distance_weight < 0
+                or self._gain_max_viewpoints < 1):
+            raise ValueError('Invalid frontier gain parameters')
         self._gain_threshold_ratio = self.get_parameter('gain_threshold_ratio').value
         self._gain_region_cap = self.get_parameter('gain_region_cap').value
         self._turn_penalty_m = self.get_parameter('turn_penalty_m').value
@@ -203,6 +213,10 @@ class LiteFrontierExplorer(Node):
         self._goal_preempt_distance_m = self.get_parameter('goal_preempt_distance_m').value
         self._goal_preempt_improvement_m = float(
             self.get_parameter('goal_preempt_improvement_m').value)
+        self._goal_preempt_utility_ratio = float(
+            self.get_parameter('goal_preempt_utility_ratio').value)
+        if self._goal_preempt_utility_ratio <= 1.0:
+            raise ValueError('goal_preempt_utility_ratio must be > 1')
         self._max_consecutive_preemptions = int(
             self.get_parameter('max_consecutive_preemptions').value)
         self._wedge_detect_radius_m = float(
@@ -335,10 +349,55 @@ class LiteFrontierExplorer(Node):
             cluster for cluster, status in zip(clusters, cluster_status)
             if status == 'eligible'
         ]
+        if self._selection_strategy == 'visible_gain':
+            # Eligibility must apply to the actual viewpoints, not the centroid
+            # of a long/curved cluster that may sit in an obstacle or blacklist.
+            candidates = []
+            for index, cluster in enumerate(clusters):
+                unblocked = [cell for cell in cluster if not self._is_blacklisted(
+                    cluster_centroid_world([cell], costmap.info.resolution,
+                                           costmap.info.origin.position.x,
+                                           costmap.info.origin.position.y))]
+                eligible = [cell for cell in unblocked if math.hypot(
+                    costmap.info.origin.position.x + (cell[1] + 0.5) * costmap.info.resolution - robot_pose[0],
+                    costmap.info.origin.position.y + (cell[0] + 0.5) * costmap.info.resolution - robot_pose[1])
+                    >= self._min_frontier_distance_m]
+                cluster_status[index] = ('eligible' if eligible else
+                                         'too_close' if unblocked else 'blacklisted')
+                if eligible:
+                    candidates.append(eligible)
 
         goal = None
+        active_score = {}
+        selected_utility = None
         if candidates:
-            if self._selection_strategy == 'nearest_high_gain':
+            if self._selection_strategy == 'visible_gain':
+                scores = []
+                goal = select_visible_gain_frontier(
+                    candidates, costmap.data, costmap.info.width, costmap.info.height,
+                    robot_pose[0], robot_pose[1], costmap.info.resolution,
+                    costmap.info.origin.position.x, costmap.info.origin.position.y,
+                    path_occ_threshold=self._path_occ_threshold,
+                    min_distance_m=self._min_frontier_distance_m,
+                    sensor_range_m=self._sensor_range_m,
+                    distance_weight=self._gain_distance_weight,
+                    max_viewpoints=self._gain_max_viewpoints, diagnostics=scores,
+                    active_goal=self._pending_goal_xy if self._goal_active else None,
+                    active_score=active_score,
+                )
+                selected_utility = next((s['utility'] for s in scores
+                                         if (s['x'], s['y']) == goal), None)
+                ranked = sorted(scores, key=lambda s: (-s['utility'], s['path_m']))[:3]
+                self.get_logger().info(
+                    'Frontier scores: ' + '; '.join(
+                        f"({s['x']:.2f},{s['y']:.2f}) gain={s['gain_m2']:.2f}m2 "
+                        f"path={s['path_m']:.2f}m utility={s['utility']:.3f}"
+                        for s in ranked)
+                    + f'; selected={goal}; active={self._pending_goal_xy if self._goal_active else None}'
+                    + f'; active_score={active_score}',
+                    throttle_duration_sec=9.0,
+                )
+            elif self._selection_strategy == 'nearest_high_gain':
                 goal = select_nearest_high_gain_frontier(
                     candidates, costmap.data, costmap.info.width, costmap.info.height,
                     robot_pose[0], robot_pose[1],
@@ -463,20 +522,26 @@ class LiteFrontierExplorer(Node):
                     and math.hypot(goal[0] - self._pending_goal_xy[0],
                                     goal[1] - self._pending_goal_xy[1])
                     >= self._goal_preempt_distance_m):
-                # Distance from where the robot actually is, not between the
-                # two goals -- "somewhere else" is not a reason to abandon a
-                # goal, "materially closer" is.
+                # Legacy strategies compare distance; visible_gain compares
+                # utility at both destinations on this same current map.
                 current_dist = math.hypot(
                     self._pending_goal_xy[0] - robot_pose[0],
                     self._pending_goal_xy[1] - robot_pose[1])
                 new_dist = math.hypot(goal[0] - robot_pose[0],
                                       goal[1] - robot_pose[1])
-                if current_dist - new_dist >= self._goal_preempt_improvement_m:
+                if self._selection_strategy == 'visible_gain':
+                    improved = (selected_utility is not None and bool(active_score)
+                                and selected_utility > self._goal_preempt_utility_ratio * active_score['utility'])
+                    reason = f'higher-utility frontier (utility={selected_utility})'
+                else:
+                    improved = current_dist - new_dist >= self._goal_preempt_improvement_m
+                    reason = 'closer frontier'
+                if improved:
                     self._preempt_streak += 1
                     self.get_logger().info(
                         f"Preempting in-flight goal ({self._pending_goal_xy[0]:.2f}, "
                         f"{self._pending_goal_xy[1]:.2f}) at {current_dist:.1f}m for "
-                        f"closer frontier ({goal[0]:.2f}, {goal[1]:.2f}) at "
+                        f"{reason} ({goal[0]:.2f}, {goal[1]:.2f}) at "
                         f"{new_dist:.1f}m [streak {self._preempt_streak}].")
                     self._preempting = True
                     if self._goal_handle is not None:
