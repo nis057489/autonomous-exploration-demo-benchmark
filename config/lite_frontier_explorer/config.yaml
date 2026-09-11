@@ -4,13 +4,33 @@ frontier_explorer:
     # Rays stop at lethal obstacles; score actual reachable frontier cells.
     # Legacy comparison: selection_strategy: nearest_high_gain
     selection_strategy: visible_gain
-    # Common map-only cluster ranking; robot1 gets rank1, robot2 rank2, etc.
-    # Set independent to reproduce the previous per-robot utility policy.
-    frontier_assignment: robot_rank
+    # Rank ownership multiplies utility; nearby useful frontiers can override
+    # it. robot_rank restores strict allocation, which ignores distance
+    # entirely; independent drops allocation (bonus 1.0 does the same).
+    frontier_assignment: local_rank
+    # A robot takes a teammate's allocated frontier only if it is worth more
+    # than this multiple of its own best. 1.25 was too weak to separate
+    # robots standing near each other -- on the 20260911 maze2 decisions it
+    # left robot1 and robot2 picking goals 0.2 m apart -- and 3.0 starts
+    # buying separation with long drives across mapped ground.
+    rank_ownership_bonus: 2.0
+    # Clusters that would observe mostly the same unknown space are ranked
+    # as one task, so one boundary cannot occupy several ranks and hand
+    # every robot a piece of itself.
+    rank_merge_overlap: 0.5
+    # 8 groups a diagonal boundary as one frontier. 4 (the original) split
+    # the maze2 maps into ~210 fragments and broke ranked allocation
+    # outright; set it back only to reproduce that.
+    frontier_connectivity: 8
     sensor_range_m: 3.0
     gain_distance_weight: 1.0
     gain_max_viewpoints: 5
     goal_preempt_utility_ratio: 1.25
+    # Stop driving to a destination a teammate (or this robot in passing)
+    # has already observed, instead of arriving at it to find nothing.
+    # Cancels without blacklisting; visible_gain only.
+    obsolete_goal_gain_m2: 0.5
+    obsolete_goal_confirmations: 2
 
     # Global costmap topic used to compute frontiers. Multi-robot launch files
     # override this per-robot; this is just the standalone default.

@@ -47,9 +47,29 @@ def test_drops_clusters_smaller_than_min_size():
     ]
     data, width, height = _grid(rows)
 
+    # The three free cells touching that lone unknown cell are one frontier:
+    # they border the same unknown space and are diagonally adjacent.
     clusters = find_frontier_clusters(data, width, height, occ_threshold=50, min_size=3)
+    assert len(clusters) == 1 and len(clusters[0]) == 3
 
-    assert clusters == []
+    assert find_frontier_clusters(data, width, height, occ_threshold=50, min_size=4) == []
+
+
+def test_diagonal_boundary_is_one_frontier_not_a_pile_of_fragments():
+    # A boundary running diagonally steps (r, c) -> (r+1, c+1). Grouping it
+    # at 4 makes every step its own "frontier", which is what put ranks 1, 2
+    # and 3 on one boundary and sent three robots to the same place.
+    rows = [[U] * 6 for _ in range(6)]
+    for r in range(6):
+        for c in range(6):
+            if c > r:
+                rows[r][c] = F        # free above the diagonal
+    data, width, height = _grid(rows)
+
+    assert len(find_frontier_clusters(data, width, height, occ_threshold=50, min_size=1)) == 1
+    fragments = find_frontier_clusters(data, width, height, occ_threshold=50,
+                                       min_size=1, connectivity=4)
+    assert len(fragments) > 1
 
 
 def test_occupied_cells_are_never_frontier_cells():

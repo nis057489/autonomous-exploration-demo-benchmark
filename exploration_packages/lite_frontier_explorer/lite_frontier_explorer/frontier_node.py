@@ -23,6 +23,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from lite_frontier_explorer.frontier_detection import (
     cluster_centroid_world,
     find_frontier_clusters,
+    obsolete_goal_ticks,
     select_best_frontier,
     select_nearest_frontier,
     select_nearest_high_gain_frontier,
@@ -45,6 +46,13 @@ class LiteFrontierExplorer(Node):
         # wins regardless of cluster size -- there's no need to also gate
         # on a minimum to avoid picking a "bad" one.
         self.declare_parameter('min_frontier_size_cells', 1)
+        # How frontier cells are grouped into clusters. 8 traces a boundary
+        # the way a boundary actually runs, including diagonally; 4 splits
+        # every diagonal run into unrelated one- and two-cell fragments (on
+        # 20260911_211603_oracle_maze2 that was ~210 "clusters" per robot,
+        # nearly all of them pieces of the same few boundaries). Set 4 to
+        # reproduce the original grouping exactly.
+        self.declare_parameter('frontier_connectivity', 8)
         self.declare_parameter('min_frontier_distance_m', 0.5)
         self.declare_parameter('goal_blacklist_radius_m', 1.0)
         self.declare_parameter('occ_threshold', 50)
@@ -55,6 +63,23 @@ class LiteFrontierExplorer(Node):
         self.declare_parameter('frontier_assignment', 'independent')
         self.declare_parameter('robot_index', 0)  # zero-based, supplied by launch
         self.declare_parameter('team_size', 1)
+        # local_rank only: how much a robot prefers its own allocated rank.
+        # This is the whole split-up-vs-detour tradeoff in one number -- a
+        # robot takes a teammate's rank only when that rank is worth more
+        # than this multiple of its own best option. Too low and co-located
+        # robots simply agree on the same best frontier (measured on the
+        # 20260911 maze2 decisions, 1.25 left robot1 and robot2 choosing
+        # points 0.2 m apart); too high and it becomes robot_rank, driving
+        # robots across mapped ground to reach a rank (3.0 added ~30% to
+        # total path with no fewer collisions). 1.0 disables the preference.
+        self.declare_parameter('rank_ownership_bonus', 2.0)
+        # Fraction of a cluster's observable area that must already be
+        # claimed by a better-ranked task before it stops being ranked as a
+        # task of its own and joins that one. Without this, one boundary
+        # split into N clusters occupies N ranks with the same square metres
+        # behind each, and handing one rank per robot hands them all the
+        # same frontier. 0 disables merging (one rank per cluster).
+        self.declare_parameter('rank_merge_overlap', 0.5)
         self.declare_parameter('sensor_range_m', 3.0)
         self.declare_parameter('gain_max_viewpoints', 5)
         self.declare_parameter('gain_distance_weight', 1.0)
@@ -118,6 +143,32 @@ class LiteFrontierExplorer(Node):
         # visible_gain compares the same utility used to select destinations,
         # so a farther but much more informative goal can replace a poor one.
         self.declare_parameter('goal_preempt_utility_ratio', 1.25)
+        # Abandon an in-flight goal that has nothing left to show us.
+        #
+        # A destination can stop being worth driving to without the robot
+        # ever arriving: a teammate maps that area first (which is the whole
+        # mechanism this experiment exists to measure), or the robot's own
+        # sensors sweep it in passing. visible_gain already scores the active
+        # goal on every tick, so this is directly observable -- and on
+        # 20260911_211603_oracle_maze2 it was observed and ignored. robot3
+        # spent 84 s and ~17 m driving toward a frontier whose remaining gain
+        # had been logged as exactly 0.00 m2 the whole way, because rank
+        # allocation suppresses ordinary preemption and nothing else looks at
+        # gain. It only stopped when the no-progress timer fired and
+        # blacklisted a frontier that was perfectly reachable.
+        #
+        # Cancels without blacklisting: an explored frontier is not a failed
+        # one. Requires confirmations on consecutive ticks so a single stale
+        # or momentarily-inflated costmap cannot discard a live goal, and
+        # only fires when there is a materially different frontier to go to
+        # instead (goal_preempt_distance_m), so it cannot spin in place.
+        # Deliberately bypasses the preemption backstop below: that backstop
+        # exists to stop a robot thrashing between two live goals, not to
+        # make it finish driving to a dead one. visible_gain only -- the
+        # legacy selectors do not score the active goal at all.
+        # 0 m2 disables it.
+        self.declare_parameter('obsolete_goal_gain_m2', 0.5)
+        self.declare_parameter('obsolete_goal_confirmations', 2)
         # Backstop for any oscillation the margin above does not catch (the
         # robot is moving, so both distances change every tick). After this
         # many preemptions with no goal ever reaching a terminal state, commit
@@ -197,6 +248,9 @@ class LiteFrontierExplorer(Node):
         self._global_frame = self.get_parameter('global_frame').value
         self._robot_base_frame = self.get_parameter('robot_base_frame').value
         self._min_frontier_size = self.get_parameter('min_frontier_size_cells').value
+        self._frontier_connectivity = int(self.get_parameter('frontier_connectivity').value)
+        if self._frontier_connectivity not in (4, 8):
+            raise ValueError('frontier_connectivity must be 4 or 8')
         self._min_frontier_distance_m = self.get_parameter('min_frontier_distance_m').value
         self._goal_blacklist_radius_m = self.get_parameter('goal_blacklist_radius_m').value
         self._occ_threshold = self.get_parameter('occ_threshold').value
@@ -205,11 +259,16 @@ class LiteFrontierExplorer(Node):
         self._frontier_assignment = self.get_parameter('frontier_assignment').value
         self._robot_index = self.get_parameter('robot_index').value
         self._team_size = self.get_parameter('team_size').value
-        if self._frontier_assignment not in ('independent', 'robot_rank'):
-            raise ValueError('frontier_assignment must be independent or robot_rank')
+        if self._frontier_assignment not in ('independent', 'robot_rank', 'local_rank'):
+            raise ValueError('frontier_assignment must be independent, robot_rank or local_rank')
         if self._team_size < 1 or not 0 <= self._robot_index < self._team_size:
             raise ValueError('robot_index must be within team_size')
-        self._rank_assignment = (self._frontier_assignment == 'robot_rank'
+        self._rank_ownership_bonus = float(self.get_parameter('rank_ownership_bonus').value)
+        self._rank_merge_overlap = float(self.get_parameter('rank_merge_overlap').value)
+        if self._rank_ownership_bonus < 1.0 or not 0.0 <= self._rank_merge_overlap <= 1.0:
+            raise ValueError('rank_ownership_bonus must be >= 1 and '
+                             'rank_merge_overlap within [0, 1]')
+        self._rank_assignment = (self._frontier_assignment in ('robot_rank', 'local_rank')
                                  and self._team_size > 1
                                  and self._selection_strategy == 'visible_gain')
         self._sensor_range_m = self.get_parameter('sensor_range_m').value
@@ -231,6 +290,13 @@ class LiteFrontierExplorer(Node):
             self.get_parameter('goal_preempt_utility_ratio').value)
         if self._goal_preempt_utility_ratio <= 1.0:
             raise ValueError('goal_preempt_utility_ratio must be > 1')
+        self._obsolete_goal_gain_m2 = float(
+            self.get_parameter('obsolete_goal_gain_m2').value)
+        # At least one confirmation always: at 0 the check would fire on a
+        # goal whose gain it has never actually looked at. Use
+        # obsolete_goal_gain_m2: 0.0 to turn the rule off.
+        self._obsolete_goal_confirmations = max(1, int(
+            self.get_parameter('obsolete_goal_confirmations').value))
         self._max_consecutive_preemptions = int(
             self.get_parameter('max_consecutive_preemptions').value)
         self._wedge_detect_radius_m = float(
@@ -264,6 +330,9 @@ class LiteFrontierExplorer(Node):
         self._last_goal_direction = None  # (dx, dy) of the most recently sent goal
         # Consecutive preemptions since the last goal reached a terminal state.
         self._preempt_streak = 0
+        # Consecutive ticks the active goal has scored as having nothing left
+        # to observe (see obsolete_goal_gain_m2).
+        self._obsolete_ticks = 0
         # Where the robot was when the no-progress timer last fired, and how
         # many times it has fired without the robot moving away from there.
         self._last_stuck_xy = None
@@ -285,7 +354,7 @@ class LiteFrontierExplorer(Node):
 
         self.get_logger().info(
             f"lite_frontier_explorer: watching '{self._costmap_topic}', "
-            f"assignment={'robot_rank' if self._rank_assignment else 'independent'}, "
+            f"assignment={self._frontier_assignment if self._rank_assignment else 'independent'}, "
             f"robot={self._robot_index + 1}/{self._team_size}")
 
     def _on_costmap(self, msg):
@@ -340,6 +409,7 @@ class LiteFrontierExplorer(Node):
         clusters = find_frontier_clusters(
             costmap.data, costmap.info.width, costmap.info.height,
             occ_threshold=self._occ_threshold, min_size=self._min_frontier_size,
+            connectivity=self._frontier_connectivity,
         )
 
         # Classify every detected cluster so the markers can show *why* a
@@ -404,20 +474,24 @@ class LiteFrontierExplorer(Node):
                     max_viewpoints=self._gain_max_viewpoints, diagnostics=scores,
                     active_goal=self._pending_goal_xy if self._goal_active else None,
                     active_score=active_score,
-                    assignment_mode='robot_rank' if self._rank_assignment else 'independent',
+                    assignment_mode=self._frontier_assignment if self._rank_assignment else 'independent',
                     robot_index=self._robot_index, team_size=self._team_size,
                     blacklisted_goals=self._blacklisted_goals,
                     blacklist_radius_m=self._goal_blacklist_radius_m,
+                    ownership_bonus=self._rank_ownership_bonus,
+                    merge_overlap=self._rank_merge_overlap,
                 )
                 selected_utility = next((s['utility'] for s in scores
                                          if (s['x'], s['y']) == goal), None)
-                ranked = sorted(scores, key=lambda s: (-s['utility'], s['path_m']))[:3]
+                ranked = sorted(scores, key=lambda s: (-s['assignment_utility'], s['path_m']))[:3]
                 self.get_logger().info(
                     'Frontier scores: ' + '; '.join(
                         f"({s['x']:.2f},{s['y']:.2f}) gain={s['gain_m2']:.2f}m2 "
                         f"path={s['path_m']:.2f}m utility={s['utility']:.3f}"
+                        f" assigned_utility={s['assignment_utility']:.3f}"
                         f" rank={s['cluster_rank'] + 1} fallback={s['assignment_fallback']}"
                         for s in ranked)
+                    + f'; clusters={len(clusters)}'
                     + f'; selected={goal}; active={self._pending_goal_xy if self._goal_active else None}'
                     + f'; active_score={active_score}',
                     throttle_duration_sec=9.0,
@@ -460,6 +534,33 @@ class LiteFrontierExplorer(Node):
         self._publish_frontier_markers(cluster_xy, cluster_status, goal)
 
         if self._goal_active:
+            # Abandon a goal that has nothing left to observe -- someone
+            # already saw what it was worth driving to. See
+            # obsolete_goal_gain_m2. Checked before the stalled-goal and
+            # preemption paths below: neither of them looks at whether the
+            # destination is still worth reaching, and blaming a frontier
+            # that is merely finished poisons the blacklist.
+            if (self._obsolete_goal_gain_m2 > 0.0 and not self._preempting
+                    and not self._abandoning_stuck):
+                self._obsolete_ticks = obsolete_goal_ticks(
+                    self._obsolete_ticks, active_score, goal, self._pending_goal_xy,
+                    self._obsolete_goal_gain_m2, self._goal_preempt_distance_m)
+                if self._obsolete_ticks >= self._obsolete_goal_confirmations:
+                    self.get_logger().info(
+                        f"Goal ({self._pending_goal_xy[0]:.2f}, "
+                        f"{self._pending_goal_xy[1]:.2f}) has "
+                        f"{active_score['gain_m2']:.2f}m2 left to observe after "
+                        f"{self._obsolete_ticks} checks -- already explored, so "
+                        f"switching to ({goal[0]:.2f}, {goal[1]:.2f}). NOT "
+                        "blacklisted; it was reached in information, not failed.")
+                    self._obsolete_ticks = 0
+                    self._preempting = True   # cancel WITHOUT blacklisting
+                    if self._goal_handle is not None:
+                        self._goal_handle.cancel_goal_async()
+                    return
+            else:
+                self._obsolete_ticks = 0
+
             # Abandon a goal the robot is not actually getting anywhere with,
             # rather than waiting out nav2's full recovery chain.
             if (self._goal_stuck_timeout_s > 0.0 and not self._preempting
@@ -624,10 +725,11 @@ class LiteFrontierExplorer(Node):
         self._goal_handle = None
         self._preempting = False
         self._pending_goal_xy = (goal_x, goal_y)
-        # Fresh goal -- restart no-progress tracking.
+        # Fresh goal -- restart no-progress and obsolescence tracking.
         self._progress_ref_xy = None
         self._progress_ref_time = None
         self._abandoning_stuck = False
+        self._obsolete_ticks = 0
         send_future = self._nav_client.send_goal_async(goal_msg)
         send_future.add_done_callback(self._on_goal_response)
 
@@ -765,6 +867,7 @@ class LiteFrontierExplorer(Node):
         self._abandoning_stuck = False
         self._progress_ref_xy = None
         self._progress_ref_time = None
+        self._obsolete_ticks = 0
 
     def _blacklist_pending_goal(self):
         if self._pending_goal_xy is not None:

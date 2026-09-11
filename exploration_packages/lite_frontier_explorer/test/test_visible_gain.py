@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 
 from lite_frontier_explorer.frontier_detection import (
-    find_frontier_clusters, select_visible_gain_frontier, visible_unknown_area,
+    find_frontier_clusters, obsolete_goal_ticks, select_visible_gain_frontier,
+    visible_unknown_area,
 )
 
 U, F, O = -1, 0, 100
@@ -132,3 +133,33 @@ def test_no_unknown_means_no_goal():
 def test_invalid_parameters(kwargs):
     with pytest.raises(ValueError):
         choose(rooms(), **kwargs)
+
+
+def obsolete(ticks, gain, goal=(20.0, 0.0), active=(0.0, 0.0), min_gain=0.5, separation=1.0):
+    score = {} if gain is None else dict(gain_m2=gain, path_m=5.0, utility=gain / 6)
+    return obsolete_goal_ticks(ticks, score, goal, active, min_gain, separation)
+
+
+def test_a_destination_with_nothing_left_to_see_is_counted_out():
+    # A teammate mapped the area this robot is still driving toward. The
+    # count has to survive consecutive ticks, so one stale costmap cannot
+    # discard a live goal, and it resets the moment gain reappears.
+    assert obsolete(0, 0.0) == 1
+    assert obsolete(1, 0.0) == 2
+    assert obsolete(4, 12.0) == 0
+
+
+def test_an_obsolete_goal_is_kept_when_there_is_nowhere_else_to_go():
+    # "Finished" is only actionable next to "so go here instead": with no
+    # alternative, or only one at the same place, the robot keeps driving
+    # rather than cancelling into an empty choice.
+    assert obsolete(3, 0.0, goal=None) == 0
+    assert obsolete(3, 0.0, goal=(0.5, 0.0)) == 0
+
+
+def test_an_unscorable_active_goal_is_not_called_obsolete():
+    # No active_score means the selector could not score that cell at all
+    # (unreachable, or lethal on this costmap) -- which is a job for the
+    # stuck timer, not evidence that the frontier is explored.
+    assert obsolete(3, None) == 0
+    assert obsolete(3, 0.0, active=None) == 0

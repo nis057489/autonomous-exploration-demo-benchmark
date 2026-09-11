@@ -145,7 +145,8 @@ def check(ranges=(3.5, 10.0), assignment='independent'):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--json-out', type=Path)
-    parser.add_argument('--assignment', choices=('independent', 'robot_rank'), default='robot_rank')
+    parser.add_argument('--assignment', choices=('independent', 'robot_rank', 'local_rank'),
+                        default='local_rank')
     args = parser.parse_args()
     result = check(assignment=args.assignment)
     for row in result['results']:

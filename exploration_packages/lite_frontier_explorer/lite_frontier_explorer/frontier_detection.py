@@ -10,6 +10,7 @@ from functools import lru_cache
 import numpy as np
 
 _NEIGHBOR_OFFSETS = ((-1, 0), (1, 0), (0, -1), (0, 1))
+_NEIGHBOR_OFFSETS_8 = _NEIGHBOR_OFFSETS + ((-1, -1), (-1, 1), (1, -1), (1, 1))
 
 
 @lru_cache(maxsize=8)
@@ -33,6 +34,18 @@ def visible_unknown_area(grid, row, col, resolution, sensor_range_m,
     are not physical walls. Each cell gets credit once, independently of
     other candidate viewpoints. Out-of-map space gets no credit.
     """
+    return visible_unknown_cells(grid, row, col, resolution, sensor_range_m,
+                                 obstacle_threshold).size * resolution ** 2
+
+
+def visible_unknown_cells(grid, row, col, resolution, sensor_range_m,
+                          obstacle_threshold=100):
+    """The unknown cells visible_unknown_area counts, as flat grid indices.
+
+    Ranking needs the identities, not just the count: two frontiers scoring
+    the same area are only two tasks if they are looking at different cells
+    (see rank_frontier_clusters).
+    """
     dr, dc = _visibility_rays(sensor_range_m / resolution)
     rows, cols = row + dr, col + dc
     height, width = grid.shape
@@ -48,7 +61,7 @@ def visible_unknown_area(grid, row, col, resolution, sensor_range_m,
     blocked |= diagonal & ((side_a >= obstacle_threshold) | (side_b >= obstacle_threshold))
     visible = ~np.maximum.accumulate(blocked, axis=1)
     unknown = visible & (values == -1) & (dr * dr + dc * dc <= (sensor_range_m / resolution) ** 2)
-    return np.unique(rows[unknown] * width + cols[unknown]).size * resolution ** 2
+    return np.unique(rows[unknown] * width + cols[unknown])
 
 
 def _sample_viewpoints(cells, count, first=None):
@@ -66,25 +79,58 @@ def _sample_viewpoints(cells, count, first=None):
 
 
 def rank_frontier_clusters(clusters, grid, resolution, sensor_range_m, max_viewpoints=5,
-                           path_occ_threshold=99):
-    """Common map-only ranking: best visible area, then canonical cell order.
+                           path_occ_threshold=99, merge_overlap=0.5):
+    """Common map-only ranking of distinct tasks: best visible area first.
 
-    Rank distinct clusters, not multiple viewpoints of one cluster. Neither
-    robot position nor its private blacklist can change this ordering.
-    Identical maps/parameters yield identical ranks despite input ordering.
+    Rank distinct observation tasks, not multiple viewpoints of one cluster,
+    and not several clusters that would all observe the same square metres.
+    Neither robot position nor its private blacklist can change this
+    ordering. Identical maps/parameters yield identical ranks despite input
+    ordering.
+
+    The merge step is what makes rank allocation mean anything. Detection
+    splits one physical boundary into several clusters routinely -- the two
+    edges of a sensor wedge, either side of a doorway, a diagonal boundary
+    broken by inflation -- and each piece then scores nearly the same visible
+    area, because it is the same unknown space behind all of them. Measured
+    on 20260911_211603_oracle_maze2 that put ranks 1, 2 and 3 within a metre
+    of each other at (24, 4), so allocating one rank per robot sent all three
+    robots to one frontier while the rest of the maze sat unexplored. A
+    cluster whose visible area is already `merge_overlap` claimed by a
+    higher-ranked task joins that task instead of taking a rank of its own;
+    its cells stay available as another approach to it rather than being
+    discarded. 0 disables merging and restores one rank per cluster.
     """
-    ranked = []
+    scored = []
     for cluster in clusters:
         cells = sorted(set((r, c) for r, c in cluster
                            if 0 <= grid[r, c] < path_occ_threshold))
         if not cells:
             continue
-        gain = max(visible_unknown_area(grid, r, c, resolution, sensor_range_m)
-                   for r, c in _sample_viewpoints(cells, max_viewpoints))
+        # Count cells, not area: an exact integer key, so equal-gain ties
+        # break on cell order rather than on float noise.
+        views = [visible_unknown_cells(grid, r, c, resolution, sensor_range_m)
+                 for r, c in _sample_viewpoints(cells, max_viewpoints)]
+        gain = max(view.size for view in views)
         if gain > 0:
-            ranked.append((gain, cells))
-    ranked.sort(key=lambda item: (-round(item[0], 9), item[1]))
-    return [cells for _, cells in ranked]
+            scored.append((gain, cells, np.unique(np.concatenate(views))))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+
+    claimed_by = np.full(grid.size, -1, dtype=np.int32)
+    regions = []
+    for _, cells, seen in scored:
+        claims = claimed_by[seen]
+        taken = claims[claims >= 0]
+        if merge_overlap and taken.size >= merge_overlap * seen.size:
+            # Whichever task already sees most of this area owns it; ties go
+            # to the better-ranked one, since bincount favors the lower id.
+            region = int(np.bincount(taken).argmax())
+            regions[region].extend(cells)
+        else:
+            region = len(regions)
+            regions.append(list(cells))
+        claimed_by[seen[claims < 0]] = region
+    return [sorted(region) for region in regions]
 
 
 def select_visible_gain_frontier(clusters, data, width, height, robot_x, robot_y,
@@ -94,7 +140,8 @@ def select_visible_gain_frontier(clusters, data, width, height, robot_x, robot_y
                                  max_viewpoints=5, diagnostics=None,
                                  active_goal=None, active_score=None,
                                  assignment_mode='independent', robot_index=0, team_size=1,
-                                 blacklisted_goals=(), blacklist_radius_m=0.0):
+                                 blacklisted_goals=(), blacklist_radius_m=0.0,
+                                 ownership_bonus=2.0, merge_overlap=0.5):
     """Maximize observable unknown m² / (1 + distance_weight * path metres).
 
     Sample actual reachable frontier cells, not a potentially occupied
@@ -102,13 +149,23 @@ def select_visible_gain_frontier(clusters, data, width, height, robot_x, robot_y
     include their nearest reachable cell. Legacy selectors remain available
     for controlled comparisons. No region cap, gain gate or direction bonus.
 
-    robot_rank first allocates whole clusters by map-only rank and static
-    membership, then maximizes this utility within the assigned cluster.
+    robot_rank first allocates whole ranked tasks by map-only rank and static
+    membership, then maximizes this utility within the assigned task. It
+    ignores how far away that task is, which is how a robot ends up crossing
+    a mapped building to reach its rank while local work goes unclaimed.
+    local_rank instead compares every task, multiplying owned ranks by
+    ownership_bonus, so allocation breaks the symmetry between robots that
+    would otherwise choose identically without forcing a long trip for
+    comparable gain: a robot takes someone else's task only when it is worth
+    more than ownership_bonus times its own best. At 1.0 that is plain
+    independent selection.
     Local exclusions apply after allocation, with progress-preserving fallback.
     """
     if resolution <= 0 or sensor_range_m <= 0 or distance_weight < 0 or max_viewpoints < 1:
         raise ValueError('invalid visible-gain geometry or scoring parameters')
-    if assignment_mode not in ('independent', 'robot_rank'):
+    if ownership_bonus < 1.0:
+        raise ValueError('ownership_bonus must be >= 1')
+    if assignment_mode not in ('independent', 'robot_rank', 'local_rank'):
         raise ValueError('invalid frontier assignment mode')
     if team_size < 1 or not 0 <= robot_index < team_size:
         raise ValueError('robot_index must be within team_size')
@@ -128,9 +185,9 @@ def select_visible_gain_frontier(clusters, data, width, height, robot_x, robot_y
                 distance = float(distances[row, col]) * resolution
                 active_score.update(gain_m2=gain, path_m=distance,
                                     utility=gain / (1.0 + distance_weight * distance))
-    if assignment_mode == 'robot_rank':
+    if assignment_mode in ('robot_rank', 'local_rank'):
         clusters = rank_frontier_clusters(clusters, grid, resolution, sensor_range_m,
-                                          max_viewpoints, path_occ_threshold)
+                                          max_viewpoints, path_occ_threshold, merge_overlap)
         if not clusters:
             return None
         # Rank 0 -> robot0, rank 1 -> robot1, etc. Further ranks cycle through
@@ -161,13 +218,16 @@ def select_visible_gain_frontier(clusters, data, width, height, robot_x, robot_y
             gain = visible_unknown_area(grid, row, col, resolution, sensor_range_m)
             distance = float(distances[row, col]) * resolution
             utility = gain / (1.0 + distance_weight * distance)
+            assignment_utility = utility * (ownership_bonus if assignment_mode == 'local_rank'
+                                            and cluster_rank in owned else 1.0)
             xy = (origin_x + (col + 0.5) * resolution, origin_y + (row + 0.5) * resolution)
             if diagnostics is not None:
                 diagnostics.append(dict(x=xy[0], y=xy[1], gain_m2=gain,
                                         path_m=distance, utility=utility,
+                                        assignment_utility=assignment_utility,
                                         cluster_rank=cluster_rank,
                                         assignment_fallback=cluster_rank not in owned))
-            rank = (utility, -distance, -row, -col)
+            rank = (assignment_utility, -distance, -row, -col)
             if gain > 0 and (best is None or rank > best[0]):
                 best = (rank, xy)
         if assignment_mode == 'robot_rank' and best is not None:
@@ -175,7 +235,28 @@ def select_visible_gain_frontier(clusters, data, width, height, robot_x, robot_y
     return best[1] if best is not None else None
 
 
-def find_frontier_clusters(data, width, height, occ_threshold=50, min_size=6):
+def obsolete_goal_ticks(ticks, active_score, goal, active_goal, min_gain_m2, separation_m):
+    """Count consecutive ticks an in-flight goal has had nothing left to show.
+
+    Returns the updated count; the caller cancels once it reaches its own
+    confirmation threshold, so one stale costmap cannot discard a live goal.
+
+    Counting only continues while there is somewhere materially different to
+    go instead: a robot must not talk itself out of its only destination, and
+    "the goal is finished" is only actionable next to "so go here instead".
+    An active_score the selector could not compute at all (the goal cell is
+    unreachable or lethal on this costmap) is not evidence of anything --
+    that is what the stuck timer and nav2's own recovery are for.
+    """
+    if not active_score or goal is None or active_goal is None:
+        return 0
+    if math.hypot(goal[0] - active_goal[0], goal[1] - active_goal[1]) < separation_m:
+        return 0
+    return ticks + 1 if active_score['gain_m2'] < min_gain_m2 else 0
+
+
+def find_frontier_clusters(data, width, height, occ_threshold=50, min_size=6,
+                           connectivity=8):
     """Return a list of clusters, each a list of (row, col) cells.
 
     A cell is a frontier cell if it's free (cost < occ_threshold) and
@@ -185,9 +266,21 @@ def find_frontier_clusters(data, width, height, occ_threshold=50, min_size=6):
     shifted copies together, so every cell's "do I have an unknown
     neighbor" check happens in a handful of whole-array ops instead of a
     width*height Python loop. The frontier cells found are then grouped
-    into 4-connected clusters via BFS -- that stays plain Python since it
-    only touches the much smaller frontier-cell set, not the whole grid.
+    into clusters via BFS -- that stays plain Python since it only touches
+    the much smaller frontier-cell set, not the whole grid.
     Clusters smaller than min_size are dropped.
+
+    connectivity is how those cells are grouped, and 8 is the honest answer
+    for a boundary: a frontier that runs diagonally steps (r, c) -> (r+1,
+    c+1), which 4-connectivity treats as two unrelated frontiers. Measured
+    on 20260911_211603_oracle_maze2, grouping at 4 turned a 32x26 m maze
+    into ~210 clusters -- most of them 2-cell fragments of one diagonal
+    boundary -- which made every ranked allocation meaningless (the top nine
+    ranks were all the same frontier) and cost ~1.6 s of visibility
+    raycasting per tick. The same maps group into 11-21 clusters at 8.
+    Frontier cells sit at least occ_threshold's worth of inflation away from
+    any wall, so diagonal grouping cannot bridge two sides of one.
+    Set 4 to reproduce the original grouping exactly.
     """
     grid = np.asarray(data, dtype=np.int8).reshape(height, width)
 
@@ -209,6 +302,7 @@ def find_frontier_clusters(data, width, height, occ_threshold=50, min_size=6):
     frontier_cells = {(int(r), int(c)) for r, c in np.argwhere(frontier_mask)}
 
     # 1. Group frontier cells into connected clusters via BFS/flood-fill.
+    offsets = _NEIGHBOR_OFFSETS_8 if connectivity == 8 else _NEIGHBOR_OFFSETS
     clusters = []
     visited = set()
     for cell in frontier_cells:
@@ -219,11 +313,11 @@ def find_frontier_clusters(data, width, height, occ_threshold=50, min_size=6):
         stack = [cell]
         cluster = []
         # 3. Flood-fill outward from this seed cell, walking only
-        #    4-connected neighbors that are themselves frontier cells.
+        #    adjacent neighbors that are themselves frontier cells.
         while stack:
             r, c = stack.pop()
             cluster.append((r, c))
-            for dr, dc in _NEIGHBOR_OFFSETS:
+            for dr, dc in offsets:
                 nb = (r + dr, c + dc)
                 if nb in frontier_cells and nb not in visited:
                     visited.add(nb)

@@ -121,3 +121,90 @@ def test_single_robot_keeps_original_utility_policy():
 def test_invalid_membership_is_rejected(index, count):
     with pytest.raises(ValueError):
         select(scene(), index, count=count)
+
+
+def split_boundary():
+    """One boundary onto one area, broken in two by an inflated cell."""
+    grid = np.full((10, 13), 100, dtype=np.int8)
+    grid[:5, 1:12] = -1   # the unexplored area
+    grid[5, 1:12] = 0     # the boundary along it
+    grid[5, 6] = 99       # inflation from something: not a frontier cell
+    grid[6:, :] = 0       # corridor
+    return grid
+
+
+def test_one_area_behind_two_clusters_is_a_single_ranked_task():
+    # Detection cannot join these two pieces -- an impassable cell sits
+    # between them -- but they are not two tasks: whoever takes either piece
+    # observes the same space. Ranking them separately is what let rank 1 and
+    # rank 2 send two robots to one frontier.
+    grid = split_boundary()
+    clusters = find_frontier_clusters(grid.ravel(), 13, 10, min_size=1)
+    assert len(clusters) == 2
+
+    merged = rank_frontier_clusters(clusters, grid, 1, 5)
+    assert len(merged) == 1
+    # The second piece stays usable as another approach, it is not discarded.
+    assert sorted(merged[0]) == sorted(c for cluster in clusters for c in cluster)
+
+    assert len(rank_frontier_clusters(clusters, grid, 1, 5, merge_overlap=0)) == 2
+
+
+def twin_rooms():
+    """Two identical rooms, equidistant from a robot in the corridor."""
+    grid = np.full((10, 25), 100, dtype=np.int8)
+    grid[7:, :] = 0
+    for left in (2, 16):
+        grid[6, left:left + 7] = 0
+        grid[:6, left:left + 7] = -1
+    return grid
+
+
+def choose(grid, index, robot, bonus, count=3, **kwargs):
+    clusters = find_frontier_clusters(grid.ravel(), grid.shape[1], grid.shape[0], min_size=1)
+    return select_visible_gain_frontier(
+        clusters, grid.ravel(), grid.shape[1], grid.shape[0], *robot,
+        1, 0, 0, sensor_range_m=5, assignment_mode='local_rank', robot_index=index,
+        team_size=count, ownership_bonus=bonus, **kwargs)
+
+
+def test_robots_in_the_same_place_take_different_tasks():
+    # Two robots at one spot with two equally good rooms in front of them.
+    # Nothing about their own utility distinguishes them, so without a
+    # strong enough ownership preference they both choose the same room --
+    # which is what the fielded 1.25 did.
+    grid, pose = twin_rooms(), (12.5, 8.5)
+    assert choose(grid, 0, pose, 1.0) == choose(grid, 1, pose, 1.0)
+    assert choose(grid, 0, pose, 2.0) != choose(grid, 1, pose, 2.0)
+
+
+def far_prize():
+    """A small room at the robot's feet; the map's best room far away."""
+    grid = np.full((10, 40), 100, dtype=np.int8)
+    grid[7:, :] = 0
+    grid[6, 2:6] = 0
+    grid[:6, 2:6] = -1     # small, adjacent
+    grid[6, 30:38] = 0
+    grid[:6, 30:38] = -1   # large, ~28 m away
+    return grid
+
+
+def test_ownership_does_not_send_a_robot_across_the_mapped_map():
+    # The robot owns the distant rank. robot_rank drives there regardless of
+    # cost -- that is how robot3 came to pick a frontier 44 m away with work
+    # 4 m in front of it -- while local_rank keeps the bonus a preference.
+    grid, pose = far_prize(), (3.5, 8.5)
+    clusters = find_frontier_clusters(grid.ravel(), 40, 10, min_size=1)
+    strict = select_visible_gain_frontier(
+        clusters, grid.ravel(), 40, 10, *pose, 1, 0, 0, sensor_range_m=5,
+        assignment_mode='robot_rank', robot_index=2, team_size=3)
+    assert strict[0] > 25                      # owns the far room, goes there
+
+    assert choose(grid, 2, pose, 2.0)[0] < 10  # ...the preference does not
+    # A big enough bonus buys separation with travel again: that is the knob.
+    assert choose(grid, 2, pose, 20.0)[0] > 25
+
+
+def test_ownership_bonus_below_one_is_rejected():
+    with pytest.raises(ValueError):
+        choose(twin_rooms(), 0, (12.5, 8.5), 0.9)
