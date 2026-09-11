@@ -83,6 +83,22 @@ separately for whichever transport is being evaluated.
 
 ## What has actually been checked
 
+The table below describes the original **independent** frontier policy. The
+default configuration now also uses [robot-rank allocation](../../../config/lite_frontier_explorer/robot_rank_assignment.md)
+to spread robots across distinct frontier clusters. Re-run mission comparisons
+with this same allocation enabled in both arms. The diagnostic now defaults
+to `--assignment robot_rank`; use `--assignment independent` to reproduce the
+historical mechanism check below. Neither mode models exclusive reservations
+or full multi-robot dynamics.
+
+With rank allocation, the current idealized check has 2/3 `none` robots enter
+a peer branch first at 3.5 m sensing, versus 0/3 under oracle. At 10 m, both
+arms have 0/3 peer-branch entries before the work-spine gate (their approach
+distances can still differ). Static ID allocation therefore changes the
+contrast: the old all-robots branch-choice separation does not carry over to
+the new policy. Re-evaluate physical first coverage in closed-loop trials;
+do not reuse the old policy's diagnostic as evidence for the new one.
+
 `tools/check_long_t_decisions.py` rasterizes the **SDF collision boxes**,
 generates ideal local observations along three straight approaches, and calls
 the repository's actual `visible_gain` selector. Each robot then follows
@@ -112,7 +128,7 @@ Run the check in a Python environment with NumPy (and pytest for tests):
 
 ```sh
 python3 tools/generate_long_t.py --check
-python3 tools/check_long_t_decisions.py --json-out /tmp/long_t_decisions.json
+python3 tools/check_long_t_decisions.py --assignment robot_rank --json-out /tmp/long_t_decisions.json
 python3 -m pytest tools/tests/test_long_t.py -q
 ```
 

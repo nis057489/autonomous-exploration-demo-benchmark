@@ -45,8 +45,7 @@ def _load_yaml(path):
 
 
 # The parameter keys lite_frontier_explorer's node actually declares -- it's a
-# frontier-selection node with no autostart/control_service/team-awareness,
-# and no peer coordination of its own.
+# frontier-selection node with optional map-only robot-rank allocation.
 _LITE_PARAM_KEYS = (
     "costmap_topic",
     "global_frame",
@@ -56,6 +55,7 @@ _LITE_PARAM_KEYS = (
     "occ_threshold",
     "path_occ_threshold",
     "selection_strategy",
+    "frontier_assignment",
     "sensor_range_m",
     "gain_max_viewpoints",
     "gain_distance_weight",
@@ -93,11 +93,13 @@ _MARKER_COLORS_255 = [
 ]
 
 
-def _frontier_params(base_path, namespace, use_sim_time, color_255):
+def _frontier_params(base_path, namespace, use_sim_time, color_255, robot_index=0, team_size=1):
     data = _load_yaml(base_path)
     source = data.get("frontier_explorer", {}).get("ros__parameters", {})
     params = {k: source[k] for k in _LITE_PARAM_KEYS if k in source}
     params["use_sim_time"] = use_sim_time
+    params["robot_index"] = robot_index
+    params["team_size"] = team_size
     params["costmap_topic"] = f"/{namespace}/global_costmap/costmap"
     params["global_frame"] = "map"
     params["robot_base_frame"] = f"{namespace}/base_footprint"
@@ -127,7 +129,8 @@ def _create_explorer_actions(context):
     for index in range(num_robots):
         namespace = f"robot{index + 1}"
         color_255 = _MARKER_COLORS_255[min(index, len(_MARKER_COLORS_255) - 1)]
-        generated_params = _frontier_params(params_file, namespace, use_sim_time, color_255)
+        generated_params = _frontier_params(params_file, namespace, use_sim_time, color_255,
+                                            robot_index=index, team_size=num_robots)
         generated_params["explore_start_delay_s"] = index * start_stagger_s
         actions.append(
             Node(

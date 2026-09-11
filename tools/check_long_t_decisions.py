@@ -86,7 +86,8 @@ class Scene:
             maps.append(local)
         return maps
 
-    def trace(self, local, shared, start, radius, max_goals=12):
+    def trace(self, local, shared, start, radius, max_goals=12,
+              assignment='independent', robot_index=0, team_size=3):
         local = local.copy()
         pos = (start['x'], 0.5)
         distance = 0.0
@@ -97,7 +98,8 @@ class Scene:
             clusters = find_frontier_clusters(plan.ravel(), w, h, min_size=2)
             goal = select_visible_gain_frontier(
                 clusters, plan.ravel(), w, h, *pos, self.resolution, self.ox, self.oy,
-                min_distance_m=2, sensor_range_m=3)
+                min_distance_m=2, sensor_range_m=3, assignment_mode=assignment,
+                robot_index=robot_index, team_size=team_size)
             if goal is None:
                 break
             goals.append(goal)
@@ -122,7 +124,7 @@ class Scene:
         return dict(outcome='undecided', path_m=round(distance, 2), goals=goals, exit_xy=pos)
 
 
-def check(ranges=(3.5, 10.0)):
+def check(ranges=(3.5, 10.0), assignment='independent'):
     scene = Scene()
     metadata = json.loads((ROOT / 'simulation/worlds/long_t/geometry.json').read_text())
     rows = []
@@ -132,17 +134,20 @@ def check(ranges=(3.5, 10.0)):
         unexplored = int(np.count_nonzero((scene.truth == 0) & (union == -1))) * scene.resolution ** 2
         for index, (start, local) in enumerate(zip(metadata['starts'], maps), 1):
             for arm, shared in [('none', None), ('oracle', union)]:
-                result = scene.trace(local, shared, start, radius)
+                result = scene.trace(local, shared, start, radius, assignment=assignment,
+                                     robot_index=index-1, team_size=len(maps))
                 rows.append(dict(sensor_range_m=radius, robot=index, arm=arm,
                                  team_unobserved_m2=round(unexplored, 2), **result))
-    return dict(kind='idealized_policy_diagnostic_not_mission_measurement', results=rows)
+    return dict(kind='idealized_policy_diagnostic_not_mission_measurement',
+                frontier_assignment=assignment, results=rows)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--json-out', type=Path)
+    parser.add_argument('--assignment', choices=('independent', 'robot_rank'), default='robot_rank')
     args = parser.parse_args()
-    result = check()
+    result = check(assignment=args.assignment)
     for row in result['results']:
         print(f"range={row['sensor_range_m']:4.1f} robot{row['robot']} {row['arm']:6s} "
               f"-> {row['outcome']:10s}; {row['path_m']:5.1f} m to exit; "

@@ -4,6 +4,9 @@ frontier_explorer:
     # Rays stop at lethal obstacles; score actual reachable frontier cells.
     # Legacy comparison: selection_strategy: nearest_high_gain
     selection_strategy: visible_gain
+    # Common map-only cluster ranking; robot1 gets rank1, robot2 rank2, etc.
+    # Set independent to reproduce the previous per-robot utility policy.
+    frontier_assignment: robot_rank
     sensor_range_m: 3.0
     gain_distance_weight: 1.0
     gain_max_viewpoints: 5

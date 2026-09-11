@@ -15,6 +15,7 @@ class LaunchParameterTests(unittest.TestCase):
         ) or (isinstance(node, ast.FunctionDef) and node.name == '_frontier_params')]
         settings = {
             'selection_strategy': 'nearest', 'path_occ_threshold': 90,
+            'frontier_assignment': 'robot_rank',
             'sensor_range_m': 4.0, 'gain_distance_weight': 2.0, 'gain_max_viewpoints': 7,
             'gain_threshold_ratio': 0.5, 'gain_region_cap': 8000,
             'turn_penalty_m': 0.25, 'hysteresis_bonus_m': 1.5,
@@ -25,8 +26,11 @@ class LaunchParameterTests(unittest.TestCase):
         scope = {'_load_yaml': lambda _: {'frontier_explorer': {
             'ros__parameters': {**settings, 'unsupported_parameter': True}}}}
         exec(compile(ast.Module(body=selected, type_ignores=[]), '<launch>', 'exec'), scope)
-        for robot in ('robot1', 'robot2', 'robot3'):
-            params = scope['_frontier_params']('unused.yaml', robot, True, (255, 0, 0))
+        for index, robot in enumerate(('robot1', 'robot2', 'robot3')):
+            params = scope['_frontier_params']('unused.yaml', robot, True, (255, 0, 0),
+                                               robot_index=index, team_size=3)
+            self.assertEqual(params['robot_index'], index)
+            self.assertEqual(params['team_size'], 3)
             for key, value in settings.items():
                 self.assertEqual(params.get(key), value, key)
             self.assertNotIn('unsupported_parameter', params)

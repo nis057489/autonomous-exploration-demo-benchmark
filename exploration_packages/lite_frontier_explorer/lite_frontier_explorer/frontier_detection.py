@@ -51,21 +51,69 @@ def visible_unknown_area(grid, row, col, resolution, sensor_range_m,
     return np.unique(rows[unknown] * width + cols[unknown]).size * resolution ** 2
 
 
+def _sample_viewpoints(cells, count, first=None):
+    points = np.asarray(cells)
+    if first is None:
+        # Map-only seed: all robots sample the same cluster the same way.
+        first = int(np.argmin(np.sum((points - points.mean(axis=0)) ** 2, axis=1)))
+    indices = [first]
+    separation = np.sum((points - points[first]) ** 2, axis=1)
+    while len(indices) < min(count, len(cells)):
+        index = int(np.argmax(separation))
+        indices.append(index)
+        separation = np.minimum(separation, np.sum((points - points[index]) ** 2, axis=1))
+    return [cells[i] for i in indices]
+
+
+def rank_frontier_clusters(clusters, grid, resolution, sensor_range_m, max_viewpoints=5,
+                           path_occ_threshold=99):
+    """Common map-only ranking: best visible area, then canonical cell order.
+
+    Rank distinct clusters, not multiple viewpoints of one cluster. Neither
+    robot position nor its private blacklist can change this ordering.
+    Identical maps/parameters yield identical ranks despite input ordering.
+    """
+    ranked = []
+    for cluster in clusters:
+        cells = sorted(set((r, c) for r, c in cluster
+                           if 0 <= grid[r, c] < path_occ_threshold))
+        if not cells:
+            continue
+        gain = max(visible_unknown_area(grid, r, c, resolution, sensor_range_m)
+                   for r, c in _sample_viewpoints(cells, max_viewpoints))
+        if gain > 0:
+            ranked.append((gain, cells))
+    ranked.sort(key=lambda item: (-round(item[0], 9), item[1]))
+    return [cells for _, cells in ranked]
+
+
 def select_visible_gain_frontier(clusters, data, width, height, robot_x, robot_y,
                                  resolution, origin_x, origin_y,
                                  path_occ_threshold=99, min_distance_m=0.0,
                                  sensor_range_m=3.0, distance_weight=1.0,
                                  max_viewpoints=5, diagnostics=None,
-                                 active_goal=None, active_score=None):
+                                 active_goal=None, active_score=None,
+                                 assignment_mode='independent', robot_index=0, team_size=1,
+                                 blacklisted_goals=(), blacklist_radius_m=0.0):
     """Maximize observable unknown m² / (1 + distance_weight * path metres).
 
     Sample actual reachable frontier cells, not a potentially occupied
     centroid. Farthest-point sampling covers extended/curved clusters; always
     include their nearest reachable cell. Legacy selectors remain available
     for controlled comparisons. No region cap, gain gate or direction bonus.
+
+    robot_rank first allocates whole clusters by map-only rank and static
+    membership, then maximizes this utility within the assigned cluster.
+    Local exclusions apply after allocation, with progress-preserving fallback.
     """
     if resolution <= 0 or sensor_range_m <= 0 or distance_weight < 0 or max_viewpoints < 1:
         raise ValueError('invalid visible-gain geometry or scoring parameters')
+    if assignment_mode not in ('independent', 'robot_rank'):
+        raise ValueError('invalid frontier assignment mode')
+    if team_size < 1 or not 0 <= robot_index < team_size:
+        raise ValueError('robot_index must be within team_size')
+    if team_size == 1:
+        assignment_mode = 'independent'
     grid = np.asarray(data, dtype=np.int8).reshape(height, width)
     distances = _free_space_distances(data, width, height, robot_x, robot_y,
                                       resolution, origin_x, origin_y, path_occ_threshold)
@@ -80,34 +128,50 @@ def select_visible_gain_frontier(clusters, data, width, height, robot_x, robot_y
                 distance = float(distances[row, col]) * resolution
                 active_score.update(gain_m2=gain, path_m=distance,
                                     utility=gain / (1.0 + distance_weight * distance))
+    if assignment_mode == 'robot_rank':
+        clusters = rank_frontier_clusters(clusters, grid, resolution, sensor_range_m,
+                                          max_viewpoints, path_occ_threshold)
+        if not clusters:
+            return None
+        # Rank 0 -> robot0, rank 1 -> robot1, etc. Further ranks cycle through
+        # the team. When work is scarce, wrap robot IDs instead of parking
+        # robots forever (especially under none, with one local frontier).
+        owned = (list(range(robot_index, len(clusters), team_size))
+                 if len(clusters) >= team_size else [robot_index % len(clusters)])
+        # A disconnected map or private Nav2 failure can make owned work
+        # unreachable. Fallback preserves progress, explicitly logged below.
+        order = owned + [i for i in range(len(clusters)) if i not in owned]
+    else:
+        order = list(range(len(clusters)))
+        owned = order
     best = None
-    for cluster in clusters:
+    for cluster_rank in order:
+        cluster = clusters[cluster_rank]
         cells = sorted((r, c) for r, c in cluster
                        if distances[r, c] >= 0
                        and 0 <= grid[r, c] < path_occ_threshold
-                       and distances[r, c] * resolution >= min_distance_m)
+                       and distances[r, c] * resolution >= min_distance_m
+                       and not any(math.hypot(origin_x + (c + 0.5) * resolution - bx,
+                                              origin_y + (r + 0.5) * resolution - by)
+                                   <= blacklist_radius_m for bx, by in blacklisted_goals))
         if not cells:
             continue
-        points = np.asarray(cells)
         first = min(range(len(cells)), key=lambda i: (distances[cells[i]], cells[i]))
-        indices = [first]
-        separation = np.sum((points - points[first]) ** 2, axis=1)
-        while len(indices) < min(max_viewpoints, len(cells)):
-            index = int(np.argmax(separation))
-            indices.append(index)
-            separation = np.minimum(separation, np.sum((points - points[index]) ** 2, axis=1))
-        for index in indices:
-            row, col = cells[index]
+        for row, col in _sample_viewpoints(cells, max_viewpoints, first):
             gain = visible_unknown_area(grid, row, col, resolution, sensor_range_m)
             distance = float(distances[row, col]) * resolution
             utility = gain / (1.0 + distance_weight * distance)
             xy = (origin_x + (col + 0.5) * resolution, origin_y + (row + 0.5) * resolution)
             if diagnostics is not None:
                 diagnostics.append(dict(x=xy[0], y=xy[1], gain_m2=gain,
-                                        path_m=distance, utility=utility))
+                                        path_m=distance, utility=utility,
+                                        cluster_rank=cluster_rank,
+                                        assignment_fallback=cluster_rank not in owned))
             rank = (utility, -distance, -row, -col)
             if gain > 0 and (best is None or rank > best[0]):
                 best = (rank, xy)
+        if assignment_mode == 'robot_rank' and best is not None:
+            return best[1]
     return best[1] if best is not None else None
 
 

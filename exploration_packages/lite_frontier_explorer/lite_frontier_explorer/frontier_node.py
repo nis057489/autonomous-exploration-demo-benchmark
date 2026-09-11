@@ -1,6 +1,7 @@
 """Minimal frontier explorer: watches nav2's global costmap, selects a
 reachable viewpoint by observable gain, and hands it to a NavigateToPose
-action client. No peer coordination, no map fusion of its own -- the
+action client. Optional robot-rank allocation uses only the available map;
+there is no peer goal channel or map fusion of its own. The
 costmap it reads already reflects whatever teammates' data has been
 relayed in by the active map_transport (baseline/vxch/zstd) and fused into
 nav_map upstream.
@@ -51,6 +52,9 @@ class LiteFrontierExplorer(Node):
         # visible_gain scores wall-occluded unknown area at reachable viewpoints.
         # nearest, best_gain and nearest_high_gain remain as legacy comparisons.
         self.declare_parameter('selection_strategy', 'visible_gain')
+        self.declare_parameter('frontier_assignment', 'independent')
+        self.declare_parameter('robot_index', 0)  # zero-based, supplied by launch
+        self.declare_parameter('team_size', 1)
         self.declare_parameter('sensor_range_m', 3.0)
         self.declare_parameter('gain_max_viewpoints', 5)
         self.declare_parameter('gain_distance_weight', 1.0)
@@ -198,6 +202,16 @@ class LiteFrontierExplorer(Node):
         self._occ_threshold = self.get_parameter('occ_threshold').value
         self._path_occ_threshold = self.get_parameter('path_occ_threshold').value
         self._selection_strategy = self.get_parameter('selection_strategy').value
+        self._frontier_assignment = self.get_parameter('frontier_assignment').value
+        self._robot_index = self.get_parameter('robot_index').value
+        self._team_size = self.get_parameter('team_size').value
+        if self._frontier_assignment not in ('independent', 'robot_rank'):
+            raise ValueError('frontier_assignment must be independent or robot_rank')
+        if self._team_size < 1 or not 0 <= self._robot_index < self._team_size:
+            raise ValueError('robot_index must be within team_size')
+        self._rank_assignment = (self._frontier_assignment == 'robot_rank'
+                                 and self._team_size > 1
+                                 and self._selection_strategy == 'visible_gain')
         self._sensor_range_m = self.get_parameter('sensor_range_m').value
         self._gain_max_viewpoints = self.get_parameter('gain_max_viewpoints').value
         self._gain_distance_weight = self.get_parameter('gain_distance_weight').value
@@ -270,7 +284,9 @@ class LiteFrontierExplorer(Node):
         self.create_timer(replan_period_s, self._tick)
 
         self.get_logger().info(
-            f"lite_frontier_explorer: watching '{self._costmap_topic}'")
+            f"lite_frontier_explorer: watching '{self._costmap_topic}', "
+            f"assignment={'robot_rank' if self._rank_assignment else 'independent'}, "
+            f"robot={self._robot_index + 1}/{self._team_size}")
 
     def _on_costmap(self, msg):
         self._latest_costmap = msg
@@ -366,6 +382,10 @@ class LiteFrontierExplorer(Node):
                                          'too_close' if unblocked else 'blacklisted')
                 if eligible:
                     candidates.append(eligible)
+            if self._rank_assignment:
+                # Rank the complete map-derived list first. Private blacklists
+                # and distance gates must not renumber other robots' ranks.
+                candidates = clusters
 
         goal = None
         active_score = {}
@@ -384,6 +404,10 @@ class LiteFrontierExplorer(Node):
                     max_viewpoints=self._gain_max_viewpoints, diagnostics=scores,
                     active_goal=self._pending_goal_xy if self._goal_active else None,
                     active_score=active_score,
+                    assignment_mode='robot_rank' if self._rank_assignment else 'independent',
+                    robot_index=self._robot_index, team_size=self._team_size,
+                    blacklisted_goals=self._blacklisted_goals,
+                    blacklist_radius_m=self._goal_blacklist_radius_m,
                 )
                 selected_utility = next((s['utility'] for s in scores
                                          if (s['x'], s['y']) == goal), None)
@@ -392,6 +416,7 @@ class LiteFrontierExplorer(Node):
                     'Frontier scores: ' + '; '.join(
                         f"({s['x']:.2f},{s['y']:.2f}) gain={s['gain_m2']:.2f}m2 "
                         f"path={s['path_m']:.2f}m utility={s['utility']:.3f}"
+                        f" rank={s['cluster_rank'] + 1} fallback={s['assignment_fallback']}"
                         for s in ranked)
                     + f'; selected={goal}; active={self._pending_goal_xy if self._goal_active else None}'
                     + f'; active_score={active_score}',
@@ -518,6 +543,10 @@ class LiteFrontierExplorer(Node):
                          and self._preempt_streak >= self._max_consecutive_preemptions)
             if (not self._preempting and goal is not None
                     and self._pending_goal_xy is not None
+                    # Assignment ranks change as maps grow. Finish the current
+                    # goal (or recover/fail) before taking another rank; chasing
+                    # each rank swap would make robots repeatedly exchange goals.
+                    and not self._rank_assignment
                     and not committed
                     and math.hypot(goal[0] - self._pending_goal_xy[0],
                                     goal[1] - self._pending_goal_xy[1])
