@@ -673,11 +673,37 @@ def do_one_run(args, method, attempt, num_robots, state, baseline_conf):
         raise RunAborted()
 
 
+def navigation_health(log_path):
+    """Keep runtime stalls visible without silently selecting successful runs."""
+    events = []
+    with Path(log_path).open(errors='replace') as log:
+        for line in log:
+            if 'NAVIGATION_STALL:' in line:
+                events.append(line.strip())
+    return {'review_required': bool(events), 'stall_count': len(events),
+            'events': events,
+            'note': 'Startup validity does not establish navigation health. '
+                    'Report flagged runs as failure cases; review before claiming a transport effect.'}
+
+
 def _finish(run, result, args, before):
     result["stop"] = run.stop(grace=args.stop_grace)
     run.close()
     force_cleanup_container(args.container_name, args.dry_run)
     result["run_dirs"] = new_run_dirs(before)
+    result["navigation_health"] = navigation_health(REPO / result["log"])
+    if result["navigation_health"]["review_required"]:
+        print("    NAVIGATION REVIEW REQUIRED: sustained goal failure detected; "
+              "retain this run as a failure case.", flush=True)
+        for name in result["run_dirs"]:
+            try:
+                (RUNS_DIR / name / "NAVIGATION_REVIEW.json").write_text(
+                    json.dumps(result["navigation_health"], indent=2) + "\n")
+            except OSError as exc:
+                # Container-created run directories may not be host-writable.
+                # The sweep result still persists the complete health record.
+                print(f"    Cannot write navigation sidecar for {name}: {exc}; "
+                      "health record retained in sweep results.", flush=True)
 
     # A discarded run's bag is not analysable, but it is still evidence about
     # why the run failed -- so it is never deleted, only renamed with an
@@ -764,6 +790,8 @@ def summarize(state, args):
         attempts = [r for r in state["results"] if r["method"] == m]
         print(f"  {m:9s} {len(good[m])} valid / {len(attempts)} attempts")
         for r in attempts:
+            if r.get("navigation_health", {}).get("review_required"):
+                print(f"      navigation-confounded: {r.get('log')}")
             if not r["valid"]:
                 print(f"      discarded: {r.get('reason')}  ({r.get('log')})")
     renamed = [d for r in state["results"] if not r["valid"]

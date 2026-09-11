@@ -1,0 +1,18 @@
+{
+  "run": "20260911_223115_none_long_t",
+  "review_required": true,
+  "status": "navigation-confounded; not a clean transport-effect trial",
+  "robot": "robot1",
+  "evidence": {
+    "active_goal": [
+      -2.475,
+      12.625
+    ],
+    "goal_sent_log_time": 1789166017.9317186,
+    "still_active_log_time": 1789166192.4820218,
+    "observations": "Repeated empty active_score entries and controller collision warnings; no goal completion or short-progress timeout during this interval.",
+    "explorer_log": "ros_logs/python3_163_1789165876406.log",
+    "controller_log": "ros_logs/controller_server_1152_1789165888252.log"
+  },
+  "handling": "Keep as a navigation failure case. Repeat matched arms after recovery changes; do not silently discard failures to improve a condition average."
+}

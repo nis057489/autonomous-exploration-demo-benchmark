@@ -22,6 +22,8 @@ class LaunchParameterTests(unittest.TestCase):
             'wedge_detect_radius_m': 0.75, 'max_wedge_cycles': 5,
             'goal_preempt_improvement_m': 3.0,
             'goal_preempt_utility_ratio': 1.5,
+            'goal_progress_timeout_s': 40.0, 'goal_progress_radius_m': 0.8,
+            'goal_unreachable_checks': 5,
         }
         scope = {'_load_yaml': lambda _: {'frontier_explorer': {
             'ros__parameters': {**settings, 'unsupported_parameter': True}}}}

@@ -247,10 +247,9 @@ def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
     the loop below), used to union robots' own observations over time
     without double-counting cells more than one robot saw.
     nav_cell_series is the same shape but diffed off /<robot>/nav_map, i.e.
-    it includes peer-relayed cells -- unioning it across robots shows what
-    the team collectively knows, which is where communication's effect is
-    actually visible (unioning local_cell_series instead structurally can't
-    show it, since that series never receives fused/peer-relayed cells).
+    it includes peer-relayed cells. Local physical coverage can benefit from
+    communication when shared maps change where robots explore; receiving a
+    map alone must never count as a physical discovery.
     resolution is the grid resolution (m/cell) behind local_cell_series' and
     nav_cell_series' packed keys, for converting union "tile" counts back to
     m^2 downstream -- 0.0 if this robot never published a /map or /nav_map
@@ -894,8 +893,9 @@ def run_redundant_series(run, cell_index):
     non-decreasing and the union can never exceed the sum (a cell known
     team-wide is known by at least one robot), so this difference is
     itself non-decreasing -- it only grows when a robot observes a cell
-    some teammate already claimed, i.e. genuinely wasted, redundant
-    physical exploration of ground someone else already covered. cell_index
+    some teammate already observed. This measures observation overlap, not
+    wasted travel: necessary shared corridors count, but repeated visits by
+    the same robot do not. cell_index
     should be 4 (local_cell_series, self-observed only) -- redundancy in
     the fused/nav_map series (5) would count peer-relayed knowledge as
     "coverage" too, which was never independently (re)observed and isn't
@@ -1081,8 +1081,9 @@ def plot_union_coverage(ax, results, conditions, series_fn, title, ylabel):
     physically laid eyes on" (a real keyed union across robots, so a patch
     two robots both drove over counts once), or team_known_coverage_series
     for "how much does the team collectively know", including peer-relayed
-    cells -- the one that moves when communication improves, since
-    self-observed coverage structurally can't show it. results[c] is a list
+    cells. Sharing can improve physical discovery through better navigation
+    decisions, while relaying cells alone only changes map knowledge.
+    results[c] is a list
     of per-run {robot: entry} dicts -- each run's curve is resampled
     (resample_step) onto a shared time grid and averaged, with a +/- std
     band when more than one run contributes."""

@@ -10,6 +10,7 @@ nav_map upstream.
 import math
 
 import rclpy
+from lite_frontier_explorer.progress_guard import ProgressGuard
 from action_msgs.msg import GoalStatus
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
@@ -221,6 +222,9 @@ class LiteFrontierExplorer(Node):
         # because _preempting stays False, _on_result() blacklists it -- so the
         # next tick picks a genuinely different frontier instead of re-sending
         # the same one.
+        self.declare_parameter('goal_progress_timeout_s', 45.0)
+        self.declare_parameter('goal_progress_radius_m', 1.0)
+        self.declare_parameter('goal_unreachable_checks', 4)
         self.declare_parameter('goal_stuck_timeout_s', 12.0)
         self.declare_parameter('goal_stuck_epsilon_m', 0.15)
         self.declare_parameter('navigate_to_pose_action_name', 'navigate_to_pose')
@@ -326,6 +330,10 @@ class LiteFrontierExplorer(Node):
         self._goal_handle = None
         self._preempting = False
         self._pending_goal_xy = None
+        self._progress_guard = ProgressGuard(
+            float(self.get_parameter('goal_progress_timeout_s').value),
+            float(self.get_parameter('goal_progress_radius_m').value),
+            int(self.get_parameter('goal_unreachable_checks').value))
         self._blacklisted_goals = []
         self._last_goal_direction = None  # (dx, dy) of the most recently sent goal
         # Consecutive preemptions since the last goal reached a terminal state.
@@ -534,6 +542,24 @@ class LiteFrontierExplorer(Node):
         self._publish_frontier_markers(cluster_xy, cluster_status, goal)
 
         if self._goal_active:
+            if not self._preempting and not self._abandoning_stuck:
+                # An empty score is evidence only when the visible-gain
+                # selector actually evaluated this map. Do not infer failure
+                # from absent candidates or a legacy strategy.
+                reachable = (bool(active_score) if candidates
+                             and self._selection_strategy == 'visible_gain'
+                             and self._pending_goal_xy is not None else None)
+                failure = self._progress_guard.update(
+                    self.get_clock().now().nanoseconds / 1e9, robot_pose, reachable)
+                if failure:
+                    self.get_logger().error(
+                        f"NAVIGATION_STALL: {failure}; canceling goal "
+                        f"{self._pending_goal_xy} and excluding that failed target. "
+                        "Flag this run for navigation review.")
+                    self._abandoning_stuck = True
+                    if self._goal_handle is not None:
+                        self._goal_handle.cancel_goal_async()
+                    return
             # Abandon a goal that has nothing left to observe -- someone
             # already saw what it was worth driving to. See
             # obsolete_goal_gain_m2. Checked before the stalled-goal and
@@ -725,6 +751,7 @@ class LiteFrontierExplorer(Node):
         self._goal_handle = None
         self._preempting = False
         self._pending_goal_xy = (goal_x, goal_y)
+        self._progress_guard.reset()
         # Fresh goal -- restart no-progress and obsolescence tracking.
         self._progress_ref_xy = None
         self._progress_ref_time = None

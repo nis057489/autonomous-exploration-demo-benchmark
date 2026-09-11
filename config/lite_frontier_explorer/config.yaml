@@ -87,5 +87,11 @@ frontier_explorer:
     # drive across the building never trips it. Raise the timeout if tight
     # squeezes are being abandoned too eagerly; note replan_period_s (3.0 s)
     # is the sampling interval, so the effective granularity is ~3 s.
+    # Back-and-forth motion can defeat the short 15cm progress check.
+    # Require leaving a 1m radius within 45s, or abandon the failed target.
+    goal_progress_timeout_s: 45.0
+    goal_progress_radius_m: 1.0
+    # Confirm loss of the active goal's known-free path before canceling it.
+    goal_unreachable_checks: 4
     goal_stuck_timeout_s: 12.0
     goal_stuck_epsilon_m: 0.15
