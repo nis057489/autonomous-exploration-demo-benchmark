@@ -1,0 +1,254 @@
+<?xml version="1.0"?>
+<!-- Roofless tunnel maze for modern Gazebo Harmonic and later.
+Run: gz sim -r tunnel_maze_500.sdf
+Free floor area: 492.48 m^2. Corridor clear width: 2.4 m.
+Interior envelope: x [-1.2,31.2], y [-1.2,25.2] m.
+Floor surface z=0; wall height 2.5 m. No external assets or robot models.
+Connected network: 30 nodes, 37 edges, 8 independent cycles, 4 dead ends.
+Candidate robot spawn XY: (0,0), (6,0), (0,6), (30,24).
+Use robot-specific spawn Z to place wheels just above the floor.
+No map is supplied to robots: explore with your existing SLAM/Nav2 launch.
+Geometry uses filled solid rock between passages to avoid inaccessible voids.
+-->
+<sdf version="1.9">
+  <world name="tunnel_maze_500">
+    <gravity>0 0 -9.81</gravity>
+    <physics name="1ms" type="ignored"><max_step_size>0.001</max_step_size><real_time_factor>1</real_time_factor></physics>
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"><render_engine>ogre2</render_engine></plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact"/>
+    <scene><ambient>0.6 0.6 0.6 1</ambient><background>0.75 0.8 0.85 1</background><shadows>false</shadows></scene>
+    <light name="sun" type="directional">
+      <pose>15 12 20 0 0 0</pose><cast_shadows>false</cast_shadows>
+      <diffuse>0.8 0.8 0.8 1</diffuse><specular>0.1 0.1 0.1 1</specular>
+      <attenuation><range>1000</range><constant>0.9</constant><linear>0.01</linear><quadratic>0.001</quadratic></attenuation>
+      <direction>-0.3 0.2 -1</direction>
+    </light>
+    <model name="floor"><static>true</static><pose>15 12 -0.1 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>33.2 27.2 0.2</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>33.2 27.2 0.2</size></box></geometry><material><ambient>0.67 0.64 0.57 1</ambient><diffuse>0.67 0.64 0.57 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_0_1"><static>true</static><pose>0 3 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>2.4 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>2.4 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_1_1"><static>true</static><pose>3 3 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_1_2"><static>true</static><pose>3 6 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 2.4 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 2.4 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_1_3"><static>true</static><pose>3 9 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_1_5"><static>true</static><pose>3 15 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_1_7"><static>true</static><pose>3 21 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_2_3"><static>true</static><pose>6 9 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>2.4 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>2.4 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_2_5"><static>true</static><pose>6 15 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>2.4 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>2.4 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_3_0"><static>true</static><pose>9 0 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 2.4 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 2.4 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_3_1"><static>true</static><pose>9 3 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_3_3"><static>true</static><pose>9 9 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_3_5"><static>true</static><pose>9 15 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_3_6"><static>true</static><pose>9 18 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 2.4 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 2.4 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_3_7"><static>true</static><pose>9 21 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_4_1"><static>true</static><pose>12 3 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>2.4 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>2.4 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_5_1"><static>true</static><pose>15 3 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_5_3"><static>true</static><pose>15 9 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_5_4"><static>true</static><pose>15 12 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 2.4 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 2.4 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_5_5"><static>true</static><pose>15 15 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_5_6"><static>true</static><pose>15 18 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 2.4 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 2.4 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_5_7"><static>true</static><pose>15 21 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_7_1"><static>true</static><pose>21 3 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_7_3"><static>true</static><pose>21 9 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_7_4"><static>true</static><pose>21 12 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 2.4 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 2.4 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_7_5"><static>true</static><pose>21 15 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_7_7"><static>true</static><pose>21 21 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_8_3"><static>true</static><pose>24 9 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>2.4 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>2.4 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_9_1"><static>true</static><pose>27 3 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_9_3"><static>true</static><pose>27 9 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_9_5"><static>true</static><pose>27 15 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_9_7"><static>true</static><pose>27 21 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 3.6 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 3.6 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rock_9_8"><static>true</static><pose>27 24 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>3.6 2.4 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3.6 2.4 2.5</size></box></geometry><material><ambient>0.36 0.39 0.42 1</ambient><diffuse>0.36 0.39 0.42 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="south_boundary"><static>true</static><pose>15 -1.4 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>33.2 0.4 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>33.2 0.4 2.5</size></box></geometry><material><ambient>0.3 0.33 0.36 1</ambient><diffuse>0.3 0.33 0.36 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="north_boundary"><static>true</static><pose>15 25.4 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>33.2 0.4 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>33.2 0.4 2.5</size></box></geometry><material><ambient>0.3 0.33 0.36 1</ambient><diffuse>0.3 0.33 0.36 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="west_boundary"><static>true</static><pose>-1.4 12 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>0.4 26.4 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.4 26.4 2.5</size></box></geometry><material><ambient>0.3 0.33 0.36 1</ambient><diffuse>0.3 0.33 0.36 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="east_boundary"><static>true</static><pose>31.4 12 1.25 0 0 0</pose>
+      <link name="body">
+        <collision name="collision"><geometry><box><size>0.4 26.4 2.5</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.4 26.4 2.5</size></box></geometry><material><ambient>0.3 0.33 0.36 1</ambient><diffuse>0.3 0.33 0.36 1</diffuse></material></visual>
+      </link>
+    </model>
+  </world>
+</sdf>
+

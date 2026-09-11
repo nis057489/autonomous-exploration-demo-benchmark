@@ -217,6 +217,35 @@ if [[ "${WORLD}" == "small_maze" ]]; then
   SPAWN_YAW="0.00"
 fi
 
+if [[ "${WORLD}" == "maze2" ]]; then
+  # One of the spawn candidates listed in maze2.sdf's header, measured 1.2 m
+  # from the nearest wall box (centered in the 2.4 m corridor). (0,0) is a
+  # dead end open only toward +x, so face that way.
+  SPAWN_X="0.0"
+  SPAWN_Y="0.0"
+  SPAWN_YAW="0.00"
+fi
+
+if [[ "${WORLD}" == "tunnel_qualification" ]]; then
+  # Inside subt_tunnel_staging_area's walled pad (x:[-13.1,10.8] y:[-12.5,12.5],
+  # floor collision top at z~0), facing the 7 m gap in its front wall that
+  # leads into tile_60, the tunnel entrance at (20,0). The base station tent
+  # ends at x=-5.65, so this is >7 m clear of everything.
+  SPAWN_X="2.0"
+  SPAWN_Y="0.0"
+  SPAWN_YAW="0.00"
+fi
+
+if [[ "${WORLD}" == "final_prelim_03" ]]; then
+  # Inside the Finals Staging Area room (x:[-20.7,-8.0] y:[-5.7,5.7], floor at
+  # z~-0.01), facing +x toward the ~2 m centerline gap near x=-10.5 that exits
+  # into the Edgar mine. Measured 3.9 m clear at robot height from the
+  # collision mesh.
+  SPAWN_X="-15.0"
+  SPAWN_Y="0.0"
+  SPAWN_YAW="0.00"
+fi
+
 SPAWN_PRESET="${SPAWN_PRESET:-default}"
 SPAWN_PRESETS_FILE="${PROJECT_ROOT}/spawn_presets.yaml"
 

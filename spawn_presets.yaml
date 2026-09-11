@@ -70,6 +70,39 @@ small_maze:
     - { x: 1.50, y: 2.00, yaw: 0.00 }
     - { x: 1.00, y: 2.00, yaw: 0.00 }
 
+# maze2: 2.4 m corridors on a 3 m grid, x:[-1.2,31.2] y:[-1.2,25.2]. All three
+# are candidates from maze2.sdf's header and measured 1.2 m clear (corridor
+# center). They share the SW corner -- (0,0) and (6,0) are the same corridor --
+# and each faces its open direction.
+maze2:
+  default:
+    - { x: 0.00, y: 0.00, yaw: 0.0000 }
+  distributed:
+    - { x: 0.00, y: 0.00, yaw: 0.0000 }
+    - { x: 6.00, y: 0.00, yaw: 1.5708 }
+    - { x: 0.00, y: 6.00, yaw: 1.5708 }
+
+# tunnel_qualification: abreast in the SubT staging pad, all facing the
+# tunnel entrance at +x. Everything else on the pad is >=7 m away.
+tunnel_qualification:
+  default:
+    - { x: 2.00, y: 0.00, yaw: 0.00 }
+  distributed:
+    - { x: 2.00, y: 0.00, yaw: 0.00 }
+    - { x: 2.00, y: -2.50, yaw: 0.00 }
+    - { x: 2.00, y: 2.50, yaw: 0.00 }
+
+# final_prelim_03: abreast in the Finals Staging Area room, all facing its
+# single ~2 m exit on the centerline. Measured clearance at robot height:
+# 3.9 m at y=0, 2.6 m at y=+-2.5.
+final_prelim_03:
+  default:
+    - { x: -15.00, y: 0.00, yaw: 0.00 }
+  distributed:
+    - { x: -15.00, y: 0.00, yaw: 0.00 }
+    - { x: -15.00, y: -2.50, yaw: 0.00 }
+    - { x: -15.00, y: 2.50, yaw: 0.00 }
+
 # Office layout reference (verified against office.world's collision geometry,
 # not the shipped map.png -- which does not match this world's generation):
 #   The building interior is one connected 734 m^2 region, sealed from outside.
