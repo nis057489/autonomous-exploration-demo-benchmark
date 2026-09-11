@@ -1,0 +1,196 @@
+{
+  "name": "long_t_branch_exchange_v1",
+  "units": "metres",
+  "floor_area_m2": 695.0,
+  "wall_thickness_m": 0.2,
+  "regions": [
+    {
+      "name": "transfer_hall",
+      "bounds": [
+        -7,
+        -2,
+        7,
+        2
+      ],
+      "role": "transit"
+    },
+    {
+      "name": "work_spine",
+      "bounds": [
+        -1.5,
+        -38,
+        1.5,
+        0
+      ],
+      "role": "transit"
+    },
+    {
+      "name": "start_1",
+      "bounds": [
+        -5.5,
+        0,
+        -2.5,
+        18
+      ],
+      "role": "start"
+    },
+    {
+      "name": "start_2",
+      "bounds": [
+        -1.5,
+        0,
+        1.5,
+        18
+      ],
+      "role": "start"
+    },
+    {
+      "name": "start_3",
+      "bounds": [
+        2.5,
+        0,
+        5.5,
+        18
+      ],
+      "role": "start"
+    },
+    {
+      "name": "work_1_left_entry",
+      "role": "work",
+      "bounds": [
+        -15.5,
+        -11.5,
+        1.5,
+        -8.5
+      ]
+    },
+    {
+      "name": "work_1_left_tip",
+      "role": "work",
+      "bounds": [
+        -15.5,
+        -16,
+        -12.5,
+        -10
+      ]
+    },
+    {
+      "name": "work_1_right_entry",
+      "role": "work",
+      "bounds": [
+        -1.5,
+        -11.5,
+        19.5,
+        -8.5
+      ]
+    },
+    {
+      "name": "work_1_right_tip",
+      "role": "work",
+      "bounds": [
+        16.5,
+        -18,
+        19.5,
+        -10
+      ]
+    },
+    {
+      "name": "work_2_left_entry",
+      "role": "work",
+      "bounds": [
+        -15.5,
+        -23.5,
+        1.5,
+        -20.5
+      ]
+    },
+    {
+      "name": "work_2_left_tip",
+      "role": "work",
+      "bounds": [
+        -15.5,
+        -28,
+        -12.5,
+        -22
+      ]
+    },
+    {
+      "name": "work_2_right_entry",
+      "role": "work",
+      "bounds": [
+        -1.5,
+        -23.5,
+        19.5,
+        -20.5
+      ]
+    },
+    {
+      "name": "work_2_right_tip",
+      "role": "work",
+      "bounds": [
+        16.5,
+        -30,
+        19.5,
+        -22
+      ]
+    },
+    {
+      "name": "work_3_left_entry",
+      "role": "work",
+      "bounds": [
+        -15.5,
+        -35.5,
+        1.5,
+        -32.5
+      ]
+    },
+    {
+      "name": "work_3_left_tip",
+      "role": "work",
+      "bounds": [
+        -15.5,
+        -40,
+        -12.5,
+        -34
+      ]
+    },
+    {
+      "name": "work_3_right_entry",
+      "role": "work",
+      "bounds": [
+        -1.5,
+        -35.5,
+        19.5,
+        -32.5
+      ]
+    },
+    {
+      "name": "work_3_right_tip",
+      "role": "work",
+      "bounds": [
+        16.5,
+        -42,
+        19.5,
+        -34
+      ]
+    }
+  ],
+  "starts": [
+    {
+      "x": -4.0,
+      "y": 16.0,
+      "yaw": -1.5707963267948966
+    },
+    {
+      "x": 0.0,
+      "y": 16.0,
+      "yaw": -1.5707963267948966
+    },
+    {
+      "x": 4.0,
+      "y": 16.0,
+      "yaw": -1.5707963267948966
+    }
+  ],
+  "evaluation_note": "Union the floor rectangles; do not sum overlaps. This is geometry, not a prior for robots."
+}

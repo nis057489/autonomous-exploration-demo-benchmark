@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="520" height="750" viewBox="0 0 520 750">
+<rect width="520" height="750" fill="#16202b"/>
+<g font-family="sans-serif" font-size="12" fill="white">
+<text x="20" y="22">long_t: branch exchange / 3 robots</text>
+<rect x="160" y="210" width="140" height="40" fill="#c1ccd7"/>
+<rect x="215.0" y="230" width="30.0" height="380" fill="#c1ccd7"/>
+<rect x="175.0" y="50" width="30.0" height="180" fill="#e7ae56"/>
+<rect x="215.0" y="50" width="30.0" height="180" fill="#e7ae56"/>
+<rect x="255.0" y="50" width="30.0" height="180" fill="#e7ae56"/>
+<rect x="75.0" y="315.0" width="170.0" height="30.0" fill="#63b8ba"/>
+<rect x="75.0" y="330" width="30.0" height="60" fill="#63b8ba"/>
+<rect x="215.0" y="315.0" width="210.0" height="30.0" fill="#63b8ba"/>
+<rect x="395.0" y="330" width="30.0" height="80" fill="#63b8ba"/>
+<rect x="75.0" y="435.0" width="170.0" height="30.0" fill="#63b8ba"/>
+<rect x="75.0" y="450" width="30.0" height="60" fill="#63b8ba"/>
+<rect x="215.0" y="435.0" width="210.0" height="30.0" fill="#63b8ba"/>
+<rect x="395.0" y="450" width="30.0" height="80" fill="#63b8ba"/>
+<rect x="75.0" y="555.0" width="170.0" height="30.0" fill="#63b8ba"/>
+<rect x="75.0" y="570" width="30.0" height="60" fill="#63b8ba"/>
+<rect x="215.0" y="555.0" width="210.0" height="30.0" fill="#63b8ba"/>
+<rect x="395.0" y="570" width="30.0" height="80" fill="#63b8ba"/>
+<circle cx="190.0" cy="70.0" r="7" fill="#254578"/>
+<text x="183.0" y="58.0" fill="#ffffff">R1</text>
+<path d="M 190.0 79.0 v 18 l -4 -6 m 4 6 l 4 -6" fill="none" stroke="#254578" stroke-width="2"/>
+<circle cx="230.0" cy="70.0" r="7" fill="#254578"/>
+<text x="223.0" y="58.0" fill="#ffffff">R2</text>
+<path d="M 230.0 79.0 v 18 l -4 -6 m 4 6 l 4 -6" fill="none" stroke="#254578" stroke-width="2"/>
+<circle cx="270.0" cy="70.0" r="7" fill="#254578"/>
+<text x="263.0" y="58.0" fill="#ffffff">R3</text>
+<path d="M 270.0 79.0 v 18 l -4 -6 m 4 6 l 4 -6" fill="none" stroke="#254578" stroke-width="2"/>
+<text x="122" y="334" fill="#102c32">1L</text>
+<text x="342" y="334" fill="#102c32">1R</text>
+<text x="122" y="454" fill="#102c32">2L</text>
+<text x="342" y="454" fill="#102c32">2R</text>
+<text x="122" y="574" fill="#102c32">3L</text>
+<text x="342" y="574" fill="#102c32">3R</text>
+<text x="20" y="688">Amber: each robot surveys its own start branch</text>
+<text x="20" y="708">Teal: six untouched jobs beyond the transfer hall</text>
+<text x="20" y="728">3 m corridors; north is up; geometry shown to scale</text>
+</g></svg>

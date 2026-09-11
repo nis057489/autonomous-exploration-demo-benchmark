@@ -166,6 +166,12 @@ if [[ "${WORLD}" == "warehouse" ]]; then
   SPAWN_YAW="1.58"
 fi
 
+if [[ "${WORLD}" == "long_t" ]]; then
+  SPAWN_X="0.0"
+  SPAWN_Y="16.0"
+  SPAWN_YAW="-1.5707963267948966"
+fi
+
 if [[ "${WORLD}" == "maze" ]]; then
   # maze_3_6x6 model is included at pose (-3, -2.5); half a meter inside its
   # (0,0) corner cell keeps the spawn clear of every wall panel, which sit

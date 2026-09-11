@@ -57,12 +57,20 @@ mine:
   default:
     - { x: 0.00, y: 0.00, yaw: 0.00 }
 
+# Branch-exchange layout: each robot starts near the closed end of its own
+# 3 m wide branch, facing the common hall. Three explicit, non-overlapping
+# positions. See simulation/worlds/long_t/README.md and overview.svg.
 long_t:
   default:
-    - { x: 0.00, y: -13.00, yaw: 1.5708 }
+    - { x: 0.00, y: 16.00, yaw: -1.5707963267948966 }
   distributed:
-    - { x: 0.00, y: -2.00, yaw: 1.5708 }
-    - { x: 0.00, y: -18.00, yaw: 1.5708 }
+    - { x: -4.00, y: 16.00, yaw: -1.5707963267948966 }
+    - { x: 0.00, y: 16.00, yaw: -1.5707963267948966 }
+    - { x: 4.00, y: 16.00, yaw: -1.5707963267948966 }
+  reversed:
+    - { x: 4.00, y: 16.00, yaw: -1.5707963267948966 }
+    - { x: 0.00, y: 16.00, yaw: -1.5707963267948966 }
+    - { x: -4.00, y: 16.00, yaw: -1.5707963267948966 }
 
 small_maze:
   default:
