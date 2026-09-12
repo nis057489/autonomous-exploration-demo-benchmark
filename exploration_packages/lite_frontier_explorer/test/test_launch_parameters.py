@@ -37,7 +37,11 @@ class LaunchParameterTests(unittest.TestCase):
             self.assertNotIn('unsupported_parameter', params)
             self.assertEqual(params['costmap_topic'], f'/{robot}/global_costmap/costmap')
             self.assertEqual(params['reservation_topic'], '')
-            self.assertEqual(params['reservation_peer_topics'], [])
+            # An empty list here becomes an untyped () in launch_ros and the
+            # whole launch is rejected, so the key must not be forwarded.
+            self.assertNotIn('reservation_peer_topics', params)
+            for value in params.values():
+                self.assertNotIn(value, ([], ()), 'empty list parameter')
             self.assertEqual(params['information_map_topic'], f'/{robot}/nav_map')
             self.assertEqual(params['robot_base_frame'], f'{robot}/base_footprint')
 

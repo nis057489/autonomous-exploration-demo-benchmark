@@ -107,9 +107,11 @@ def _frontier_params(base_path, namespace, use_sim_time, color_255, robot_index=
     params["robot_index"] = robot_index
     params["team_size"] = team_size
     params["costmap_topic"] = f"/{namespace}/global_costmap/costmap"
-    # Occupancy-only experiment: no peer goal coordination channel.
+    # Occupancy-only experiment: no peer goal coordination channel. An empty
+    # reservation_topic disables the whole path in the node, so the peer-topic
+    # list is left unset -- passing [] here would be normalized to an untyped
+    # empty tuple and the launch would be rejected before any node started.
     params["reservation_topic"] = ""
-    params["reservation_peer_topics"] = []
     params["information_map_topic"] = f"/{namespace}/nav_map"
     params["global_frame"] = "map"
     params["robot_base_frame"] = f"{namespace}/base_footprint"
