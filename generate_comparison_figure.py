@@ -66,10 +66,19 @@ Usage:
   With more than one run for a condition, bar charts show mean +/- std
   error bars and time-series plots show a mean line with a +/- std band,
   computed across those runs.
+
+Reading a bag is the entire cost here (minutes per multi-GB run); the plots
+themselves are pure functions of what comes out of it. So each bag is decoded
+once into figure_cache/ (--cache-dir, --no-cache) and re-plotting the same runs
+never opens it again, and every number a figure draws is written beside the
+image as <out stem>.json (--data-out, --no-data-out) so the figure's data can
+be read or re-plotted without the bags at all.
 """
 import argparse
 import csv
+import hashlib
 import io
+import json
 import math
 import os
 import re
@@ -306,7 +315,7 @@ def known_cells(msg, offset=None):
     return np.unique(keys)
 
 
-def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
+def _read_bag_uncached(robot, bag_dir, condition, max_duration=None, map_offset=None):
     """Returns (received_bytes, sent_bytes, coverage, local_coverage,
     local_cell_series, nav_cell_series, resolution, link_stats) where coverage and
     local_coverage are each a list of (seconds_since_start, known_area_m2) -- coverage
@@ -510,6 +519,186 @@ def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
     # keeps meaning what it did.
     return (received_bytes, sent_bytes, coverage, local_coverage,
             local_cell_series, nav_cell_series, resolution, link_stats)
+
+
+# Bumped whenever the shape or meaning of what _read_bag_uncached returns
+# changes -- a stale entry written by an older version would otherwise be
+# unpacked into the new code's positions and silently plot wrong numbers.
+CACHE_VERSION = 1
+DEFAULT_CACHE_DIR = Path(__file__).resolve().parent / "figure_cache"
+
+
+def _bag_fingerprint(bag_dir):
+    """Identity of a bag's contents: every file's name, size and mtime.
+    Bags are written once and never appended to, so this is really just a
+    cheap "is this the same recording" check -- but including size/mtime
+    means a re-recorded or repaired bag at the same path invalidates its
+    cache entry instead of serving numbers from the old recording."""
+    parts = []
+    for f in sorted(bag_dir.iterdir()) if bag_dir.is_dir() else []:
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        # A list, not a tuple: this goes into the cache entry's own JSON and is
+        # compared against what comes back out of it, where a tuple would have
+        # become a list and never matched again.
+        parts.append([f.name, st.st_size, st.st_mtime_ns])
+    return parts
+
+
+def _cache_key(robot, bag_dir, condition, max_duration, map_offset):
+    payload = {
+        "version": CACHE_VERSION,
+        "robot": robot,
+        "bag": str(Path(bag_dir).resolve()),
+        "condition": condition,
+        "max_duration": max_duration,
+        # Rounded: offsets come from spawn_presets.yaml as short decimals, and
+        # float noise in the last bits must not spawn a second cache entry for
+        # what is the same spawn pose.
+        "offset": None if map_offset is None else [round(float(v), 9) for v in map_offset],
+        "files": _bag_fingerprint(Path(bag_dir)),
+    }
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+    return f"{robot}_{condition}_{digest}", payload
+
+
+def _pack_cell_series(series):
+    """Ragged [(t, int64 array)] -> three flat arrays npz can hold: the
+    times, each entry's length, and every cell key concatenated. Storing one
+    npz member per entry instead would mean thousands of members per bag."""
+    times = np.array([t for t, _ in series], dtype=np.float64)
+    lengths = np.array([cells.size for _, cells in series], dtype=np.int64)
+    if series:
+        cells = np.concatenate([c for _, c in series]).astype(np.int64)
+    else:
+        cells = np.empty(0, dtype=np.int64)
+    return times, lengths, cells
+
+
+def _unpack_cell_series(times, lengths, cells):
+    chunks = np.split(cells, np.cumsum(lengths)[:-1]) if lengths.size else []
+    return [(float(t), chunk) for t, chunk in zip(times, chunks)]
+
+
+def _cache_paths(cache_dir, name):
+    """Two files per entry, on purpose. The .json holds everything a human
+    (or a plotting script with no numpy) would want to read back -- byte
+    totals, the coverage time series, the link stats -- so the numbers behind
+    a figure stay inspectable without the bag. The .npz holds only the packed
+    cell-key arrays, which are hundreds of thousands of int64 per robot and
+    would be both enormous and slow as JSON text. A hit needs both."""
+    return cache_dir / f"{name}.json", cache_dir / f"{name}.npz"
+
+
+def _cache_load(cache_dir, name, key_payload):
+    json_path, npz_path = _cache_paths(cache_dir, name)
+    if not (json_path.is_file() and npz_path.is_file()):
+        return None
+    try:
+        meta = json.loads(json_path.read_text())
+        # The digest already covers this, but a hash collision or a
+        # hand-edited file would otherwise be unpackable into the wrong run's
+        # numbers -- compare the key itself, not just its name.
+        if meta.get("key") != key_payload:
+            return None
+        with np.load(npz_path) as z:
+            local_cell_series = _unpack_cell_series(
+                z["local_times"], z["local_lengths"], z["local_cells"])
+            nav_cell_series = _unpack_cell_series(
+                z["nav_times"], z["nav_lengths"], z["nav_cells"])
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+    data = meta["data"]
+    link_stats = {
+        peer: {k: [(float(t), float(v)) for t, v in series] for k, series in per_peer.items()}
+        for peer, per_peer in data["link_stats"].items()
+    }
+    return (
+        int(data["received_bytes"]),
+        int(data["sent_bytes"]),
+        [(float(t), float(v)) for t, v in data["coverage"]],
+        [(float(t), float(v)) for t, v in data["local_coverage"]],
+        local_cell_series,
+        nav_cell_series,
+        float(data["resolution"]),
+        link_stats,
+    )
+
+
+def _cache_store(cache_dir, name, key_payload, result):
+    (received_bytes, sent_bytes, coverage, local_coverage,
+     local_cell_series, nav_cell_series, resolution, link_stats) = result
+    json_path, npz_path = _cache_paths(cache_dir, name)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    local = _pack_cell_series(local_cell_series)
+    nav = _pack_cell_series(nav_cell_series)
+    # Write both files to temporaries and rename: an interrupted run must not
+    # leave a half-written entry that a later run reads back as a hit.
+    # The temporary still has to end in .npz: np.savez_compressed appends
+    # that suffix itself when the name lacks it, and would then write to a
+    # path neither the rename nor the cleanup below knows about.
+    tmp_npz = npz_path.with_name(npz_path.name + ".tmp.npz")
+    tmp_json = json_path.with_name(json_path.name + ".tmp")
+    try:
+        np.savez_compressed(
+            tmp_npz,
+            local_times=local[0], local_lengths=local[1], local_cells=local[2],
+            nav_times=nav[0], nav_lengths=nav[1], nav_cells=nav[2],
+        )
+        tmp_json.write_text(json.dumps({
+            "key": key_payload,
+            "data": {
+                "received_bytes": int(received_bytes),
+                "sent_bytes": int(sent_bytes),
+                "coverage": [[t, v] for t, v in coverage],
+                "local_coverage": [[t, v] for t, v in local_coverage],
+                "resolution": float(resolution),
+                "link_stats": {
+                    peer: {k: [[t, v] for t, v in series] for k, series in per_peer.items()}
+                    for peer, per_peer in link_stats.items()
+                },
+            },
+        }))
+        # npz first, json last: the json is what _cache_load checks the key
+        # against, so an entry only becomes visible once its arrays are there.
+        tmp_npz.replace(npz_path)
+        tmp_json.replace(json_path)
+    except OSError as e:
+        print(f"warning: could not write bag cache for {name}: {e}", file=sys.stderr)
+        for tmp in (tmp_npz, tmp_json):
+            tmp.unlink(missing_ok=True)
+
+
+def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None,
+             cache_dir=DEFAULT_CACHE_DIR):
+    """_read_bag_uncached, but reading a bag only the first time it's asked
+    for. Decoding a multi-GB bag's every OccupancyGrid into cell keys is the
+    whole cost of making a figure (minutes per run); every panel here is a
+    pure function of that decoded result, so re-plotting the same runs -- a
+    tweaked style, a different condition combination, one more run added to
+    an average -- should never touch the bag again.
+
+    cache_dir=None disables the cache entirely (--no-cache). Failures to read
+    a bag are never cached: a missing/corrupt bag returns None every time, so
+    the error surfaces on each run rather than being frozen in."""
+    if cache_dir is None:
+        return _read_bag_uncached(robot, bag_dir, condition,
+                                  max_duration=max_duration, map_offset=map_offset)
+
+    cache_dir = Path(cache_dir)
+    name, key_payload = _cache_key(robot, bag_dir, condition, max_duration, map_offset)
+    cached = _cache_load(cache_dir, name, key_payload)
+    if cached is not None:
+        print(f"cache hit: {robot} ({Path(bag_dir).parent.name}) -- not re-reading bag")
+        return cached
+
+    result = _read_bag_uncached(robot, bag_dir, condition,
+                                max_duration=max_duration, map_offset=map_offset)
+    if result is not None:
+        _cache_store(cache_dir, name, key_payload, result)
+    return result
 
 
 def style_ax(ax, grid_axis="y"):
@@ -1309,6 +1498,71 @@ def plot_union_coverage(ax, results, conditions, series_fn, ylabel, unit="m²"):
     panel_legend(ax, handles)
 
 
+def figure_data(results, conditions, summary, robot_paths, max_duration):
+    """Every number the figure draws, as plain JSON-able lists.
+
+    Each panel's series is taken from the same function that panel plots, so
+    the two cannot drift; what is NOT reproduced here is the averaging the
+    plot functions do at draw time (resample onto a shared grid, mean and std
+    across runs) -- this keeps one entry per run, which is strictly more
+    information and lets a reader re-average however they like.
+
+    The bandwidth panel has no entry under "series": it is a bar chart, and
+    its bars are the sent/received means in "summary" like every other bar.
+
+    Between this and the per-bag cache, a figure's numbers survive without the
+    3 GB of bags behind them: this file for reading and re-plotting elsewhere,
+    the cache for regenerating the figure itself."""
+    def series(pairs):
+        return [[float(t), float(v)] for t, v in pairs]
+
+    per_run_panels = {
+        "union": local_physical_union_series,
+        "union_nav": team_known_coverage_series,
+        "delivered": delivery_fraction_series,
+        "redundant": lambda run: to_area_m2(run_redundant_series(run, 4), run_resolution(run)),
+    }
+
+    data = {
+        "schema": 1,
+        "max_duration": max_duration,
+        "conditions": list(conditions),
+        "display_names": {c: DISPLAY_NAMES[c] for c in conditions},
+        # Which bags produced this -- so a figure's numbers can be traced back
+        # to the runs, and the same figure re-made from them later.
+        "runs": {c: [{r: str(b) for r, b in sorted(run.items())} for run in robot_paths[c]]
+                 for c in conditions},
+        # The bar panels: one (mean, std) pair per metric per condition.
+        "summary": {c: {k: (list(v) if isinstance(v, tuple)
+                            else {r: list(pair) for r, pair in v.items()} if isinstance(v, dict)
+                            else v)
+                        for k, v in summary[c].items()}
+                    for c in conditions},
+        "series": {},
+    }
+
+    # Per-robot time series (the "coverage" and "local" panels), indices 2/3
+    # of a read_bag entry.
+    for name, index in (("coverage", 2), ("local", 3)):
+        data["series"][name] = {
+            c: [{robot: series(entry[index]) for robot, entry in sorted(run.items()) if entry[index]}
+                for run in results[c]]
+            for c in conditions
+        }
+    # Whole-run time series (the union/delivered/redundant panels).
+    for name, fn in per_run_panels.items():
+        data["series"][name] = {c: [series(fn(run)) for run in results[c]] for c in conditions}
+    # The link capacity actually in force, which the coverage panels shade.
+    # One shared timeline across all conditions, exactly as the panels build
+    # it -- per-condition calls would re-emit its disagreement warnings and
+    # could report a timeline the figure itself declined to shade. None when
+    # the links disagreed (or no ddil_stats were bagged).
+    timeline = capacity_timeline(results, conditions)
+    data["capacity_timeline"] = (
+        None if timeline is None else [[float(t), float(kbps)] for t, kbps in timeline])
+    return data
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--baseline", nargs="+", metavar="robot=bag_dir", action="append",
@@ -1341,6 +1595,18 @@ def main():
                               "since each robot's /map is in its own frame. Normally inferred from "
                               "spawn_presets.yaml via the run directory's world name; use this to override "
                               "or to supply offsets for bags stored outside experiment_runs/.")
+    parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR,
+                         help="Where to keep decoded per-bag data so re-plotting the same runs does not "
+                              "re-read their bags (default: figure_cache/ beside this script). Entries are "
+                              "keyed by bag contents, so a re-recorded bag invalidates its own entry.")
+    parser.add_argument("--no-cache", action="store_true",
+                         help="Read every bag from scratch and write no cache entries.")
+    parser.add_argument("--data-out", type=Path, default=None,
+                         help="Write the figure's plotted numbers (every panel's series plus the summary "
+                              "bar values) to this JSON path. Defaults to <out stem>.json; pass an explicit "
+                              "path to put it elsewhere.")
+    parser.add_argument("--no-data-out", action="store_true",
+                         help="Skip writing that JSON sidecar next to the figure.")
     parser.add_argument("--spawn-preset", default=None,
                          help="spawn_presets.yaml preset the runs were launched with, used to infer "
                               "--robot-offset values. Defaults to $SPAWN_PRESET, else experiment.conf's "
@@ -1389,7 +1655,8 @@ def main():
             run_results = {}
             for robot, bag_dir in sorted(run_robots.items()):
                 r = read_bag(robot, bag_dir, condition, max_duration=args.max_duration,
-                             map_offset=offsets.get(robot))
+                             map_offset=offsets.get(robot),
+                             cache_dir=None if args.no_cache else args.cache_dir)
                 if r is not None:
                     run_results[robot] = r
             if run_results:
@@ -1458,6 +1725,14 @@ def main():
 
     # Per-condition totals, computed once for both the lines below and --table.
     summary = summarize(results, conditions)
+
+    if not args.no_data_out:
+        data_out = args.data_out or args.out.with_suffix(".json")
+        data_out.parent.mkdir(parents=True, exist_ok=True)
+        data_out.write_text(json.dumps(
+            figure_data(results, conditions, summary, robot_paths, args.max_duration),
+            indent=1) + "\n")
+        print(f"figure data written to {data_out.resolve()}")
     for c in conditions:
         n = summary[c]["runs"]
         recv_mean, recv_std_val = summary[c]["received"]

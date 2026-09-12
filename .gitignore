@@ -34,3 +34,4 @@ logs/
 experiment_runs/
 figures/
 summaries/
+figure_cache/
