@@ -121,8 +121,11 @@ def _robot_pose(index, count, x, y, z, yaw, spacing, world):
 # directly from turtlebot3_waffle.urdf's actual collision box (0.266 x 0.266,
 # centered at x=-0.064 relative to base_link, which coincides with
 # base_footprint in x/y -- see base_joint's xyz offset, z-only).
+# NavFn checks a circular clearance field. Enclose the rectangular robot's
+# turning envelope so it cannot plan a centreline through a gap that only its
+# short side fits. Keep identical to navigation.yaml; polygon supports MPPI.
 _MOGI_BOT_FOOTPRINT = {
-    "footprint": "[[0.22, 0.19], [0.22, -0.19], [-0.22, -0.19], [-0.22, 0.19]]",
+    "footprint": "[[0.34, 0.0], [0.31412, 0.13011], [0.24042, 0.24042], [0.13011, 0.31412], [0.0, 0.34], [-0.13011, 0.31412], [-0.24042, 0.24042], [-0.31412, 0.13011], [-0.34, 0.0], [-0.31412, -0.13011], [-0.24042, -0.24042], [-0.13011, -0.31412], [-0.0, -0.34], [0.13011, -0.31412], [0.24042, -0.24042], [0.31412, -0.13011]]",
     "footprint_padding": 0.01,
 }
 _TURTLEBOT3_WAFFLE_FOOTPRINT = {

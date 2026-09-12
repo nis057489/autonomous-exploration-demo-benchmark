@@ -55,8 +55,9 @@ python3 simulation/worlds/office/inspect_experiment_starts.py
 
 Checks: all starts connect to four western aisle probes and an eastern probe
 in the floor grid with 0.35 m obstacle inflation; starts have no padded-body
-collision over sampled heights 0.1–0.6 m. The configured rectangular footprint
-has a circumscribed radius of approximately 0.291 m. These checks use the
+collision over sampled heights 0.1–0.6 m. The physical rectangular footprint
+has a circumscribed radius of approximately 0.291 m; navigation now uses a
+conservative 0.34 m polygonal turning envelope plus 0.01 m padding. These checks use the
 existing primitive-collision extractor and do not replace a full simulator
 rollout, footprint sweep, or validation of unsupported collision shapes.
 
@@ -96,3 +97,21 @@ map knowledge. Do not require unimpaired sharing to win each realization.
 No Gazebo pilot was executed for this configuration change. The static geometry
 and release/launch regressions pass; communication-dependent exploration
 performance has not yet been validated on these starts.
+
+## Cubicle clearance
+
+NavFn and the explorer BFS use costmap clearance rather than full oriented
+rectangle planning. Both simulation costmaps and the Mogi launch override now
+use the same 16-sided 0.34 m envelope, enclosing the robot in every heading.
+With padding, its inscribed clearance is approximately 0.34 m instead of the
+previous 0.20 m. The 0.40 m inflation radius remains a soft outer cost gradient.
+This is deliberately conservative: narrow passages a carefully aligned
+rectangle could traverse may be rejected in exchange for room to turn.
+
+The regression checks that a 0.5 m gap is rejected and a 0.9 m opening remains
+reachable. The static office circulation check still passes at 0.35 m obstacle
+inflation. No ground-truth keepout zones are supplied to the explorer; obstacle
+evidence must still arrive through sensing or received occupancy maps.
+The actual cubicle episode needs a new simulator run to validate this change.
+
+Reference: [Nav2 footprint guidance](https://docs.nav2.org/rolling/configuration_and_development/first_time_robot_setup_guide/footprint/setup_footprint/).
