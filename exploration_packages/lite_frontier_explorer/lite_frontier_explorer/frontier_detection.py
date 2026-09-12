@@ -51,6 +51,37 @@ def visible_unknown_area(grid, row, col, resolution, sensor_range_m,
     return np.unique(rows[unknown] * width + cols[unknown]).size * resolution ** 2
 
 
+def align_information_grid(source, destination):
+    """Sample occupancy onto the navigation lattice; maps must share a frame.
+
+    Source occupancy probabilities stay distinct from Nav2 inflation costs.
+    Outside-source cells remain unknown. No ground-truth information is used.
+    """
+    if source.header.frame_id != destination.header.frame_id:
+        raise ValueError('information map and costmap must share a frame')
+    src, dst = source.info, destination.info
+    if min(src.resolution, dst.resolution) <= 0 or min(src.width, src.height) <= 0:
+        raise ValueError('invalid information map geometry')
+
+    def yaw(q):
+        return math.atan2(2 * (q.w*q.z + q.x*q.y), 1 - 2 * (q.y*q.y + q.z*q.z))
+
+    rows, cols = np.indices((dst.height, dst.width))
+    a = yaw(dst.origin.orientation)
+    x, y = (cols + .5) * dst.resolution, (rows + .5) * dst.resolution
+    wx = dst.origin.position.x + math.cos(a)*x - math.sin(a)*y
+    wy = dst.origin.position.y + math.sin(a)*x + math.cos(a)*y
+    dx, dy = wx - src.origin.position.x, wy - src.origin.position.y
+    a = yaw(src.origin.orientation)
+    cc = np.floor((math.cos(a)*dx + math.sin(a)*dy) / src.resolution).astype(int)
+    rr = np.floor((-math.sin(a)*dx + math.cos(a)*dy) / src.resolution).astype(int)
+    valid = (rr >= 0) & (rr < src.height) & (cc >= 0) & (cc < src.width)
+    result = np.full((dst.height, dst.width), -1, dtype=np.int8)
+    values = np.asarray(source.data, dtype=np.int8).reshape(src.height, src.width)
+    result[valid] = values[rr[valid], cc[valid]]
+    return result
+
+
 def _sample_viewpoints(cells, count, first=None):
     points = np.asarray(cells)
     if first is None:
@@ -65,8 +96,20 @@ def _sample_viewpoints(cells, count, first=None):
     return [cells[i] for i in indices]
 
 
+def occupancy_constrained_costmap(grid, information, obstacle_threshold):
+    """Keep Nav2 safety costs, but never route through occupancy evidence.
+
+    Nav2 can lag a delivered map or clear cells for collision avoidance. Neither
+    makes an occupied/unknown information cell known traversable space.
+    """
+    result = np.asarray(grid, dtype=np.int8).copy()
+    result[information < 0] = -1
+    result[information >= obstacle_threshold] = 100
+    return result
+
+
 def rank_frontier_clusters(clusters, grid, resolution, sensor_range_m, max_viewpoints=5,
-                           path_occ_threshold=99):
+                           path_occ_threshold=99, obstacle_threshold=100):
     """Common map-only ranking: best visible area, then canonical cell order.
 
     Rank distinct clusters, not multiple viewpoints of one cluster. Neither
@@ -79,7 +122,7 @@ def rank_frontier_clusters(clusters, grid, resolution, sensor_range_m, max_viewp
                            if 0 <= grid[r, c] < path_occ_threshold))
         if not cells:
             continue
-        gain = max(visible_unknown_area(grid, r, c, resolution, sensor_range_m)
+        gain = max(visible_unknown_area(grid, r, c, resolution, sensor_range_m, obstacle_threshold)
                    for r, c in _sample_viewpoints(cells, max_viewpoints))
         if gain > 0:
             ranked.append((gain, cells))
@@ -94,7 +137,9 @@ def select_visible_gain_frontier(clusters, data, width, height, robot_x, robot_y
                                  max_viewpoints=5, diagnostics=None,
                                  active_goal=None, active_score=None,
                                  assignment_mode='independent', robot_index=0, team_size=1,
-                                 blacklisted_goals=(), blacklist_radius_m=0.0):
+                                 blacklisted_goals=(), blacklist_radius_m=0.0,
+                                 information_grid=None, information_occ_threshold=100,
+                                 reserved_goals=(), reservation_radius_m=6.0, min_gain_m2=0.0):
     """Maximize observable unknown m² / (1 + distance_weight * path metres).
 
     Sample actual reachable frontier cells, not a potentially occupied
@@ -104,6 +149,7 @@ def select_visible_gain_frontier(clusters, data, width, height, robot_x, robot_y
 
     robot_rank first allocates whole clusters by map-only rank and static
     membership, then maximizes this utility within the assigned cluster.
+    Compare utility across all owned clusters before considering fallback.
     Local exclusions apply after allocation, with progress-preserving fallback.
     """
     if resolution <= 0 or sensor_range_m <= 0 or distance_weight < 0 or max_viewpoints < 1:
@@ -115,22 +161,44 @@ def select_visible_gain_frontier(clusters, data, width, height, robot_x, robot_y
     if team_size == 1:
         assignment_mode = 'independent'
     grid = np.asarray(data, dtype=np.int8).reshape(height, width)
-    distances = _free_space_distances(data, width, height, robot_x, robot_y,
+    information = grid if information_grid is None else np.asarray(information_grid, dtype=np.int8)
+    if information.shape != grid.shape or not 0 < information_occ_threshold <= 100:
+        raise ValueError('invalid information grid or occupancy threshold')
+    grid = occupancy_constrained_costmap(grid, information, information_occ_threshold)
+    path_data = grid.ravel()
+    distances = _free_space_distances(path_data, width, height, robot_x, robot_y,
                                       resolution, origin_x, origin_y, path_occ_threshold)
+    # Geodesic exclusion keeps a reservation from blocking a nearby hallway
+    # on the other side of a wall. Claims are received over the DDIL link.
+    reservation_distances = [
+        _free_space_distances(path_data, width, height, x, y, resolution,
+                              origin_x, origin_y, path_occ_threshold)
+        for x, y in reserved_goals]
     if active_score is not None:
         active_score.clear()
         if active_goal is not None:
             row = math.floor((active_goal[1] - origin_y) / resolution)
             col = math.floor((active_goal[0] - origin_x) / resolution)
-            if (0 <= row < height and 0 <= col < width and distances[row, col] >= 0
-                    and 0 <= grid[row, col] < path_occ_threshold):
-                gain = visible_unknown_area(grid, row, col, resolution, sensor_range_m)
+            if not (0 <= row < height and 0 <= col < width):
+                active_score.update(status='outside_map')
+            elif information_grid is not None and information[row, col] >= information_occ_threshold:
+                # A received wall is evidence that this is no observation
+                # viewpoint, even before Nav2 incorporates the same update.
+                active_score.update(status='blocked_or_unknown', gain_m2=0.0, utility=0.0)
+            elif not 0 <= grid[row, col] < path_occ_threshold:
+                active_score.update(status='blocked_or_unknown')
+            elif distances[row, col] < 0:
+                active_score.update(status='unreachable')
+            else:
+                gain = visible_unknown_area(information, row, col, resolution, sensor_range_m,
+                                            information_occ_threshold)
                 distance = float(distances[row, col]) * resolution
-                active_score.update(gain_m2=gain, path_m=distance,
+                active_score.update(status='valid', gain_m2=gain, path_m=distance,
                                     utility=gain / (1.0 + distance_weight * distance))
     if assignment_mode == 'robot_rank':
-        clusters = rank_frontier_clusters(clusters, grid, resolution, sensor_range_m,
-                                          max_viewpoints, path_occ_threshold)
+        clusters = rank_frontier_clusters(clusters, information, resolution, sensor_range_m,
+                                          max_viewpoints, information_occ_threshold,
+                                          information_occ_threshold)
         if not clusters:
             return None
         # Rank 0 -> robot0, rank 1 -> robot1, etc. Further ranks cycle through
@@ -145,11 +213,22 @@ def select_visible_gain_frontier(clusters, data, width, height, robot_x, robot_y
         order = list(range(len(clusters)))
         owned = order
     best = None
+    entering_fallback = False
     for cluster_rank in order:
+        # Ownership is a partition, not a priority queue. Finish comparing all
+        # usable owned clusters by gain per travel cost before returning.
+        # Only enter other robots' assignments if no owned work is usable.
+        if assignment_mode == 'robot_rank' and cluster_rank not in owned and not entering_fallback:
+            if best is not None:
+                return best[1]
+            entering_fallback = True
         cluster = clusters[cluster_rank]
         cells = sorted((r, c) for r, c in cluster
                        if distances[r, c] >= 0
                        and 0 <= grid[r, c] < path_occ_threshold
+                       and 0 <= information[r, c] < information_occ_threshold
+                       and not any(0 <= d[r, c] * resolution <= reservation_radius_m
+                                   for d in reservation_distances)
                        and distances[r, c] * resolution >= min_distance_m
                        and not any(math.hypot(origin_x + (c + 0.5) * resolution - bx,
                                               origin_y + (r + 0.5) * resolution - by)
@@ -158,7 +237,8 @@ def select_visible_gain_frontier(clusters, data, width, height, robot_x, robot_y
             continue
         first = min(range(len(cells)), key=lambda i: (distances[cells[i]], cells[i]))
         for row, col in _sample_viewpoints(cells, max_viewpoints, first):
-            gain = visible_unknown_area(grid, row, col, resolution, sensor_range_m)
+            gain = visible_unknown_area(information, row, col, resolution, sensor_range_m,
+                                            information_occ_threshold)
             distance = float(distances[row, col]) * resolution
             utility = gain / (1.0 + distance_weight * distance)
             xy = (origin_x + (col + 0.5) * resolution, origin_y + (row + 0.5) * resolution)
@@ -168,10 +248,8 @@ def select_visible_gain_frontier(clusters, data, width, height, robot_x, robot_y
                                         cluster_rank=cluster_rank,
                                         assignment_fallback=cluster_rank not in owned))
             rank = (utility, -distance, -row, -col)
-            if gain > 0 and (best is None or rank > best[0]):
+            if gain > min_gain_m2 and (best is None or rank > best[0]):
                 best = (rank, xy)
-        if assignment_mode == 'robot_rank' and best is not None:
-            return best[1]
     return best[1] if best is not None else None
 
 

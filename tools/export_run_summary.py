@@ -54,8 +54,10 @@ REPO = Path(__file__).resolve().parent.parent
 #    from them is inflated. Those caches are REJECTED rather than loaded --
 #    unlike the version-2 bump, the payload itself is wrong, not just absent,
 #    and silently loading it would keep reporting the old numbers.
-SUMMARY_VERSION = 3
-MIN_LOADABLE_VERSION = 3
+# 4: floor-based cell keys fix ties-to-even aliasing; nav diffs are cumulative.
+# Older cell arrays cannot be repaired without reading the original maps.
+SUMMARY_VERSION = 4
+MIN_LOADABLE_VERSION = 4
 
 
 def _import_figure_module():
@@ -203,7 +205,7 @@ def load_summary(path):
         if meta.get("version", 1) < MIN_LOADABLE_VERSION:
             raise StaleSummary(
                 f"{path}: summary version {meta.get('version', 1)} predates the "
-                f"read_bag redundancy fix (need >= {MIN_LOADABLE_VERSION}); "
+                f"read_bag cell-coordinate fix (need >= {MIN_LOADABLE_VERSION}); "
                 f"re-export it from the bag."
             )
         results = {}

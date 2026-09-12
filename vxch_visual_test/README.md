@@ -191,17 +191,29 @@ the grouping magnitude with its environment. See
 
 `compression_size_sweep.py` sweeps map size against the full compression x
 varint ablation matrix (the same four points as the GUI's Compression/Varint
-controls) via `vxch_cli gen-map`/`encode` and plots encoded band-stream size,
-absolute and as a percentage of the raw `OccupancyGrid` size:
+controls) via `vxch_cli encode`, and plots absolute encoded band-stream size:
 
 ```
 distrobox enter jazzy_env -- python3 compression_size_sweep.py
 ```
 
+The swept grids are nested crops of a **real** map -- by default the office
+world the benchmark runs explore -- centred on its occupied structure, so the
+sizes measure the codec against real floorplan geometry. `--map-yaml` points
+at any other ROS `map_server` yaml (e.g. a slam_toolbox export, which also
+carries unknown cells a ground-truth world map lacks); `--synthetic` falls
+back to `vxch_cli gen-map`'s generated grids.
+
+There is no "raw `OccupancyGrid`" reference series or percentage-of-raw
+panel. One byte per cell is an assumption about an encoding nothing here
+performs, and drawing it beside measured bytes invites reading a modelled
+number as a measured one. `none + fixed-width` still works as a sanity check
+without it: it should sit at a flat 4.000 B/cell at every size (int32 per
+coefficient), independent of map content, which the per-size B/cell figures
+printed to stdout show directly.
+
 Writes `figures/compression_size_sweep.png` (gitignored) and prints the
-underlying numbers to stdout. `none + fixed-width` is a useful sanity check
-in its own right -- it should sit at a flat 400% of raw at every size (int32
-per coefficient vs. int8 per raw cell), independent of map content.
+underlying numbers, plus each crop's free/occupied/unknown mix, to stdout.
 
 ## What's real vs. simplified
 

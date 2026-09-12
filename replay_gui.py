@@ -39,7 +39,7 @@ RUN_DIR_RE = re.compile(r"^(\d{8}_\d{6})_(baseline|vxch|zstd|none|oracle)_(\w+)$
 SESSION_GAP_SECONDS = 90  # runs across robots within this gap = one session
 CONDITIONS = ("none", "baseline", "vxch", "zstd", "oracle")
 CONDITION_LABELS = {"baseline": "Baseline run", "vxch": "Wavestream run", "zstd": "Zstd run",
-                    "none": "No-sharing run (control)", "oracle": "Perfect-sharing run (control)"}
+                    "none": "No-sharing run (control)", "oracle": "Unimpaired-sharing run (control)"}
 
 
 def in_container():

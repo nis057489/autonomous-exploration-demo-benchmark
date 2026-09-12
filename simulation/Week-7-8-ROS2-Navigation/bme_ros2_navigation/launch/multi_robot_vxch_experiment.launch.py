@@ -472,6 +472,8 @@ def _create_all_actions(context):
         name = robot_names[i]
         peer_name = robot_names[peer_index]
         robot_ddil_base = f"/{name}/incoming/{peer_name}"
+        reservation_relay = (f"/{peer_name}/explore/reservation {robot_ddil_base}/reservation"
+                             " geometry_msgs/msg/PoseArray")
 
         if is_vxch:
             relay_topics = [
@@ -479,6 +481,7 @@ def _create_all_actions(context):
                 " voxelcodec_msgs/msg/VoxelTileBatch"
                 for k in range(total_bands)
             ]
+            relay_topics.append(reservation_relay)
             relay_topics.append(
                 f"/{peer_name}/vxch/map/manifest {robot_ddil_base}/manifest"
                 " voxelcodec_msgs/msg/VoxelManifest reliable"
@@ -531,7 +534,8 @@ def _create_all_actions(context):
                         **ddil_params_for(i, peer_index),
                         "relay_topics": [
                             f"/{peer_name}/zstd/map {robot_ddil_base}/zstd_map"
-                            " std_msgs/msg/UInt8MultiArray reliable"
+                            " std_msgs/msg/UInt8MultiArray reliable",
+                            reservation_relay,
                         ],
                     }],
                     **_netns_kwargs(i, [MAIN_NETNS_IP]),
@@ -567,7 +571,8 @@ def _create_all_actions(context):
                         **ddil_params_for(i, peer_index),
                         "relay_topics": [
                             f"{source_topic} {robot_ddil_base}/map"
-                            " nav_msgs/msg/OccupancyGrid reliable"
+                            " nav_msgs/msg/OccupancyGrid reliable",
+                            reservation_relay,
                         ],
                     }],
                     **_netns_kwargs(i, [MAIN_NETNS_IP]),

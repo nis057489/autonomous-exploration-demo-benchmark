@@ -5,6 +5,9 @@ data was exchanged between robots to share the map, and how much of the map
 got explored, for each condition given.
 
 Reads each robot's recorded rosbag2 (mcap) directly:
+  - Coordination traffic: published /<robot>/explore/reservation bytes are
+    included in sent totals for sharing arms; received reservation bytes are
+    included through the /incoming/ topics. These use the same DDIL budget.
   - received bandwidth: bytes on every /<robot>/incoming/<peer>/... topic
     (baseline: .../map; vxch: .../band_*+manifest; zstd: .../zstd_map) --
     what this robot actually received from its peers after DDIL throttling,
@@ -28,9 +31,8 @@ Reads each robot's recorded rosbag2 (mcap) directly:
     known-cell-area calculation, but this topic is slam_toolbox's raw local
     output -- it never receives peer-communicated cells (those only ever
     land in team_map_ddil, which per team_map_fusion.py excludes the
-    robot's own map). So /map and team_map_ddil are disjoint by
-    construction, and /map's known-area is a genuine, non-double-counted
-    measure of what this robot itself has seen.
+    robot's own map). These sources may overlap spatially; /map measures
+    this robot's own sensor observations, including occupied cells.
 
 Must run where rosbag2_py and rclpy are importable, e.g. inside the
 jazzy_env distrobox with a login shell so its ROS setup gets sourced:
@@ -80,27 +82,34 @@ import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
-from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
-from rclpy.serialization import deserialize_message
-from nav_msgs.msg import OccupancyGrid
-
-try:
-    from voxelcodec_msgs.msg import DdilStats
-except ImportError:  # workspace not sourced, or a bag predating ddil_stats recording
-    DdilStats = None
-
 TEXT_PRIMARY = "#1a1a1a"
 TEXT_SECONDARY = "#52514e"
 GRID_COLOR = "#cccccc"
 ALL_CONDITIONS = ("none", "baseline", "vxch", "zstd", "oracle")  # internal keys -- match run-dir/CLI naming, unrelated to display
 DISPLAY_NAMES = {"baseline": "Baseline", "vxch": "Wavestream", "zstd": "Zstd",
-                 "none": "No sharing", "oracle": "Perfect sharing"}
-# none/oracle are the control arms that bracket what map sharing can buy, not
-# competing methods -- greyed and gold rather than another saturated hue, so a
-# plot reads as "the three transports, between these two bounds".
+                 "none": "No sharing", "oracle": "Unimpaired sharing"}
+# Control arms change communication, not the exploration policy.
 CONDITION_COLORS = {"baseline": "#eb6834", "vxch": "#2a78d6", "zstd": "#3fa15c",
                     "none": "#8a8a8a", "oracle": "#d4a017"}
 LINESTYLES = ("-", "--", ":", "-.")
+
+# Publication type scale: 1.5x the sizes these panels used when they were
+# screen-sized, so a panel still reads at journal column width after the whole
+# figure is scaled down. vxch_visual_test/compression_size_sweep.py carries the
+# same scale (same numbers, one panel) so the two figures typeset alike.
+FS_AXIS = 16.5      # axis labels, categorical tick labels
+FS_TICK = 15        # numeric tick labels
+FS_LEGEND = 15      # legend entries
+FS_VALUE = 15       # end-of-series / on-bar value labels
+FS_INLINE = 13      # labels drawn inside a bar segment
+# Each bar prints its value just past its end; without headroom those labels
+# run off the axes. The bandwidth axis is logarithmic and its span depends on
+# the run, so the headroom is a fraction of the span in decades rather than a
+# fixed multiplier -- this much of the axis width is left blank for labels.
+BAR_LABEL_DECADES = 0.25
+# One panel's figure size, used both for --separate-figures and for each cell
+# of the combined grid, so a panel's type is the same physical size either way.
+PANEL_SIZE = (7.6, 6.0)
 
 
 def parse_robot_paths(pairs):
@@ -231,6 +240,66 @@ def _reindexed_copy(bag_dir):
     return scratch
 
 
+def known_cells(msg, offset=None):
+    """Grid-cell coordinates keyed in a shared, resolution-sized world
+    lattice (not this message's local row/col indices) so that cells from
+    different robots -- whose grids have different origins/extents as
+    slam_toolbox grows each robot's own map independently -- line up and
+    can be unioned.
+
+    `offset` is this robot's spawn pose (x, y, yaw), i.e. the pose of its
+    private SLAM `map` frame within the shared team frame, and MUST be
+    supplied for any per-robot topic (/map). Every robot runs its own
+    async_slam_toolbox_node anchored at its own start pose, so /map
+    coordinates are in that robot's private frame -- in long_t/distributed
+    the two robots spawn 16 m apart, so without this the same physical
+    ground keys 16 m apart, two robots' cells never dedupe, and the
+    "union" inflates to roughly the sum (it read 505 m^2 for a world whose
+    entire navigable floor is ~260 m^2). This is the exact transform chain
+    team_map_fusion.py applies when it builds /nav_map: cell centre ->
+    through the grid's own origin pose -> through the robot's spawn
+    offset -> shared team frame.
+
+    Pass offset=None only for a topic already published in the shared
+    frame (/nav_map, which fusion emits with an identical origin for every
+    robot); offsetting those again would move correct data off-frame.
+
+    Returns a sorted int64 numpy array, each element packing (gx, gy)
+    into one 64-bit key (32 bits each) -- cheap to build and diff with
+    numpy's setdiff1d/isin, vs. a Python set of (int, int) tuples which
+    is much slower to hash and was the actual bottleneck here."""
+    data = np.asarray(msg.data)
+    known_idx = np.flatnonzero(data != -1)
+    if known_idx.size == 0:
+        return np.empty(0, dtype=np.int64)
+    width = msg.info.width
+    res = msg.info.resolution
+    ox = msg.info.origin.position.x
+    oy = msg.info.origin.position.y
+    xs = known_idx % width
+    ys = known_idx // width
+
+    # Cell centres in the grid's own pixel space...
+    local_x = (xs + 0.5) * res
+    local_y = (ys + 0.5) * res
+    # ...through the grid's origin pose (yaw included: slam_toolbox's
+    # origin is normally axis-aligned, but nothing guarantees it, and
+    # fusion honours it, so honour it here too rather than assuming)...
+    origin_yaw = yaw_from_quaternion(msg.info.origin.orientation)
+    map_x, map_y = apply_pose(ox, oy, origin_yaw, local_x, local_y)
+    # ...and then through this robot's spawn offset into the team frame.
+    if offset is not None:
+        map_x, map_y = apply_pose(offset[0], offset[1], offset[2], map_x, map_y)
+
+    gx = np.floor(map_x / res).astype(np.int64)
+    gy = np.floor(map_y / res).astype(np.int64)
+    keys = (gx << np.int64(32)) | (gy & np.int64(0xFFFFFFFF))
+    # Containing-cell indices use floor. Rounding centres uses ties-to-even:
+    # 1.5 and 2.5 both become 2, collapsing adjacent rows/columns on a
+    # perfectly valid aligned grid. Rotation may still merge centre samples.
+    return np.unique(keys)
+
+
 def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
     """Returns (received_bytes, sent_bytes, coverage, local_coverage,
     local_cell_series, nav_cell_series, resolution, link_stats) where coverage and
@@ -247,10 +316,8 @@ def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
     the loop below), used to union robots' own observations over time
     without double-counting cells more than one robot saw.
     nav_cell_series is the same shape but diffed off /<robot>/nav_map, i.e.
-    it includes peer-relayed cells -- unioning it across robots shows what
-    the team collectively knows, which is where communication's effect is
-    actually visible (unioning local_cell_series instead structurally can't
-    show it, since that series never receives fused/peer-relayed cells).
+    it includes peer-relayed cells. Communication also changes exploration
+    decisions, so local coverage may differ between independent runs.
     resolution is the grid resolution (m/cell) behind local_cell_series' and
     nav_cell_series' packed keys, for converting union "tile" counts back to
     m^2 downstream -- 0.0 if this robot never published a /map or /nav_map
@@ -268,6 +335,15 @@ def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
     for local_cell_series' keys to be comparable across robots at all; see
     known_cells. None keeps every robot in its own frame, which is only
     correct for a single-robot run."""
+    from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
+    from rclpy.serialization import deserialize_message
+    from nav_msgs.msg import OccupancyGrid
+
+    try:
+        from voxelcodec_msgs.msg import DdilStats
+    except ImportError:  # workspace not sourced, or a bag predating ddil_stats recording
+        DdilStats = None
+
     bag_dir = Path(bag_dir)
     scratch_dir = None
     try:
@@ -320,70 +396,6 @@ def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
         known = int(np.count_nonzero(np.asarray(msg.data) != -1))
         return known * (msg.info.resolution ** 2)
 
-    def known_cells(msg, offset=None):
-        """Grid-cell coordinates keyed in a shared, resolution-sized world
-        lattice (not this message's local row/col indices) so that cells from
-        different robots -- whose grids have different origins/extents as
-        slam_toolbox grows each robot's own map independently -- line up and
-        can be unioned.
-
-        `offset` is this robot's spawn pose (x, y, yaw), i.e. the pose of its
-        private SLAM `map` frame within the shared team frame, and MUST be
-        supplied for any per-robot topic (/map). Every robot runs its own
-        async_slam_toolbox_node anchored at its own start pose, so /map
-        coordinates are in that robot's private frame -- in long_t/distributed
-        the two robots spawn 16 m apart, so without this the same physical
-        ground keys 16 m apart, two robots' cells never dedupe, and the
-        "union" inflates to roughly the sum (it read 505 m^2 for a world whose
-        entire navigable floor is ~260 m^2). This is the exact transform chain
-        team_map_fusion.py applies when it builds /nav_map: cell centre ->
-        through the grid's own origin pose -> through the robot's spawn
-        offset -> shared team frame.
-
-        Pass offset=None only for a topic already published in the shared
-        frame (/nav_map, which fusion emits with an identical origin for every
-        robot); offsetting those again would move correct data off-frame.
-
-        Returns a sorted int64 numpy array, each element packing (gx, gy)
-        into one 64-bit key (32 bits each) -- cheap to build and diff with
-        numpy's setdiff1d/isin, vs. a Python set of (int, int) tuples which
-        is much slower to hash and was the actual bottleneck here."""
-        data = np.asarray(msg.data)
-        known_idx = np.flatnonzero(data != -1)
-        if known_idx.size == 0:
-            return np.empty(0, dtype=np.int64)
-        width = msg.info.width
-        res = msg.info.resolution
-        if not resolution_seen:
-            resolution_seen.append(res)
-        ox = msg.info.origin.position.x
-        oy = msg.info.origin.position.y
-        xs = known_idx % width
-        ys = known_idx // width
-
-        # Cell centres in the grid's own pixel space...
-        local_x = (xs + 0.5) * res
-        local_y = (ys + 0.5) * res
-        # ...through the grid's origin pose (yaw included: slam_toolbox's
-        # origin is normally axis-aligned, but nothing guarantees it, and
-        # fusion honours it, so honour it here too rather than assuming)...
-        origin_yaw = yaw_from_quaternion(msg.info.origin.orientation)
-        map_x, map_y = apply_pose(ox, oy, origin_yaw, local_x, local_y)
-        # ...and then through this robot's spawn offset into the team frame.
-        if offset is not None:
-            map_x, map_y = apply_pose(offset[0], offset[1], offset[2], map_x, map_y)
-
-        gx = np.round(map_x / res).astype(np.int64)
-        gy = np.round(map_y / res).astype(np.int64)
-        keys = (gx << np.int64(32)) | (gy & np.int64(0xFFFFFFFF))
-        # np.unique, not just sort: two cells of ONE message can land on the
-        # same key when the grid's real row/column spacing disagrees with the
-        # resolution it declares (seen on /nav_map -- consecutive rows
-        # collapsing onto one world cell, ~70% of a message's cells duplicated).
-        # setdiff1d(assume_unique=True) downstream has undefined behaviour on
-        # a non-unique input, so leaving duplicates in silently corrupts every
-        # diff built from this.
-        return np.unique(keys)
 
     local_cell_series = []
     nav_cell_series = []
@@ -398,9 +410,15 @@ def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
             break
         if incoming_re.match(topic):
             received_bytes += len(data)
+        elif topic == f"/{robot}/explore/reservation" and condition != "none":
+            sent_bytes += len(data)
         elif topic == nav_map_topic:
             msg = deserialize_message(data, OccupancyGrid)
             t = (t_ns - start_ns) / 1e9
+            if not resolution_seen:
+                resolution_seen.append(msg.info.resolution)
+            elif not math.isclose(resolution_seen[0], msg.info.resolution):
+                raise ValueError("Mixed map resolutions cannot share coverage cell keys")
             coverage.append((t, known_area_m2(msg)))
             # No offset: /nav_map is fusion's output, already in the shared
             # team frame (every robot publishes it with the same origin).
@@ -408,10 +426,14 @@ def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
             new_cells = np.setdiff1d(cells_now, seen_nav_cells, assume_unique=True)
             if new_cells.size:
                 nav_cell_series.append((t, new_cells))
-            seen_nav_cells = cells_now
+            seen_nav_cells = np.union1d(seen_nav_cells, cells_now)
         elif topic == local_map_topic:
             msg = deserialize_message(data, OccupancyGrid)
             t = (t_ns - start_ns) / 1e9
+            if not resolution_seen:
+                resolution_seen.append(msg.info.resolution)
+            elif not math.isclose(resolution_seen[0], msg.info.resolution):
+                raise ValueError("Mixed map resolutions cannot share coverage cell keys")
             local_coverage.append((t, known_area_m2(msg)))
             # Store only the cells newly known since this robot's last /map
             # message, not a full snapshot every time: a full-set snapshot per
@@ -484,14 +506,28 @@ def read_bag(robot, bag_dir, condition, max_duration=None, map_offset=None):
             local_cell_series, nav_cell_series, resolution, link_stats)
 
 
-def style_ax(ax):
+def style_ax(ax, grid_axis="y"):
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_color(GRID_COLOR)
     ax.spines["bottom"].set_color(GRID_COLOR)
-    ax.tick_params(colors=TEXT_SECONDARY, labelsize=10)
-    ax.grid(axis="y", color=GRID_COLOR, linewidth=1, alpha=0.6, zorder=0)
+    ax.tick_params(colors=TEXT_SECONDARY, labelsize=FS_TICK)
+    ax.grid(axis=grid_axis, color=GRID_COLOR, linewidth=1, alpha=0.6, zorder=0)
     ax.set_axisbelow(True)
+
+
+def panel_legend(ax, handles, loc="best"):
+    """Every panel's legend, placed with loc="best" and given a soft white
+    backing. "best" rather than a fixed corner because these legends now carry
+    the per-series end-of-run numbers that used to be annotated at the line
+    ends -- moving them into the legend is what keeps two curves that finish
+    close together from printing their labels on top of each other, but it
+    also makes the legend big enough that a hardcoded corner would sooner or
+    later sit on the data. The backing keeps it legible wherever it lands."""
+    if not handles:
+        return
+    ax.legend(handles=handles, fontsize=FS_LEGEND, loc=loc,
+              frameon=True, facecolor="white", edgecolor="none", framealpha=0.85)
 
 
 def resample_step(series, grid):
@@ -509,74 +545,120 @@ def resample_step(series, grid):
     return np.where(idx >= 0, ys[np.clip(idx, 0, None)], 0.0)
 
 
-def plot_bandwidth(ax, results, conditions, byte_index, title, ylabel):
-    """byte_index selects which per-robot byte count to plot out of the
-    (received_bytes, sent_bytes, coverage, local_coverage, ...) tuple --
-    0 for received (what peers sent this robot), 1 for sent (what this
-    robot itself published for peers to pull). conditions fixes the
-    left-to-right bar order. results[c] is a list of per-run {robot: entry}
-    dicts -- with more than one run, bars show the mean total across runs
-    with a +/- std error bar; per-robot stack segments use each robot's mean
-    across runs (a robot missing from a run counts as 0 bytes that run, so
-    the segments still sum to the mean total)."""
+# (byte_index into read_bag's tuple, legend label, bar hatch). Sent first so
+# the solid bar of each pair is the one the transport itself emitted, with the
+# hatched "after DDIL throttling" bar beside it.
+DIRECTIONS = ((1, "Published before relay", ""), (0, "Received from peers", "///"))
+
+
+def format_kb(mean_kb, std_kb=None):
+    """A KB total as a short label in whichever of KB/MB/GB keeps it readable.
+
+    These totals span five or more orders of magnitude across conditions, so a
+    single unit forces either "0 KB" or "2,582,266 KB" -- the latter being long
+    enough that, with a +/- std beside it, no amount of axis headroom fits it.
+    Mean and std always share one unit, picked from the mean."""
+    for unit, scale in (("GB", 1024 * 1024), ("MB", 1024), ("KB", 1)):
+        if mean_kb >= scale or unit == "KB":
+            break
+    places = 0 if unit == "KB" else 2
+    text = f"{mean_kb / scale:,.{places}f}"
+    if std_kb:
+        text += f" ± {std_kb / scale:,.{places}f}"
+    return f"{text} {unit}"
+
+
+def plot_bandwidth(ax, results, conditions, xlabel):
+    """Both directions of map-sharing traffic in a single panel: per condition,
+    a pair of bars -- what the robots published for peers to pull (solid)
+    beside what they actually received after DDIL throttling (hatched). These
+    were two separate panels; they share a unit and a scale, so pairing them
+    lets the sent/received gap for one transport be read directly instead of
+    across two figures with independently-scaled axes.
+
+    Horizontal bars on a log axis, and team totals rather than the per-robot
+    stack these bars used to carry. Both follow from the spread in the data: a
+    transport that sends three orders of magnitude less than the baseline
+    leaves every efficient condition a flat invisible line on a linear axis,
+    and segments stacked on a log axis would misstate each robot's share, since
+    a segment's drawn length there is not proportional to its value. Horizontal
+    because five condition names set at publication size will not fit side by
+    side as x tick labels without rotating or truncating them.
+
+    results[c] is a list of per-run {robot: entry} dicts -- with more than one
+    run, bars show the mean total across runs with a +/- std error bar."""
     robots = sorted({r for run in results.values() for entry in run for r in entry})
-    x = np.arange(len(conditions))
+    y = np.arange(len(conditions))
+    bar_height = 0.34
+    ratio_notes = []
+    drawn = []  # (y, total, std) for every bar, to size the axis afterwards
 
-    def robot_bytes(run, robot):
-        entry = run.get(robot)
-        return entry[byte_index] / 1024 if entry is not None else 0.0
+    for (byte_index, direction_label, hatch), offset in zip(
+            DIRECTIONS, (bar_height / 2 + 0.02, -bar_height / 2 - 0.02)):
 
-    heights_by_robot = {
-        robot: np.array([
-            np.mean([robot_bytes(run, robot) for run in results[c]]) if results[c] else 0.0
+        def run_total(run, byte_index=byte_index):
+            return sum(run[r][byte_index] / 1024 for r in robots if r in run)
+
+        totals = np.array([
+            np.mean([run_total(run) for run in results[c]]) if results[c] else 0.0
             for c in conditions
         ])
-        for robot in robots
-    }
-    totals = np.sum(list(heights_by_robot.values()), axis=0) if robots else np.zeros(len(conditions))
-    totals_std = np.array([
-        np.std([sum(robot_bytes(run, r) for r in robots) for run in results[c]]) if len(results[c]) > 1 else 0.0
-        for c in conditions
-    ])
+        totals_std = np.array([
+            np.std([run_total(run) for run in results[c]]) if len(results[c]) > 1 else 0.0
+            for c in conditions
+        ])
 
-    bottoms = np.zeros(len(conditions))
-    for robot in robots:
-        heights_kb = heights_by_robot[robot]
-        ax.bar(x, heights_kb, bottom=bottoms, width=0.45,
-               color=[CONDITION_COLORS[c] for c in conditions], edgecolor="white", linewidth=2,
-               zorder=3)
-        # Label each brick with the robot it belongs to, directly on the
-        # segment -- skip slivers too thin for the label to fit legibly.
-        for xi, height, base, total in zip(x, heights_kb, bottoms, totals):
-            if total > 0 and height / total > 0.04:
-                ax.annotate(robot, xy=(xi, base + height / 2), ha="center", va="center",
-                            fontsize=8.5, fontweight="bold", color="white", zorder=4)
-        bottoms += heights_kb
+        ax.barh(y + offset, totals, height=bar_height,
+                color=[CONDITION_COLORS[c] for c in conditions], edgecolor="white",
+                linewidth=1.5, hatch=hatch, zorder=3)
+        ax.errorbar(totals, y + offset, xerr=totals_std, fmt="none", ecolor=TEXT_PRIMARY,
+                    elinewidth=1.5, capsize=5, zorder=5)
+        drawn.extend(zip(y + offset, totals, totals_std))
 
-    ax.errorbar(x, totals, yerr=totals_std, fmt="none", ecolor=TEXT_PRIMARY, elinewidth=1.5, capsize=5, zorder=5)
+        nonzero = [(c, t) for c, t in zip(conditions, totals) if t > 0]
+        if len(nonzero) >= 2:
+            (_, biggest_val) = max(nonzero, key=lambda ct: ct[1])
+            (winner, smallest_val) = min(nonzero, key=lambda ct: ct[1])
+            if biggest_val != smallest_val:
+                ratio_notes.append(
+                    f"{direction_label.split()[0]}: {biggest_val / smallest_val:,.0f}× "
+                    f"less data ({DISPLAY_NAMES[winner]})")
 
-    for xi, total, std, n in zip(x, totals, totals_std, (len(results[c]) for c in conditions)):
-        label = f"{total:,.0f} KB" + (f" ± {std:,.0f}" if n > 1 else "")
-        ax.annotate(label, xy=(xi, total + std), xytext=(0, 6),
-                    textcoords="offset points", ha="center", va="bottom",
-                    fontsize=11, fontweight="bold", color=TEXT_PRIMARY)
+    # A log axis cannot place 0, and a condition that shares nothing at all
+    # (the no-sharing control) is legitimately 0 -- so the axis starts below the
+    # smallest real value and those bars are drawn as nothing, labelled in place.
+    positive = [t for _, t, _ in drawn if t > 0]
+    left = min(positive) / 3 if positive else 0.1
+    right = max(t + sd for _, t, sd in drawn) if drawn else 1.0
+    right *= (right / left) ** BAR_LABEL_DECADES
+    ax.set_xscale("log")
+    ax.set_xlim(left, right)
 
-    nonzero = [(c, t) for c, t in zip(conditions, totals) if t > 0]
-    if len(nonzero) >= 2:
-        (_, biggest_val) = max(nonzero, key=lambda ct: ct[1])
-        (winner, smallest_val) = min(nonzero, key=lambda ct: ct[1])
-        if biggest_val != smallest_val:
-            ax.text(0.5, 0.99, f"{biggest_val / smallest_val:.1f}× less data ({DISPLAY_NAMES[winner]})",
-                    transform=ax.transAxes, ha="center", va="top",
-                    fontsize=10.5, color=TEXT_SECONDARY, style="italic")
+    for yi, total, std in drawn:
+        ax.annotate(format_kb(total, std), xy=(max(total + std, left), yi),
+                    xytext=(8, 0), textcoords="offset points", ha="left", va="center",
+                    fontsize=FS_VALUE, fontweight="bold", color=TEXT_PRIMARY)
 
-    ax.set_ylim(0, max(totals + totals_std) * 1.25 if max(totals) > 0 else 1)
+    ax.set_yticks(y)
+    ax.set_yticklabels([DISPLAY_NAMES[c] for c in conditions], fontsize=FS_AXIS,
+                       color=TEXT_PRIMARY, fontweight="bold")
+    # Descending (first condition on top, matching every other panel's legend
+    # order), with a blank band above the first bar for the legend to sit in.
+    # loc="best" is not enough here: it avoids bars but not the value labels
+    # beside them, and it parked the legend on top of one. Reserving the band
+    # keeps both. Its size is in category slots, worked back from the ~1.4in
+    # the legend needs out of a panel's data area, so it holds whether two
+    # conditions are plotted or five.
+    ax.set_ylim(len(conditions) - 0.5, -0.5 - (0.32 * len(conditions) + 0.2))
+    ax.set_xlabel(xlabel, fontsize=FS_AXIS, color=TEXT_SECONDARY)
+    style_ax(ax, grid_axis="x")
 
-    ax.set_xticks(x)
-    ax.set_xticklabels([DISPLAY_NAMES[c] for c in conditions], fontsize=11, color=TEXT_PRIMARY, fontweight="bold")
-    ax.set_ylabel(ylabel, fontsize=11, color=TEXT_SECONDARY)
-    ax.set_title(title, fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
-    style_ax(ax)
+    # The direction key and the headline ratios go in one legend rather than as
+    # free-floating text, which at this type size lands on a bar or a label.
+    handles = [Patch(facecolor="#b9b9b9", edgecolor="white", linewidth=1.5, hatch=hatch,
+                     label=label) for _, label, hatch in DIRECTIONS]
+    handles += [Line2D([], [], linestyle="none", label=note) for note in ratio_notes]
+    panel_legend(ax, handles, loc="upper right")
 
 
 def _step_value_at(series, t):
@@ -673,7 +755,7 @@ def shade_capacity(ax, spans):
                    linewidth=0, zorder=0)
 
 
-def plot_coverage(ax, results, conditions, series_index, title, ylabel):
+def plot_coverage(ax, results, conditions, series_index, ylabel):
     """series_index selects which per-robot coverage series to plot out of
     the (received_bytes, sent_bytes, coverage, local_coverage, ...) tuple --
     2 for communicated (nav_map), 3 for locally-observed (map). results[c]
@@ -704,26 +786,29 @@ def plot_coverage(ax, results, conditions, series_index, title, ylabel):
             sampled = np.array([resample_step(s, grid) for s in series_per_run])
             mean = sampled.mean(axis=0)
             ax.plot(grid, mean, color=CONDITION_COLORS[cond], linestyle=robot_style[robot],
-                     linewidth=2, solid_capstyle="round", zorder=3)
+                     linewidth=2.5, solid_capstyle="round", zorder=3)
             if sampled.shape[0] > 1:
                 std = sampled.std(axis=0)
                 ax.fill_between(grid, mean - std, mean + std, color=CONDITION_COLORS[cond], alpha=0.15,
                                  linewidth=0, zorder=2)
-            ax.annotate(robot, (grid[-1], mean[-1]), textcoords="offset points",
-                        xytext=(6, 0), fontsize=8.5, color=TEXT_SECONDARY, va="center")
 
-    ax.set_xlabel("Time since run start (s)", fontsize=11, color=TEXT_SECONDARY)
-    ax.set_ylabel(ylabel, fontsize=11, color=TEXT_SECONDARY)
-    ax.set_title(title, fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
+    ax.set_xlabel("Time since run start (s)", fontsize=FS_AXIS, color=TEXT_SECONDARY)
+    ax.set_ylabel(ylabel, fontsize=FS_AXIS, color=TEXT_SECONDARY)
     style_ax(ax)
 
-    handles = [Line2D([0], [0], color=CONDITION_COLORS[c], lw=2, label=DISPLAY_NAMES[c])
+    # Robots are identified by linestyle in the legend rather than by a name
+    # annotated at each line's right end: one label per robot PER condition
+    # meant several of them stacked up in the same corner of the axes, and at
+    # publication type size they overlapped each other and ran past the axes.
+    handles = [Line2D([0], [0], color=CONDITION_COLORS[c], lw=2.5, label=DISPLAY_NAMES[c])
                for c in conditions if results[c]]
+    if len(robots) > 1:
+        handles += [Line2D([0], [0], color=TEXT_SECONDARY, lw=2, linestyle=robot_style[r], label=r)
+                    for r in robots]
     if timeline and len({kbps for _, kbps in timeline}) > 1:
         handles.append(Patch(facecolor="#7a7a7a", alpha=0.16, linewidth=0,
                              label="Reduced link capacity"))
-    if handles:
-        ax.legend(handles=handles, frameon=False, fontsize=10, loc="lower right")
+    panel_legend(ax, handles)
 
 
 def report_degradation(results, conditions):
@@ -823,42 +908,22 @@ def to_area_m2(series, resolution):
 
 
 def local_physical_union_series(run):
-    """Team physical coverage for one run, in m^2: a true keyed union of
-    every robot's self-observed cells, so ground two robots both drove over
-    counts once. Trustworthy because /map's cells key cleanly -- summing
-    local_cell_series' per-message diffs lands within ~2% of the final
-    /map snapshot's own known_area_m2, i.e. the keys really are 1:1 with
-    distinct grid cells (unlike /nav_map's, see team_known_coverage_series).
+    """Union of ever-observed SLAM cells in a shared frame, in m².
 
-    Only meaningful when read_bag was given each robot's map_offset: the
-    cells are keyed in the shared team frame, and without that every robot
-    sits in its own SLAM frame and the "union" degenerates into roughly the
-    sum. main() warns when offsets are missing for a multi-robot run."""
+    This is a map-based estimate, not ground-truth travelled floor area.
+    Includes occupied cells and can grow when SLAM moves map boundaries.
+    Spawn offsets are required for cross-robot spatial comparisons.
+    """
     return to_area_m2(union_coverage_over_time(entry[4] for entry in run.values()), run_resolution(run))
 
 
 def team_known_coverage_series(run):
-    """Team-wide known coverage for one run, in m^2, as the MAX over robots
-    of each robot's own /nav_map known_area_m2 -- deliberately NOT a keyed
-    union across robots like local_physical_union_series.
+    """Largest individual post-fusion map area, not collective team knowledge.
 
-    /nav_map's cells cannot be keyed to world positions reliably: within a
-    single message, consecutive rows collapse onto the same computed world
-    cell (~70% of a message's cells are duplicates of another cell in that
-    same message), because the grid's real row spacing disagrees with the
-    resolution it advertises. That aliasing is lossy and irreversible here
-    -- two genuinely different patches of ground arrive sharing one key, so
-    unioning by key undercounts by ~4x (67.6 m^2 built from the cell series
-    vs. 263.8 m^2 in that same robot's own final /nav_map snapshot). The
-    real fix belongs upstream in per_robot_map_compositor.py, which builds
-    /nav_map; this is the best the plotting side can do until then.
-
-    known_area_m2 just counts non-unknown cells in one message and never
-    derives world positions, so it is immune to that aliasing. Taking the
-    max across robots (rather than a sum) keeps the number honest: fusion
-    is supposed to converge every robot's nav_map onto the same team-wide
-    picture, so the best-informed robot's own map is a sound stand-in for
-    what the team collectively knows, and no cell is ever counted twice."""
+    This includes the robot's own observations, so it is not an amount of
+    communicated information or a delivery fraction. Independent runs explore
+    different ground; an unimpaired run is not a numerical upper bound.
+    """
     series_by_robot = [entry[2] for entry in run.values() if entry[2]]
     if not series_by_robot:
         return []
@@ -878,7 +943,7 @@ def cumulative_count_series(cell_series):
     is ever emitted twice. If that ever regresses to diffing against just the
     previous message, pose-graph re-anchoring re-emits whole maps and this
     count inflates without bound -- see the comment in read_bag, and the
-    ceiling assertion in run_redundant_series."""
+    overlap accounting in run_redundant_series."""
     total = 0
     out = []
     for t, cells in cell_series:
@@ -888,53 +953,43 @@ def cumulative_count_series(cell_series):
 
 
 def run_redundant_series(run, cell_index):
-    """For one run, (t, redundant_cell_count) over time: the sum of every
-    robot's own cumulative cell count minus the team union
-    (union_coverage_over_time) at the same instant. Both quantities are
-    non-decreasing and the union can never exceed the sum (a cell known
-    team-wide is known by at least one robot), so this difference is
-    itself non-decreasing -- it only grows when a robot observes a cell
-    some teammate already claimed, i.e. genuinely wasted, redundant
-    physical exploration of ground someone else already covered. cell_index
-    should be 4 (local_cell_series, self-observed only) -- redundancy in
-    the fused/nav_map series (5) would count peer-relayed knowledge as
-    "coverage" too, which was never independently (re)observed and isn't
-    wasted effort."""
-    cell_series_by_robot = {r: entry[cell_index] for r, entry in run.items()}
-    merged_union = union_coverage_over_time(cell_series_by_robot.values())
-    if not merged_union:
-        return []
-    grid = np.array([p[0] for p in merged_union])
-    union_vals = np.array([p[1] for p in merged_union], dtype=float)
-    total = np.zeros(len(grid))
-    for series in cell_series_by_robot.values():
-        total += resample_step(cumulative_count_series(series), grid)
-    redundant_vals = total - union_vals
-    # A cell counted as redundant was seen by at least two robots, so the most
-    # redundancy possible is every robot seeing the whole union:
-    # n * union - union. Breaching that means the per-robot cumulative counts
-    # are double-counting -- the failure mode read_bag's running-union diff
-    # exists to prevent. Cheap invariant, and the only thing that made the
-    # original 6-17x inflation visible without recomputing from the bags.
-    ceiling = (len(cell_series_by_robot) - 1) * union_vals
-    breach = redundant_vals > ceiling + 1e-6
-    if breach.any():
-        i = int(np.argmax(redundant_vals - ceiling))
-        print(f"warning: redundant area {redundant_vals[i]:.1f} cells exceeds its "
-              f"{ceiling[i]:.1f} ceiling at t={grid[i]:.0f}s "
-              f"({int(breach.sum())}/{len(grid)} samples) -- per-robot cell "
-              f"series are double-counting; re-export summaries from the bags",
-              file=sys.stderr)
-    return list(zip(grid.tolist(), redundant_vals.tolist()))
+    """Area tiles observed by at least two distinct robots, counted once.
+
+    Three robots observing one tile still contribute one overlap tile.
+    Merge simultaneous updates before reporting to avoid order-dependent values.
+    """
+    events = sorted(((t, robot, cells) for robot, entry in run.items()
+                     for t, cells in entry[cell_index]), key=lambda e: e[0])
+    seen = {robot: set() for robot in run}
+    owners = {}
+    overlap = 0
+    out = []
+    for t, robot, cells in events:
+        for cell in cells.tolist():
+            if cell in seen[robot]:
+                continue
+            seen[robot].add(cell)
+            owners[cell] = owners.get(cell, 0) + 1
+            if owners[cell] == 2:
+                overlap += 1
+        if out and out[-1][0] == t:
+            out[-1] = (t, overlap)
+        else:
+            out.append((t, overlap))
+    return out
 
 
-def plot_redundant_coverage(ax, results, conditions, cell_index, title):
+def plot_redundant_coverage(ax, results, conditions, cell_index):
     """Redundant physical coverage over time: cells more than one robot
-    independently drove to and observed with its own sensors, i.e. wasted
-    territory-overlap effort (see run_redundant_series). results[c] is a
+    independently drove to and observed with its own sensors, i.e. sensor-map overlap (see run_redundant_series). results[c] is a
     list of per-run {robot: entry} dicts -- each run's redundant series is
     resampled (resample_step) onto a shared time grid and averaged, with a
     +/- std band across runs when more than one is given."""
+    # Each curve's end-of-run value goes into its legend entry instead of being
+    # annotated past the right end of the line: curves that finish close
+    # together printed their labels on top of one another, and the annotation
+    # itself sat outside the axes.
+    handles = []
     for cond in conditions:
         runs = results[cond]
         redundant_per_run = [to_area_m2(run_redundant_series(run, cell_index), run_resolution(run)) for run in runs]
@@ -944,25 +999,19 @@ def plot_redundant_coverage(ax, results, conditions, cell_index, title):
         grid = np.linspace(0, min(max_ts), 200)
         sampled = np.array([resample_step(m, grid) for m in redundant_per_run if m])
         mean = sampled.mean(axis=0)
-        ax.plot(grid, mean, color=CONDITION_COLORS[cond], linewidth=2, solid_capstyle="round", zorder=3)
-        label = f"{mean[-1]:,.1f} m²"
+        ax.plot(grid, mean, color=CONDITION_COLORS[cond], linewidth=2.5, solid_capstyle="round", zorder=3)
+        label = f"{DISPLAY_NAMES[cond]} — {mean[-1]:,.1f} m²"
         if sampled.shape[0] > 1:
             std = sampled.std(axis=0)
             ax.fill_between(grid, np.maximum(mean - std, 0), mean + std, color=CONDITION_COLORS[cond],
                              alpha=0.15, linewidth=0, zorder=2)
             label += f" ± {std[-1]:,.1f}"
-        ax.annotate(label, (grid[-1], mean[-1]), textcoords="offset points",
-                    xytext=(6, 0), fontsize=8.5, fontweight="bold", color=CONDITION_COLORS[cond], va="center")
+        handles.append(Line2D([0], [0], color=CONDITION_COLORS[cond], lw=2.5, label=label))
 
-    ax.set_xlabel("Time since run start (s)", fontsize=11, color=TEXT_SECONDARY)
-    ax.set_ylabel("Redundant coverage (m², seen by >1 robot)", fontsize=11, color=TEXT_SECONDARY)
-    ax.set_title(title, fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
+    ax.set_xlabel("Time since run start (s)", fontsize=FS_AXIS, color=TEXT_SECONDARY)
+    ax.set_ylabel("Redundant coverage (m², seen by >1 robot)", fontsize=FS_AXIS, color=TEXT_SECONDARY)
     style_ax(ax)
-
-    handles = [Line2D([0], [0], color=CONDITION_COLORS[c], lw=2, label=DISPLAY_NAMES[c])
-               for c in conditions if results[c]]
-    if handles:
-        ax.legend(handles=handles, frameon=False, fontsize=10, loc="lower right")
+    panel_legend(ax, handles)
 
 
 def summarize(results, conditions):
@@ -994,10 +1043,9 @@ def summarize(results, conditions):
             "physical": (physical_mean, physical_std),
             "known": (known_mean, known_std),
             "redundant": (redundant_mean, redundant_std),
-            # Share of what the team physically covered that reached the
-            # rest of the team, and share that was re-covered ground -- both
-            # meaningless without a denominator, hence 0.0 when there is none.
-            "propagated_pct": (100 * known_mean / physical_mean if physical_mean else 0.0, 0.0),
+            # Descriptive map-area ratio, not a communication delivery fraction.
+            # Overlap is unique area seen by two or more robots.
+            "known_to_physical_pct": (100 * known_mean / physical_mean if physical_mean else 0.0, 0.0),
             "redundant_pct": (100 * redundant_mean / physical_mean if physical_mean else 0.0, 0.0),
         }
     return summary
@@ -1012,8 +1060,8 @@ SUMMARY_COLUMNS = (
     ("sent", "Sent (KB)", "sent_kb", 1 / 1024, 1),
     ("received", "Received (KB)", "received_kb", 1 / 1024, 1),
     ("physical", "Physical (m²)", "physical_m2", 1.0, 1),
-    ("known", "Known (m²)", "known_m2", 1.0, 1),
-    ("propagated_pct", "Propagated (%)", "propagated_pct", 1.0, 1),
+    ("known", "Largest map (m²)", "known_m2", 1.0, 1),
+    ("known_to_physical_pct", "Largest map / union (%)", "known_to_physical_pct", 1.0, 1),
     ("redundant", "Redundant (m²)", "redundant_m2", 1.0, 1),
     ("redundant_pct", "Redundant (%)", "redundant_pct", 1.0, 1),
 )
@@ -1074,18 +1122,16 @@ def format_summary_table(summary, conditions, style):
     return "\n".join([line(headers), "  ".join("-" * w for w in widths)] + [line(r) for r in rows])
 
 
-def plot_union_coverage(ax, results, conditions, series_fn, title, ylabel):
-    """Team-wide map coverage over time, in m^2. series_fn turns one run's
-    {robot: entry} dict into that run's (t, area_m2) curve -- pass
-    local_physical_union_series for "how much ground has the team
-    physically laid eyes on" (a real keyed union across robots, so a patch
-    two robots both drove over counts once), or team_known_coverage_series
-    for "how much does the team collectively know", including peer-relayed
-    cells -- the one that moves when communication improves, since
-    self-observed coverage structurally can't show it. results[c] is a list
-    of per-run {robot: entry} dicts -- each run's curve is resampled
-    (resample_step) onto a shared time grid and averaged, with a +/- std
-    band when more than one run contributes."""
+def plot_union_coverage(ax, results, conditions, series_fn, ylabel):
+    """Plot a per-run map-area statistic with mean and standard deviation.
+
+    local_physical_union_series estimates observed map union;
+    team_known_coverage_series measures the largest individual known map.
+    Neither is a ground-truth exploration or communication-success metric.
+    """
+    # End-of-run value carried in the legend entry, not annotated past the
+    # right end of the line -- see plot_redundant_coverage.
+    handles = []
     for cond in conditions:
         runs = results[cond]
         merged_per_run = [series_fn(run) for run in runs]
@@ -1095,25 +1141,19 @@ def plot_union_coverage(ax, results, conditions, series_fn, title, ylabel):
         grid = np.linspace(0, min(max_ts), 200)
         sampled = np.array([resample_step(m, grid) for m in merged_per_run if m])
         mean = sampled.mean(axis=0)
-        ax.plot(grid, mean, color=CONDITION_COLORS[cond], linewidth=2, solid_capstyle="round", zorder=3)
-        label = f"{mean[-1]:,.1f} m²"
+        ax.plot(grid, mean, color=CONDITION_COLORS[cond], linewidth=2.5, solid_capstyle="round", zorder=3)
+        label = f"{DISPLAY_NAMES[cond]} — {mean[-1]:,.1f} m²"
         if sampled.shape[0] > 1:
             std = sampled.std(axis=0)
             ax.fill_between(grid, mean - std, mean + std, color=CONDITION_COLORS[cond], alpha=0.15,
                              linewidth=0, zorder=2)
             label += f" ± {std[-1]:,.1f}"
-        ax.annotate(label, (grid[-1], mean[-1]), textcoords="offset points",
-                    xytext=(6, 0), fontsize=8.5, fontweight="bold", color=CONDITION_COLORS[cond], va="center")
+        handles.append(Line2D([0], [0], color=CONDITION_COLORS[cond], lw=2.5, label=label))
 
-    ax.set_xlabel("Time since run start (s)", fontsize=11, color=TEXT_SECONDARY)
-    ax.set_ylabel(ylabel, fontsize=11, color=TEXT_SECONDARY)
-    ax.set_title(title, fontsize=13, fontweight="bold", color=TEXT_PRIMARY, loc="left")
+    ax.set_xlabel("Time since run start (s)", fontsize=FS_AXIS, color=TEXT_SECONDARY)
+    ax.set_ylabel(ylabel, fontsize=FS_AXIS, color=TEXT_SECONDARY)
     style_ax(ax)
-
-    handles = [Line2D([0], [0], color=CONDITION_COLORS[c], lw=2, label=DISPLAY_NAMES[c])
-               for c in conditions if results[c]]
-    if handles:
-        ax.legend(handles=handles, frameon=False, fontsize=10, loc="lower right")
+    panel_legend(ax, handles)
 
 
 def main():
@@ -1219,36 +1259,45 @@ def main():
 
     # (panel name, plot function, args) -- shared between the combined
     # multi-panel layout and --separate-figures' one-file-per-panel layout.
+    # No panel titles anywhere: each y-axis label now states what the panel
+    # measures, so the figure carries no text a journal caption would repeat.
+    # "sent" and "received" are one panel -- plot_bandwidth draws both.
     panels = [
-        ("sent", plot_bandwidth, (results, conditions, 1, "Map-sharing bandwidth (sent)", "Sent to peers (KB)")),
-        ("received", plot_bandwidth, (results, conditions, 0, "Map-sharing bandwidth (received)", "Received from peers (KB)")),
-        ("coverage", plot_coverage, (results, conditions, 2, "Communicated map coverage", "Known map area (m²)")),
-        ("local", plot_coverage, (results, conditions, 3, "Locally-observed coverage (self only)", "Self-observed area (m²)")),
+        ("bandwidth", plot_bandwidth, (results, conditions, "Map and coordination data volume (KB, log scale)")),
+        ("coverage", plot_coverage, (results, conditions, 2, "Known map area (m², incl. peer-relayed)")),
+        ("local", plot_coverage, (results, conditions, 3, "Self-observed map area (m²)")),
         ("union", plot_union_coverage, (results, conditions, local_physical_union_series,
-                                        "Team physical coverage over time (union, self-observed only)",
-                                        "Known area (m², union across robots)")),
+                                        "Observed map union (m², SLAM estimate)")),
         ("union_nav", plot_union_coverage, (results, conditions, team_known_coverage_series,
-                                            "Team known coverage over time (incl. peer-relayed)",
-                                            "Known area (m², best-informed robot)")),
-        ("redundant", plot_redundant_coverage, (results, conditions, 4, "Redundant physical coverage (territory overlap)")),
+                                            "Largest individual known map (m²)")),
+        ("redundant", plot_redundant_coverage, (results, conditions, 4)),
     ]
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     if args.separate_figures:
         for name, plot_fn, plot_args in panels:
-            panel_fig, ax = plt.subplots(figsize=(7, 5.5))
+            panel_fig, ax = plt.subplots(figsize=PANEL_SIZE)
             plot_fn(ax, *plot_args)
-            panel_fig.tight_layout()
+            panel_fig.tight_layout(pad=1.2)
             panel_out = args.out.with_name(f"{args.out.stem}_{name}{args.out.suffix}")
             panel_fig.savefig(panel_out, dpi=200, facecolor="white")
             plt.close(panel_fig)
     else:
-        fig, axes = plt.subplots(1, len(panels), figsize=(43, 5.5))
-        for ax, (name, plot_fn, plot_args) in zip(axes, panels):
+        # Grid rather than one long row: at publication type size a 1xN strip
+        # has to be scaled down so far to fit a page that the larger text buys
+        # nothing back. Each cell keeps PANEL_SIZE, the same geometry
+        # --separate-figures gives a panel, so type reads identically either way.
+        ncols = min(3, len(panels))
+        nrows = math.ceil(len(panels) / ncols)
+        fig, axes = plt.subplots(nrows, ncols, squeeze=False,
+                                 figsize=(PANEL_SIZE[0] * ncols, PANEL_SIZE[1] * nrows))
+        flat = axes.ravel()
+        for ax, (name, plot_fn, plot_args) in zip(flat, panels):
             plot_fn(ax, *plot_args)
-        fig.suptitle("Map sharing: " + " vs. ".join(DISPLAY_NAMES[c] for c in conditions), fontsize=15,
-                     fontweight="bold", color=TEXT_PRIMARY, x=0.02, ha="left")
-        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        for ax in flat[len(panels):]:
+            ax.set_visible(False)
+        # No suptitle -- see panels above.
+        fig.tight_layout(pad=2.0)
         fig.savefig(args.out, dpi=200, facecolor="white")
 
     # Per-condition totals, computed once for both the lines below and --table.
@@ -1285,7 +1334,7 @@ def main():
         nav_suffix = f" ± {known_std:.1f}" if n > 1 else ""
         print(f"{DISPLAY_NAMES[condition]:>10} team physical coverage (union, self-observed only): "
               f"{physical_mean:,.1f}{local_suffix} m²; "
-              f"team known coverage (best-informed robot, incl. peer-relayed): "
+              f"largest individual known map (incl. peer-relayed): "
               f"{known_mean:,.1f}{nav_suffix} m²")
     for condition in conditions:
         n = summary[condition]["runs"]

@@ -48,6 +48,10 @@ def _load_yaml(path):
 # frontier-selection node with optional map-only robot-rank allocation.
 _LITE_PARAM_KEYS = (
     "costmap_topic",
+    "information_occ_threshold",
+    "reservation_ttl_s",
+    "reservation_radius_m",
+    "min_gain_m2",
     "global_frame",
     "robot_base_frame",
     "min_frontier_size_cells",
@@ -101,6 +105,11 @@ def _frontier_params(base_path, namespace, use_sim_time, color_255, robot_index=
     params["robot_index"] = robot_index
     params["team_size"] = team_size
     params["costmap_topic"] = f"/{namespace}/global_costmap/costmap"
+    params["reservation_topic"] = f"/{namespace}/explore/reservation"
+    params["reservation_peer_topics"] = [
+        f"/{namespace}/incoming/robot{i+1}/reservation" if i != robot_index else ""
+        for i in range(team_size)]
+    params["information_map_topic"] = f"/{namespace}/nav_map"
     params["global_frame"] = "map"
     params["robot_base_frame"] = f"{namespace}/base_footprint"
     params["frontier_marker_topic"] = f"/{namespace}/explore/frontiers"

@@ -1,18 +1,20 @@
-"""Minimal frontier explorer: watches nav2's global costmap, selects a
-reachable viewpoint by observable gain, and hands it to a NavigateToPose
-action client. Optional robot-rank allocation uses only the available map;
-there is no peer goal channel or map fusion of its own. The
-costmap it reads already reflects whatever teammates' data has been
-relayed in by the active map_transport (baseline/vxch/zstd) and fused into
-nav_map upstream.
+"""Choose frontier work from delivered maps and expiring peer reservations.
+
+Nav2 supplies reachability costs. Occupancy maps supply information gain.
+Reservation inputs must be relayed through the experiment's impaired links.
 """
 
 import math
+
+import numpy as np
 
 import rclpy
 from action_msgs.msg import GoalStatus
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
+from geometry_msgs.msg import PoseArray, Pose
+from rclpy.qos import qos_profile_sensor_data
+from lite_frontier_explorer.reservations import GoalReservations
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
@@ -21,8 +23,11 @@ from tf2_ros.transform_listener import TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 
 from lite_frontier_explorer.frontier_detection import (
+    _free_space_distances,
+    align_information_grid,
     cluster_centroid_world,
     find_frontier_clusters,
+    occupancy_constrained_costmap,
     select_best_frontier,
     select_nearest_frontier,
     select_nearest_high_gain_frontier,
@@ -49,12 +54,19 @@ class LiteFrontierExplorer(Node):
         self.declare_parameter('goal_blacklist_radius_m', 1.0)
         self.declare_parameter('occ_threshold', 50)
         self.declare_parameter('path_occ_threshold', 99)
+        self.declare_parameter('information_map_topic', '')
+        self.declare_parameter('information_occ_threshold', 50)
         # visible_gain scores wall-occluded unknown area at reachable viewpoints.
         # nearest, best_gain and nearest_high_gain remain as legacy comparisons.
         self.declare_parameter('selection_strategy', 'visible_gain')
         self.declare_parameter('frontier_assignment', 'independent')
         self.declare_parameter('robot_index', 0)  # zero-based, supplied by launch
         self.declare_parameter('team_size', 1)
+        self.declare_parameter('reservation_topic', '')
+        self.declare_parameter('reservation_peer_topics', [''])
+        self.declare_parameter('reservation_ttl_s', 8.0)
+        self.declare_parameter('reservation_radius_m', 6.0)
+        self.declare_parameter('min_gain_m2', 0.5)
         self.declare_parameter('sensor_range_m', 3.0)
         self.declare_parameter('gain_max_viewpoints', 5)
         self.declare_parameter('gain_distance_weight', 1.0)
@@ -125,6 +137,8 @@ class LiteFrontierExplorer(Node):
         # it or goal_stuck_timeout_s fires. Committing is what lets a goal
         # FAIL, and a failure is the only thing that puts an unreachable
         # frontier in the blacklist -- thrashing forever never does.
+        # Legacy selectors only: visible_gain always compares current map
+        # utility with ratio hysteresis, so new evidence can change a decision.
         # 0 disables the backstop.
         self.declare_parameter('max_consecutive_preemptions', 3)
         # Distinguishing "this frontier is unreachable" from "this ROBOT is
@@ -255,11 +269,32 @@ class LiteFrontierExplorer(Node):
         # experimental variable.
         self._ready_since = None
 
+        self._information_map_topic = self.get_parameter('information_map_topic').value
+        self._information_occ_threshold = int(self.get_parameter('information_occ_threshold').value)
+        if not 0 < self._information_occ_threshold <= 100:
+            raise ValueError('information_occ_threshold must be in 1..100')
+        self._reservation_topic = self.get_parameter('reservation_topic').value
+        self._reservation_radius_m = float(self.get_parameter('reservation_radius_m').value)
+        self._min_gain_m2 = float(self.get_parameter('min_gain_m2').value)
+        self._reservations = GoalReservations(float(self.get_parameter('reservation_ttl_s').value))
+        if self._reservation_radius_m <= 0 or self._min_gain_m2 < 0 or self._reservations.ttl <= 0:
+            raise ValueError('invalid reservation/gain parameters')
+        if self._reservation_topic:
+            self._reservation_pub = self.create_publisher(PoseArray, self._reservation_topic, 1)
+            for peer, topic in enumerate(self.get_parameter('reservation_peer_topics').value):
+                if topic:
+                    self.create_subscription(PoseArray, topic,
+                        lambda msg, peer=peer: self._on_reservation(peer, msg), qos_profile_sensor_data)
+            self.create_timer(1.0, self._publish_reservation)
+        self._latest_information_map = None
         self._latest_costmap = None
         self._goal_active = False
         self._goal_handle = None
         self._preempting = False
         self._pending_goal_xy = None
+        self._invalid_goal_key = None
+        self._invalid_goal_last_map = None
+        self._invalid_goal_count = 0
         self._blacklisted_goals = []
         self._last_goal_direction = None  # (dx, dy) of the most recently sent goal
         # Consecutive preemptions since the last goal reached a terminal state.
@@ -281,12 +316,37 @@ class LiteFrontierExplorer(Node):
 
         self.create_subscription(
             OccupancyGrid, self._costmap_topic, self._on_costmap, 1)
+        if self._information_map_topic:
+            self.create_subscription(OccupancyGrid, self._information_map_topic,
+                                     self._on_information_map, 1)
         self.create_timer(replan_period_s, self._tick)
 
         self.get_logger().info(
             f"lite_frontier_explorer: watching '{self._costmap_topic}', "
             f"assignment={'robot_rank' if self._rank_assignment else 'independent'}, "
-            f"robot={self._robot_index + 1}/{self._team_size}")
+            f"robot={self._robot_index + 1}/{self._team_size}, "
+            f"reservations={bool(self._reservation_topic)}")
+
+    def _publish_reservation(self):
+        msg = PoseArray()
+        msg.header.frame_id = self._global_frame
+        msg.header.stamp = self.get_clock().now().to_msg()
+        if self._goal_active and not self._preempting and not self._abandoning_stuck and self._pending_goal_xy:
+            pose = Pose()
+            pose.position.x, pose.position.y = self._pending_goal_xy
+            pose.orientation.w = 1.0
+            msg.poses = [pose]
+        self._reservation_pub.publish(msg)
+
+    def _on_reservation(self, peer, msg):
+        if msg.header.frame_id != self._global_frame or len(msg.poses) > 1:
+            return
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
+        goal = (msg.poses[0].position.x, msg.poses[0].position.y) if msg.poses else None
+        self._reservations.receive(peer, stamp, goal, self.get_clock().now().nanoseconds / 1e9)
+
+    def _on_information_map(self, msg):
+        self._latest_information_map = msg
 
     def _on_costmap(self, msg):
         self._latest_costmap = msg
@@ -337,9 +397,27 @@ class LiteFrontierExplorer(Node):
                     throttle_duration_sec=15.0)
                 return
 
+        information_grid = None
+        information_threshold = 100  # Legacy standalone costmap-only mode.
+        frontier_data = costmap.data
+        frontier_threshold = self._occ_threshold
+        if self._selection_strategy == 'visible_gain' and self._information_map_topic:
+            if self._latest_information_map is None:
+                self.get_logger().info('Waiting for occupancy map to score exploration gain.',
+                                       throttle_duration_sec=10.0)
+                return
+            try:
+                information_grid = align_information_grid(self._latest_information_map, costmap)
+            except ValueError as exc:
+                self.get_logger().warn(str(exc), throttle_duration_sec=10.0)
+                return
+            information_threshold = self._information_occ_threshold
+            frontier_data = information_grid.ravel()
+            frontier_threshold = information_threshold
+
         clusters = find_frontier_clusters(
-            costmap.data, costmap.info.width, costmap.info.height,
-            occ_threshold=self._occ_threshold, min_size=self._min_frontier_size,
+            frontier_data, costmap.info.width, costmap.info.height,
+            occ_threshold=frontier_threshold, min_size=self._min_frontier_size,
         )
 
         # Classify every detected cluster so the markers can show *why* a
@@ -387,10 +465,14 @@ class LiteFrontierExplorer(Node):
                 # and distance gates must not renumber other robots' ranks.
                 candidates = clusters
 
+        reservations = (self._reservations.active(self.get_clock().now().nanoseconds / 1e9)
+                        if self._reservation_topic else {})
+        # Every new assignment respects every live claim. Simultaneous claims
+        # are resolved below by static robot index, so exactly one yields.
         goal = None
         active_score = {}
         selected_utility = None
-        if candidates:
+        if candidates or (self._selection_strategy == 'visible_gain' and self._goal_active):
             if self._selection_strategy == 'visible_gain':
                 scores = []
                 goal = select_visible_gain_frontier(
@@ -408,6 +490,11 @@ class LiteFrontierExplorer(Node):
                     robot_index=self._robot_index, team_size=self._team_size,
                     blacklisted_goals=self._blacklisted_goals,
                     blacklist_radius_m=self._goal_blacklist_radius_m,
+                    information_grid=information_grid,
+                    information_occ_threshold=information_threshold,
+                    reserved_goals=list(reservations.values()),
+                    reservation_radius_m=self._reservation_radius_m,
+                    min_gain_m2=self._min_gain_m2,
                 )
                 selected_utility = next((s['utility'] for s in scores
                                          if (s['x'], s['y']) == goal), None)
@@ -460,6 +547,84 @@ class LiteFrontierExplorer(Node):
         self._publish_frontier_markers(cluster_xy, cluster_status, goal)
 
         if self._goal_active:
+            # Invalid active viewpoints previously returned {}, which made
+            # the utility comparison fail forever. Require two distinct map
+            # updates to reject a goal, so a transient costmap obstruction
+            # does not cause churn. Missing scores are not invalidity evidence.
+            invalid = active_score.get('status') in (
+                'outside_map', 'blocked_or_unknown', 'unreachable')
+            if not invalid or self._invalid_goal_key != self._pending_goal_xy:
+                self._invalid_goal_count = 0
+                self._invalid_goal_last_map = None
+            self._invalid_goal_key = self._pending_goal_xy
+            evidence = (costmap, self._latest_information_map
+                        if information_grid is not None else None)
+            fresh_evidence = (self._invalid_goal_last_map is None or any(
+                old is not new for old, new in zip(self._invalid_goal_last_map, evidence)))
+            if invalid and fresh_evidence:
+                self._invalid_goal_count += 1
+                self._invalid_goal_last_map = evidence
+            if (invalid and self._invalid_goal_count >= 2 and goal is not None
+                    and not self._preempting and not self._abandoning_stuck):
+                self.get_logger().info(
+                    f"Replacing invalid goal {self._pending_goal_xy}: "
+                    f"{active_score['status']} on {self._invalid_goal_count} map updates; "
+                    f"reachable unreserved alternative={goal}.")
+                self._preempting = True
+                self._preempt_streak = 0
+                if self._goal_handle is not None:
+                    self._goal_handle.cancel_goal_async()
+                return
+
+            # A delivered lower-index claim wins a simultaneous conflict.
+            # Use the same free-space distance as candidate exclusion.
+            conflicting_peer = None
+            if self._pending_goal_xy is not None:
+                reservation_data = costmap.data
+                if information_grid is not None:
+                    reservation_data = occupancy_constrained_costmap(
+                        np.asarray(costmap.data, dtype=np.int8).reshape(
+                            costmap.info.height, costmap.info.width),
+                        information_grid, information_threshold).ravel()
+                row = math.floor((self._pending_goal_xy[1] - costmap.info.origin.position.y) / costmap.info.resolution)
+                col = math.floor((self._pending_goal_xy[0] - costmap.info.origin.position.x) / costmap.info.resolution)
+                for peer, (x, y) in reservations.items():
+                    if peer >= self._robot_index:
+                        continue
+                    distances = _free_space_distances(reservation_data, costmap.info.width,
+                        costmap.info.height, x, y, costmap.info.resolution,
+                        costmap.info.origin.position.x, costmap.info.origin.position.y,
+                        self._path_occ_threshold)
+                    if (0 <= row < costmap.info.height and 0 <= col < costmap.info.width
+                            and 0 <= distances[row, col] * costmap.info.resolution <= self._reservation_radius_m):
+                        conflicting_peer = peer
+                        break
+            if conflicting_peer is not None and not self._preempting and not self._abandoning_stuck:
+                self.get_logger().info(f'Yielding goal {self._pending_goal_xy} to robot{conflicting_peer + 1} reservation.')
+                self._preempting = True
+                self._preempt_streak = 0
+                if self._goal_handle is not None:
+                    self._goal_handle.cancel_goal_async()
+                return
+
+            # Map delivery must affect work already in progress, including
+            # robot-rank assignments. A valid viewpoint with no unknown area
+            # left cannot gather information; don't finish a redundant trip.
+            # Missing/unreachable scores are not proof of completion.
+            if (not self._preempting and not self._abandoning_stuck
+                    and self._selection_strategy == 'visible_gain'
+                    and active_score.get('gain_m2', math.inf) <= self._min_gain_m2):
+                self.get_logger().info(
+                    f"Cancelling explored frontier {self._pending_goal_xy}: "
+                    f"remaining gain {active_score['gain_m2']:.3f} m² is below the useful-work threshold.")
+                self._preempting = True
+                # Completion by observation isn't rank churn and shouldn't
+                # consume the ordinary utility-switching budget.
+                self._preempt_streak = 0
+                if self._goal_handle is not None:
+                    self._goal_handle.cancel_goal_async()
+                return
+
             # Abandon a goal the robot is not actually getting anywhere with,
             # rather than waiting out nav2's full recovery chain.
             if (self._goal_stuck_timeout_s > 0.0 and not self._preempting
@@ -539,14 +704,15 @@ class LiteFrontierExplorer(Node):
             # the markers show the newly identified frontier while the
             # robot keeps executing whatever goal was in flight when it was
             # found, which looks like it's ignoring the frontier entirely.
-            committed = (self._max_consecutive_preemptions > 0
+            committed = (self._selection_strategy != 'visible_gain'
+                         and self._max_consecutive_preemptions > 0
                          and self._preempt_streak >= self._max_consecutive_preemptions)
             if (not self._preempting and goal is not None
                     and self._pending_goal_xy is not None
-                    # Assignment ranks change as maps grow. Finish the current
-                    # goal (or recover/fail) before taking another rank; chasing
-                    # each rank swap would make robots repeatedly exchange goals.
-                    and not self._rank_assignment
+                    # Rank membership alone cannot justify switching, but a
+                    # materially better travel-adjusted utility can. The same
+                    # ratio applies to every assignment mode. A lifetime
+                    # switching budget must not override new map evidence.
                     and not committed
                     and math.hypot(goal[0] - self._pending_goal_xy[0],
                                     goal[1] - self._pending_goal_xy[1])
@@ -559,7 +725,7 @@ class LiteFrontierExplorer(Node):
                 new_dist = math.hypot(goal[0] - robot_pose[0],
                                       goal[1] - robot_pose[1])
                 if self._selection_strategy == 'visible_gain':
-                    improved = (selected_utility is not None and bool(active_score)
+                    improved = (selected_utility is not None and 'utility' in active_score
                                 and selected_utility > self._goal_preempt_utility_ratio * active_score['utility'])
                     reason = f'higher-utility frontier (utility={selected_utility})'
                 else:
@@ -596,7 +762,7 @@ class LiteFrontierExplorer(Node):
 
         if goal is None:
             self.get_logger().info(
-                "No frontiers beyond min_frontier_distance_m -- waiting.",
+                "No usable unreserved frontier above the gain/distance limits -- waiting.",
                 throttle_duration_sec=10.0)
             return
 

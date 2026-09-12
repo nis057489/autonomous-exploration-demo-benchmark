@@ -51,23 +51,10 @@ class PerRobotMapCompositor(Node):
         self.declare_parameter("offset_yaw", 0.0)
         self.declare_parameter("publish_rate_hz", 2.0)
         self.declare_parameter("team_map_stale_threshold_s", 8.0)
-        # A peer's own lidar legitimately sees this robot and marks it
-        # occupied in the peer's local map; that observation is real and
-        # correct in team_map_ddil. But this robot's own SLAM can't see the
-        # ground directly under itself (lidar min_range / self-occlusion),
-        # so nothing reliably overwrites that peer-sourced "occupied" cell
-        # with a fresh "free" reading once it lands under the robot's own
-        # current position -- the robot ends up standing on a cell its own
-        # nav_map calls an obstacle, which starves the frontier BFS/costmap
-        # of a valid place to move from. self_clear_radius_m forces a disc
-        # around the robot's live pose to free (0) after every other merge
-        # step, regardless of source. Sized a bit past the footprint's
-        # circumscribed radius (~0.29m for the current 0.22x0.19 footprint,
-        # see config/navigation.yaml) so it covers the whole body, not just
-        # its center cell. Default is padded well past that (~1m) so that
-        # any peer-sourced obstacle anywhere near the robot's own body is
-        # forced clear, rather than trying to match the footprint exactly.
-        self.declare_parameter("self_clear_radius_m", 1.0)
+        # Peer maps may contain this robot as a stale obstacle. Clear only
+        # near its footprint, before stamping fresh local observations so
+        # local walls always win. Current footprint circumradius is ~0.29 m.
+        self.declare_parameter("self_clear_radius_m", 0.30)
 
         robot_name = self.get_parameter("robot_name").value
         if not robot_name:
@@ -126,35 +113,25 @@ class PerRobotMapCompositor(Node):
 
     def _clear_self_in_canvas(
         self, canvas: np.ndarray, origin_x: float, origin_y: float, res: float,
+        frame_id: str = "map",
     ):
-        """Force a disc of radius self_clear_radius_m around this robot's live
-        pose (looked up via TF, not the stale spawn offset) to free (0) --
-        see self_clear_radius_m's declaration for why this has to run after
-        every other merge step, unconditionally. A TF lookup failure (e.g.
-        no transform published yet, right at startup) just skips clearing
-        for this cycle -- not fatal, the next publish tries again."""
+        """Clear peer obstacles near the footprint in the canvas frame.
+
+        TF already composes the spawn transform. Never apply it a second
+        time. Local observations are stamped after this operation, and
+        unknown cells are never fabricated as free space.
+        """
         if self._self_clear_radius_m <= 0.0:
             return
         try:
             transform = self._tf_buffer.lookup_transform(
-                "map", f"{self._robot_name}/base_footprint", Time())
+                frame_id, f"{self._robot_name}/base_footprint", Time())
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
                 tf2_ros.ExtrapolationException):
             return
 
-        # This TF lookup is "map" -> base_footprint in the ROBOT'S OWN local
-        # SLAM frame, not the shared canvas frame (canvas uses origin_x/
-        # origin_y in the globally-offset frame built from this robot's
-        # spawn offset, same as every other geometry conversion in this
-        # file -- see _local_to_global / _local_global_bounds). Skipping
-        # this transform means the cleared disc lands at the wrong spot on
-        # the canvas whenever offset_x/offset_y/offset_yaw is non-zero
-        # (i.e. any real multi-robot run), leaving the true obstacle under
-        # the robot's footprint uncleared -- which is the exact bug this
-        # method exists to prevent.
-        robot_x, robot_y = _apply_pose(
-            self._offset_x, self._offset_y, self._offset_yaw,
-            transform.transform.translation.x, transform.transform.translation.y)
+        robot_x = transform.transform.translation.x
+        robot_y = transform.transform.translation.y
 
         out_h, out_w = canvas.shape
         radius_cells = self._self_clear_radius_m / res
@@ -170,7 +147,7 @@ class PerRobotMapCompositor(Node):
 
         rows = np.arange(row0, row1).reshape(-1, 1)
         cols = np.arange(col0, col1).reshape(1, -1)
-        within_radius = (rows - center_row) ** 2 + (cols - center_col) ** 2 <= radius_cells ** 2
+        within_radius = (rows + 0.5 - center_row) ** 2 + (cols + 0.5 - center_col) ** 2 <= radius_cells ** 2
         region = canvas[row0:row1, col0:col1]
         # Only clear cells the merge actually marked occupied (>0) --
         # never touch unknown (-1) cells. Clearing unconditionally
@@ -280,8 +257,8 @@ class PerRobotMapCompositor(Node):
         canvas = np.full((height, width), -1, dtype=np.int8)
         if not suppress_team:
             self._copy_team_cells(team, canvas, origin_x, origin_y, res)
+            self._clear_self_in_canvas(canvas, origin_x, origin_y, res, out.header.frame_id)
         self._stamp_local_cells(local, canvas, origin_x, origin_y, res)
-        self._clear_self_in_canvas(canvas, origin_x, origin_y, res)
         out.data = canvas.reshape(-1).tolist()
         return out
 
@@ -368,7 +345,6 @@ class PerRobotMapCompositor(Node):
 
         canvas = np.full((height, width), -1, dtype=np.int8)
         self._stamp_local_cells(local, canvas, origin_x, origin_y, res)
-        self._clear_self_in_canvas(canvas, origin_x, origin_y, res)
         out.data = canvas.reshape(-1).tolist()
         return out
 

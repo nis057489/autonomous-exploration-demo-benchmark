@@ -15,7 +15,7 @@ class LaunchParameterTests(unittest.TestCase):
         ) or (isinstance(node, ast.FunctionDef) and node.name == '_frontier_params')]
         settings = {
             'selection_strategy': 'nearest', 'path_occ_threshold': 90,
-            'frontier_assignment': 'robot_rank',
+            'frontier_assignment': 'robot_rank', 'information_occ_threshold': 50,
             'sensor_range_m': 4.0, 'gain_distance_weight': 2.0, 'gain_max_viewpoints': 7,
             'gain_threshold_ratio': 0.5, 'gain_region_cap': 8000,
             'turn_penalty_m': 0.25, 'hysteresis_bonus_m': 1.5,
@@ -35,6 +35,10 @@ class LaunchParameterTests(unittest.TestCase):
                 self.assertEqual(params.get(key), value, key)
             self.assertNotIn('unsupported_parameter', params)
             self.assertEqual(params['costmap_topic'], f'/{robot}/global_costmap/costmap')
+            self.assertEqual(params['reservation_topic'], f'/{robot}/explore/reservation')
+            self.assertEqual(params['reservation_peer_topics'][index], '')
+            self.assertEqual(len(params['reservation_peer_topics']), 3)
+            self.assertEqual(params['information_map_topic'], f'/{robot}/nav_map')
             self.assertEqual(params['robot_base_frame'], f'{robot}/base_footprint')
 
 
