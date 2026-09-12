@@ -252,6 +252,7 @@ class LiteFrontierExplorer(Node):
         # varies, so timing from __init__ would fold that jitter into the
         # experimental variable.
         self._ready_since = None
+        self._start_release_logged = False
 
         self._information_map_topic = self.get_parameter('information_map_topic').value
         self._information_occ_threshold = int(self.get_parameter('information_occ_threshold').value)
@@ -351,6 +352,24 @@ class LiteFrontierExplorer(Node):
         t = tf.transform.translation
         return t.x, t.y
 
+    def _start_allowed(self):
+        # Called only after costmap, pose and configured occupancy input exist.
+        # All mapping/communication stays live while navigation is held.
+        if not self._nav_client.server_is_ready():
+            return False
+        now = self.get_clock().now().nanoseconds / 1e9
+        if self._ready_since is None:
+            self._ready_since = now
+            self.get_logger().info(
+                f'Staggered start: ready at ROS time {now:.3f}; '
+                f'release after {self._explore_start_delay_s:.1f}s.')
+        if now - self._ready_since < self._explore_start_delay_s:
+            return False
+        if not self._start_release_logged:
+            self.get_logger().info(f'Exploration released at ROS time {now:.3f}.')
+            self._start_release_logged = True
+        return True
+
     def _tick(self):
         costmap = self._latest_costmap
         if costmap is None:
@@ -370,21 +389,6 @@ class LiteFrontierExplorer(Node):
         if robot_pose is None:
             return
 
-        if self._explore_start_delay_s > 0.0:
-            now = self.get_clock().now()
-            if self._ready_since is None:
-                self._ready_since = now
-                self.get_logger().info(
-                    f"Staggered start: holding for "
-                    f"{self._explore_start_delay_s:.0f}s before exploring.")
-            waited = (now - self._ready_since).nanoseconds / 1e9
-            if waited < self._explore_start_delay_s:
-                self.get_logger().info(
-                    f"Staggered start: holding, {waited:.0f}s of "
-                    f"{self._explore_start_delay_s:.0f}s elapsed.",
-                    throttle_duration_sec=15.0)
-                return
-
         information_grid = None
         information_threshold = 100  # Legacy standalone costmap-only mode.
         frontier_data = costmap.data
@@ -402,6 +406,9 @@ class LiteFrontierExplorer(Node):
             information_threshold = self._information_occ_threshold
             frontier_data = information_grid.ravel()
             frontier_threshold = information_threshold
+
+        if self._explore_start_delay_s > 0.0 and not self._start_allowed():
+            return
 
         clusters = find_frontier_clusters(
             frontier_data, costmap.info.width, costmap.info.height,

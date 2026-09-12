@@ -36,9 +36,8 @@ class LaunchParameterTests(unittest.TestCase):
                 self.assertEqual(params.get(key), value, key)
             self.assertNotIn('unsupported_parameter', params)
             self.assertEqual(params['costmap_topic'], f'/{robot}/global_costmap/costmap')
-            self.assertEqual(params['reservation_topic'], f'/{robot}/explore/reservation')
-            self.assertEqual(params['reservation_peer_topics'][index], '')
-            self.assertEqual(len(params['reservation_peer_topics']), 3)
+            self.assertEqual(params['reservation_topic'], '')
+            self.assertEqual(params['reservation_peer_topics'], [])
             self.assertEqual(params['information_map_topic'], f'/{robot}/nav_map')
             self.assertEqual(params['robot_base_frame'], f'{robot}/base_footprint')
 

@@ -1,3 +1,8 @@
+> Historical reservation design. The current simulation experiment disables
+> reservation publishers/subscribers and removes their transport relays.
+> See [the office occupancy-only protocol](office_coordination_experiment.md).
+> The recovery and occupancy-scoring fixes described below remain active.
+
 # Communication-dependent goal reservations
 
 The 20260912_091319_oracle_long_t logs show robot3 sent to (16.78, -11.18)

@@ -427,7 +427,6 @@ if [[ "${RECORD_METRICS}" == true ]]; then
       BAG_TOPICS+=(
         "/${name}/explore/traversed_path"
         "/${name}/explore/frontiers"
-        "/${name}/explore/reservation"
         "/${name}/map"
         "/${name}/nav_map"
       )
@@ -445,8 +444,7 @@ if [[ "${RECORD_METRICS}" == true ]]; then
       if [[ "${MAP_SHARING}" == true ]]; then
         for ((j = 1; j <= NUM_ROBOTS; j++)); do
           (( j == i )) && continue
-          BAG_TOPICS+=("/ddil_proxy_${name}_from_robot${j}/ddil_stats"
-                       "/${name}/incoming/robot${j}/reservation")
+          BAG_TOPICS+=("/ddil_proxy_${name}_from_robot${j}/ddil_stats")
         done
       fi
       if [[ "${MAP_TRANSPORT}" == "vxch" ]]; then

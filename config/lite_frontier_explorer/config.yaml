@@ -4,11 +4,9 @@ frontier_explorer:
     # Rays stop at lethal obstacles; score actual reachable frontier cells.
     # Legacy comparison: selection_strategy: nearest_high_gain
     selection_strategy: visible_gain
-    # Travel utility with expiring peer goal reservations (relayed by DDIL).
+    # Independent exploration driven only by received occupancy evidence.
     frontier_assignment: independent
     min_gain_m2: 0.5
-    reservation_radius_m: 6.0
-    reservation_ttl_s: 8.0
     # Multi-robot launch scores /<robot>/nav_map occupancy, separately from
     # Nav2 inflation costs. Partial occupied walls must block visibility.
     information_occ_threshold: 50

@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 import yaml
@@ -106,10 +107,9 @@ def _frontier_params(base_path, namespace, use_sim_time, color_255, robot_index=
     params["robot_index"] = robot_index
     params["team_size"] = team_size
     params["costmap_topic"] = f"/{namespace}/global_costmap/costmap"
-    params["reservation_topic"] = f"/{namespace}/explore/reservation"
-    params["reservation_peer_topics"] = [
-        f"/{namespace}/incoming/robot{i+1}/reservation" if i != robot_index else ""
-        for i in range(team_size)]
+    # Occupancy-only experiment: no peer goal coordination channel.
+    params["reservation_topic"] = ""
+    params["reservation_peer_topics"] = []
     params["information_map_topic"] = f"/{namespace}/nav_map"
     params["global_frame"] = "map"
     params["robot_base_frame"] = f"{namespace}/base_footprint"
@@ -129,7 +129,7 @@ def _create_explorer_actions(context):
     # Seconds between one robot starting to explore and the next. robot1 always
     # starts immediately; robotN waits (N-1) * stagger. 0 disables it.
     start_stagger_s = float(LaunchConfiguration("start_stagger_s").perform(context))
-    if start_stagger_s < 0.0:
+    if not math.isfinite(start_stagger_s) or start_stagger_s < 0.0:
         raise RuntimeError("start_stagger_s must be >= 0")
 
     if num_robots < 1:

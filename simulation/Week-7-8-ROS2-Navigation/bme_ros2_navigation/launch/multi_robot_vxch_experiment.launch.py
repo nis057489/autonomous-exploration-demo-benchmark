@@ -128,7 +128,7 @@ def _create_all_actions(context):
     num_robots = int(LaunchConfiguration("num_robots").perform(context))
     explore_start_stagger_s = float(
         LaunchConfiguration("explore_start_stagger_s").perform(context))
-    if explore_start_stagger_s < 0.0:
+    if not math.isfinite(explore_start_stagger_s) or explore_start_stagger_s < 0.0:
         raise RuntimeError(
             "explore_start_stagger_s must be >= 0, got "
             f"{explore_start_stagger_s}")
@@ -472,8 +472,6 @@ def _create_all_actions(context):
         name = robot_names[i]
         peer_name = robot_names[peer_index]
         robot_ddil_base = f"/{name}/incoming/{peer_name}"
-        reservation_relay = (f"/{peer_name}/explore/reservation {robot_ddil_base}/reservation"
-                             " geometry_msgs/msg/PoseArray")
 
         if is_vxch:
             relay_topics = [
@@ -481,7 +479,6 @@ def _create_all_actions(context):
                 " voxelcodec_msgs/msg/VoxelTileBatch"
                 for k in range(total_bands)
             ]
-            relay_topics.append(reservation_relay)
             relay_topics.append(
                 f"/{peer_name}/vxch/map/manifest {robot_ddil_base}/manifest"
                 " voxelcodec_msgs/msg/VoxelManifest reliable"
@@ -535,7 +532,6 @@ def _create_all_actions(context):
                         "relay_topics": [
                             f"/{peer_name}/zstd/map {robot_ddil_base}/zstd_map"
                             " std_msgs/msg/UInt8MultiArray reliable",
-                            reservation_relay,
                         ],
                     }],
                     **_netns_kwargs(i, [MAIN_NETNS_IP]),
@@ -572,7 +568,6 @@ def _create_all_actions(context):
                         "relay_topics": [
                             f"{source_topic} {robot_ddil_base}/map"
                             " nav_msgs/msg/OccupancyGrid reliable",
-                            reservation_relay,
                         ],
                     }],
                     **_netns_kwargs(i, [MAIN_NETNS_IP]),
