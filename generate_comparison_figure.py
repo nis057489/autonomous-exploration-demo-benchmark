@@ -27,6 +27,12 @@ Reads each robot's recorded rosbag2 (mcap) directly:
     the robot only knows about because a peer relayed them, not just what
     the robot itself observed. This is NOT a measure of first-hand
     exploration; it's how much of the map each robot knows about, team-wide.
+  - peer-relayed coverage: derived, not a topic -- the part of each robot's
+    /nav_map that a peer observed and the robot's own /map never did (see
+    peer_derived_series). This is the only coverage figure communication is
+    responsible for: the team-wide union of /nav_map is by construction the
+    same set of cells as the union of every /map, in every condition, since
+    a robot's own observations always reach its own nav_map.
   - locally-observed coverage: /<robot>/map (nav_msgs/OccupancyGrid), same
     known-cell-area calculation, but this topic is slam_toolbox's raw local
     output -- it never receives peer-communicated cells (those only ever
@@ -979,6 +985,123 @@ def run_redundant_series(run, cell_index):
     return out
 
 
+def peer_derived_series(run):
+    """Per-robot peer-relayed coverage over time -- the only coverage number
+    communication is actually responsible for.
+
+    The team-wide union of /nav_map is NOT that number. Every cell sits in the
+    nav_map of at least the robot that observed it, whose "delivery" to itself
+    cannot fail, so unioning nav_map across robots reproduces
+    local_physical_union_series exactly -- in every condition, `none`
+    included. Sharing adds no ground to the team union; it moves ground
+    between individual robots' maps. What a transport changes is how much of a
+    PEER's ground each robot ends up holding, which is what this measures.
+
+    For robot i at time t, in tiles:
+      delivered_i = |(nav_i \\ own_i) & (U_{j!=i} own_j)|
+      peers_i     = |U_{j!=i} own_j|
+    i.e. peer-observed tiles robot i knows only because a peer sent them, over
+    all the peer-observed tiles there were to send. Intersecting with the
+    peers' union drops cells that are in nav_i but in no robot's /map --
+    fusion quantisation and slam_toolbox re-anchoring each leave a few -- so
+    the ratio stays a fraction of real peer ground instead of drifting past
+    1. A cell the robot later observes itself leaves delivered_i, so the
+    series can fall as well as rise: it is peer-ONLY knowledge at time t, not
+    a cumulative delivery total.
+
+    own_i comes from local_cell_series (offset into the shared team frame),
+    nav_i from nav_cell_series (already in it). own_i retains every key a
+    re-anchored map ever reported, which makes it a generous set and therefore
+    delivered_i a conservative estimate -- it under-counts rather than
+    inflates.
+
+    Returns (robots, events): `robots` sorted, and `events` a time-ordered
+    list of (t, delivered_per_robot, peers_per_robot), each a tuple in
+    `robots` order. Tile counts, not m^2 -- to_area_m2 with run_resolution
+    converts, as for every other cell-set series here."""
+    robots = sorted(run)
+    bit = {r: 1 << i for i, r in enumerate(robots)}
+    # Both streams merged into one timeline, so every cell's own/nav state is
+    # evaluated against everything the team knew at that instant. entry[4] is
+    # local_cell_series, entry[5] nav_cell_series (see read_bag).
+    events = sorted(
+        [(t, r, cells, True) for r in robots for t, cells in run[r][4]]
+        + [(t, r, cells, False) for r in robots for t, cells in run[r][5]],
+        key=lambda e: e[0])
+
+    # cell -> bitmask of robots that have it, kept as ints rather than a set
+    # per cell: a run holds a few hundred thousand distinct cells, and the
+    # counts below are maintained incrementally off the mask transition, so
+    # no step ever rescans a robot's whole map.
+    own_mask = {}
+    nav_mask = {}
+    delivered = {r: 0 for r in robots}
+    peers = {r: 0 for r in robots}
+    out = []
+
+    def counted(own_m, nav_m, r):
+        """Does a cell in state (own_m, nav_m) count toward robot r's
+        delivered total -- in its nav_map, not its own map, and observed by
+        some peer?"""
+        b = bit[r]
+        return bool(nav_m & b) and not own_m & b and bool(own_m & ~b)
+
+    for t, robot, cells, is_own in events:
+        for cell in cells.tolist():
+            om = own_mask.get(cell, 0)
+            nm = nav_mask.get(cell, 0)
+            new_om = om | bit[robot] if is_own else om
+            new_nm = nm if is_own else nm | bit[robot]
+            if new_om == om and new_nm == nm:
+                continue
+            for r in robots:
+                delivered[r] += counted(new_om, new_nm, r) - counted(om, nm, r)
+                if is_own:
+                    b = bit[r]
+                    peers[r] += bool(new_om & ~b) - bool(om & ~b)
+            if is_own:
+                own_mask[cell] = new_om
+            else:
+                nav_mask[cell] = new_nm
+        point = (t, tuple(delivered[r] for r in robots), tuple(peers[r] for r in robots))
+        # Simultaneous updates collapse to one point, so the series doesn't
+        # depend on the order sorted() happened to give same-timestamp events.
+        if out and out[-1][0] == t:
+            out[-1] = point
+        else:
+            out.append(point)
+    return robots, out
+
+
+def delivery_fractions(delivered, peers):
+    """Per-robot delivered share as percentages. A robot whose peers have
+    observed nothing yet scores 0 rather than dividing by zero -- there was
+    nothing to deliver. Single-robot runs have no peers and stay at 0."""
+    return [100.0 * d / p if p else 0.0 for d, p in zip(delivered, peers)]
+
+
+def peer_derived_area_series(run):
+    """Mean per-robot peer-relayed coverage, in m^2 (see peer_derived_series)."""
+    robots, events = peer_derived_series(run)
+    if not events:
+        return []
+    return to_area_m2([(t, float(np.mean(delivered))) for t, delivered, _ in events],
+                      run_resolution(run))
+
+
+def delivery_fraction_series(run):
+    """Mean per-robot share of peer-observed ground actually received, in
+    percent (see peer_derived_series). Averaging over robots hides an
+    asymmetric link -- one fully-fed robot and one blind one reads the same as
+    two half-fed ones -- so summarize() also keeps the per-robot spread, which
+    main() prints beside this."""
+    _, events = peer_derived_series(run)
+    if not events:
+        return []
+    return [(t, float(np.mean(delivery_fractions(delivered, peers))))
+            for t, delivered, peers in events]
+
+
 def plot_redundant_coverage(ax, results, conditions, cell_index):
     """Redundant physical coverage over time: cells more than one robot
     independently drove to and observed with its own sensors, i.e. sensor-map overlap (see run_redundant_series). results[c] is a
@@ -1033,6 +1156,22 @@ def summarize(results, conditions):
         known = [m[-1][1] for m in (team_known_coverage_series(run) for run in runs) if m]
         redundant = [m[-1][1] for m in
                      (to_area_m2(run_redundant_series(run, 4), run_resolution(run)) for run in runs) if m]
+        # One peer_derived_series pass per run, shared by the area mean, the
+        # delivered fraction and the per-robot spread: it walks every cell
+        # event in the run, so it's the one metric here worth not recomputing
+        # once per consumer.
+        peer_area, peer_pct = [], []
+        pct_by_robot = {}
+        for run in runs:
+            robots, events = peer_derived_series(run)
+            if not events:
+                continue
+            _, delivered, peers = events[-1]
+            peer_area.append(float(np.mean(delivered)) * run_resolution(run) ** 2)
+            fractions = delivery_fractions(delivered, peers)
+            peer_pct.append(float(np.mean(fractions)))
+            for robot, fraction in zip(robots, fractions):
+                pct_by_robot.setdefault(robot, []).append(fraction)
         physical_mean, physical_std = mean_std(physical)
         known_mean, known_std = mean_std(known)
         redundant_mean, redundant_std = mean_std(redundant)
@@ -1043,6 +1182,13 @@ def summarize(results, conditions):
             "physical": (physical_mean, physical_std),
             "known": (known_mean, known_std),
             "redundant": (redundant_mean, redundant_std),
+            # Peer-relayed only: the robot's own observations are excluded, so
+            # unlike "known" this moves with the transport rather than with
+            # how much ground the run happened to explore.
+            "peer_derived": mean_std(peer_area),
+            "delivered_pct": mean_std(peer_pct),
+            # Per-robot, because the mean above cannot show an asymmetric link.
+            "delivered_pct_by_robot": {r: mean_std(v) for r, v in sorted(pct_by_robot.items())},
             # Descriptive map-area ratio, not a communication delivery fraction.
             # Overlap is unique area seen by two or more robots.
             "known_to_physical_pct": (100 * known_mean / physical_mean if physical_mean else 0.0, 0.0),
@@ -1062,6 +1208,8 @@ SUMMARY_COLUMNS = (
     ("physical", "Physical (m²)", "physical_m2", 1.0, 1),
     ("known", "Largest map (m²)", "known_m2", 1.0, 1),
     ("known_to_physical_pct", "Largest map / union (%)", "known_to_physical_pct", 1.0, 1),
+    ("peer_derived", "Peer-relayed (m²)", "peer_derived_m2", 1.0, 1),
+    ("delivered_pct", "Delivered (%)", "delivered_pct", 1.0, 1),
     ("redundant", "Redundant (m²)", "redundant_m2", 1.0, 1),
     ("redundant_pct", "Redundant (%)", "redundant_pct", 1.0, 1),
 )
@@ -1122,12 +1270,14 @@ def format_summary_table(summary, conditions, style):
     return "\n".join([line(headers), "  ".join("-" * w for w in widths)] + [line(r) for r in rows])
 
 
-def plot_union_coverage(ax, results, conditions, series_fn, ylabel):
-    """Plot a per-run map-area statistic with mean and standard deviation.
+def plot_union_coverage(ax, results, conditions, series_fn, ylabel, unit="m²"):
+    """Plot a per-run map statistic with mean and standard deviation.
 
     local_physical_union_series estimates observed map union;
     team_known_coverage_series measures the largest individual known map.
-    Neither is a ground-truth exploration or communication-success metric.
+    Neither is a ground-truth exploration or communication-success metric --
+    delivery_fraction_series is the panel that isolates communication.
+    `unit` only labels the legend value; the series carries its own units.
     """
     # End-of-run value carried in the legend entry, not annotated past the
     # right end of the line -- see plot_redundant_coverage.
@@ -1142,7 +1292,10 @@ def plot_union_coverage(ax, results, conditions, series_fn, ylabel):
         sampled = np.array([resample_step(m, grid) for m in merged_per_run if m])
         mean = sampled.mean(axis=0)
         ax.plot(grid, mean, color=CONDITION_COLORS[cond], linewidth=2.5, solid_capstyle="round", zorder=3)
-        label = f"{DISPLAY_NAMES[cond]} — {mean[-1]:,.1f} m²"
+        # Unit on the mean only, the spread bare -- same shape as
+        # plot_redundant_coverage's labels ("10.0 m² ± 0.4").
+        value = f"{mean[-1]:,.1f}%" if unit == "%" else f"{mean[-1]:,.1f} {unit}"
+        label = f"{DISPLAY_NAMES[cond]} — {value}"
         if sampled.shape[0] > 1:
             std = sampled.std(axis=0)
             ax.fill_between(grid, mean - std, mean + std, color=CONDITION_COLORS[cond], alpha=0.15,
@@ -1176,7 +1329,8 @@ def main():
                               "instead of one combined multi-panel image.")
     parser.add_argument("--table", nargs="?", const="text", choices=("text", "markdown", "csv"),
                          help="Also print a one-row-per-condition summary table (sent/received bandwidth, "
-                              "team physical and known coverage, redundant overlap). Default style 'text'; "
+                              "team physical and known coverage, peer-relayed coverage and the share of "
+                              "peer-observed ground it represents, redundant overlap). Default style 'text'; "
                               "'markdown' to paste into notes, 'csv' for a spreadsheet.")
     parser.add_argument("--table-file", type=Path,
                          help="Also write the summary table to this path, in the style its extension implies "
@@ -1270,6 +1424,8 @@ def main():
                                         "Observed map union (m², SLAM estimate)")),
         ("union_nav", plot_union_coverage, (results, conditions, team_known_coverage_series,
                                             "Largest individual known map (m²)")),
+        ("delivered", plot_union_coverage, (results, conditions, delivery_fraction_series,
+                                            "Peer-observed area received (%)", "%")),
         ("redundant", plot_redundant_coverage, (results, conditions, 4)),
     ]
 
@@ -1336,6 +1492,22 @@ def main():
               f"{physical_mean:,.1f}{local_suffix} m²; "
               f"largest individual known map (incl. peer-relayed): "
               f"{known_mean:,.1f}{nav_suffix} m²")
+    for condition in conditions:
+        n = summary[condition]["runs"]
+        peer_mean, peer_std = summary[condition]["peer_derived"]
+        pct_mean, pct_std = summary[condition]["delivered_pct"]
+        peer_suffix = f" ± {peer_std:.1f}" if n > 1 else ""
+        pct_suffix = f" ± {pct_std:.1f}" if n > 1 else ""
+        print(f"{DISPLAY_NAMES[condition]:>10} peer-relayed coverage (mean per robot, own observations "
+              f"excluded): {peer_mean:,.1f}{peer_suffix} m² -- "
+              f"{pct_mean:.1f}{pct_suffix}% of the ground its peers observed")
+        by_robot = summary[condition]["delivered_pct_by_robot"]
+        # The mean above reads the same for one fully-fed robot beside a blind
+        # one as for two half-fed ones, which is exactly what an asymmetric
+        # link budget produces -- so print the robots separately too.
+        if len(by_robot) > 1:
+            spread = ", ".join(f"{robot} {mean:.1f}%" for robot, (mean, _) in by_robot.items())
+            print(f"{'':>10}   delivered per robot: {spread}")
     for condition in conditions:
         n = summary[condition]["runs"]
         redundant_mean, redundant_std = summary[condition]["redundant"]
