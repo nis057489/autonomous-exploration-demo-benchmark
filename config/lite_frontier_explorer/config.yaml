@@ -57,20 +57,9 @@ frontier_explorer:
     # Seconds between replanning attempts.
     replan_period_s: 3.0
 
-    # Abandon an in-flight goal the robot is making no headway toward, instead
-    # of waiting out nav2's full BT recovery chain (progress checker, then up
-    # to 6 retries of clear-costmap / spin / back-up / wait). That chain is
-    # where the observed 1-to-several-minute stalls came from when a robot
-    # wedged on the curved reception desk or in a doorway: nav2 does recover,
-    # it is just far slower than giving up on that frontier and driving
-    # somewhere else. On timeout the goal is cancelled AND blacklisted, so the
-    # next tick picks a genuinely different frontier rather than re-sending
-    # the same one.
-    #
-    # The timer is measured on robot displacement, not wall clock -- any
-    # movement past goal_stuck_epsilon_m resets it -- so a legitimately long
-    # drive across the building never trips it. Raise the timeout if tight
-    # squeezes are being abandoned too eagerly; note replan_period_s (3.0 s)
-    # is the sampling interval, so the effective granularity is ~3 s.
-    goal_stuck_timeout_s: 12.0
+    # Nav2 owns stall detection and its bounded recovery sequence. A second
+    # translation-only watchdog can cancel rotation, wait, or backup recovery.
+    goal_stuck_timeout_s: 0.0
+    # Failed navigation targets become eligible again after this cooldown.
+    goal_blacklist_duration_s: 60.0
     goal_stuck_epsilon_m: 0.15

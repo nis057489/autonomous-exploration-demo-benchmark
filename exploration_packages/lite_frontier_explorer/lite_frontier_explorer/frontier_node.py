@@ -52,6 +52,7 @@ class LiteFrontierExplorer(Node):
         self.declare_parameter('min_frontier_size_cells', 1)
         self.declare_parameter('min_frontier_distance_m', 0.5)
         self.declare_parameter('goal_blacklist_radius_m', 1.0)
+        self.declare_parameter('goal_blacklist_duration_s', 60.0)
         self.declare_parameter('occ_threshold', 50)
         self.declare_parameter('path_occ_threshold', 99)
         self.declare_parameter('information_map_topic', '')
@@ -164,27 +165,10 @@ class LiteFrontierExplorer(Node):
         # different approach direction, which is itself often what unwedges
         # the robot.
         self.declare_parameter('max_wedge_cycles', 3)
-        # Give up on an in-flight goal the robot is making no headway toward.
-        #
-        # Without this the explorer sends a goal, sets _goal_active, and then
-        # does nothing but wait for nav2's result -- the preempt path above
-        # only fires when a *different* frontier appears >= goal_preempt_
-        # distance_m away, and when the robot is wedged the closest frontier is
-        # usually still the one it is wedged against (hysteresis_bonus_m biases
-        # toward it further). So a robot that jams on the curved reception desk
-        # or in a doorway rides out nav2's full BT recovery chain -- progress
-        # checker, then up to 6 retries of clear-costmap / spin / back-up /
-        # wait -- which is where the observed one-to-several-minute stalls come
-        # from. nav2 does eventually recover; it is just far slower than simply
-        # abandoning that frontier and driving somewhere else.
-        #
-        # Measured on displacement, not wall clock, so a legitimately long
-        # drive across the building never trips it: any movement beyond the
-        # epsilon resets the timer. On timeout the goal is cancelled, and
-        # because _preempting stays False, _on_result() blacklists it -- so the
-        # next tick picks a genuinely different frontier instead of re-sending
-        # the same one.
-        self.declare_parameter('goal_stuck_timeout_s', 12.0)
+        # Optional legacy watchdog, disabled by default. Nav2's pose progress
+        # checker and bounded BT retries own stall recovery. Translation alone
+        # cannot distinguish being stuck from rotating, waiting, or recovering.
+        self.declare_parameter('goal_stuck_timeout_s', 0.0)
         self.declare_parameter('goal_stuck_epsilon_m', 0.15)
         self.declare_parameter('navigate_to_pose_action_name', 'navigate_to_pose')
         self.declare_parameter('frontier_marker_topic', 'explore/frontiers')
@@ -296,6 +280,10 @@ class LiteFrontierExplorer(Node):
         self._invalid_goal_last_map = None
         self._invalid_goal_count = 0
         self._blacklisted_goals = []
+        self._blacklist_expiry = {}
+        self._goal_blacklist_duration_s = float(self.get_parameter('goal_blacklist_duration_s').value)
+        if not math.isfinite(self._goal_blacklist_duration_s) or self._goal_blacklist_duration_s <= 0:
+            raise ValueError('goal_blacklist_duration_s must be finite and positive')
         self._last_goal_direction = None  # (dx, dy) of the most recently sent goal
         # Consecutive preemptions since the last goal reached a terminal state.
         self._preempt_streak = 0
@@ -798,6 +786,10 @@ class LiteFrontierExplorer(Node):
         send_future.add_done_callback(self._on_goal_response)
 
     def _is_blacklisted(self, xy):
+        now = self.get_clock().now().nanoseconds / 1e9
+        self._blacklist_expiry = {goal: until for goal, until in self._blacklist_expiry.items()
+                                  if now < until}
+        self._blacklisted_goals = list(self._blacklist_expiry)
         x, y = xy
         return any(
             math.hypot(x - bx, y - by) <= self._goal_blacklist_radius_m
@@ -892,7 +884,9 @@ class LiteFrontierExplorer(Node):
         goal_handle = future.result()
         if not goal_handle.accepted:
             self.get_logger().warn("Goal rejected by nav2.")
-            self._blacklist_pending_goal()
+            # Action-server rejection is not evidence of an unreachable target.
+            self._pending_goal_xy = None
+            self._goal_handle = None
             self._preempt_streak = 0
             self._goal_active = False
             self._preempting = False
@@ -913,16 +907,17 @@ class LiteFrontierExplorer(Node):
         if status == GoalStatus.STATUS_SUCCEEDED:
             self._pending_goal_xy = None
             self._preempt_streak = 0
-        elif status == GoalStatus.STATUS_CANCELED and self._preempting:
-            # Cancelled by us to switch to a better frontier, not a real
-            # failure -- don't blacklist a perfectly reachable goal.
+        elif status == GoalStatus.STATUS_CANCELED and not self._abandoning_stuck:
+            # Cancellation (including external cancellation) is not evidence
+            # that the frontier is unreachable.
             # _preempt_streak is deliberately NOT reset here: this is the
             # outcome it exists to count, and clearing it would let the
             # explorer preempt forever without ever reaching the backstop.
             self._pending_goal_xy = None
         else:
             self.get_logger().warn(
-                f"Goal did not succeed (status={status}) -- blacklisting it.")
+                f"Goal did not succeed (status={status}) -- excluding it for "
+                f"{self._goal_blacklist_duration_s:g}s before retrying.")
             self._blacklist_pending_goal()
             self._preempt_streak = 0
         self._goal_active = False
@@ -934,7 +929,9 @@ class LiteFrontierExplorer(Node):
 
     def _blacklist_pending_goal(self):
         if self._pending_goal_xy is not None:
-            self._blacklisted_goals.append(self._pending_goal_xy)
+            self._blacklist_expiry[self._pending_goal_xy] = (
+                self.get_clock().now().nanoseconds / 1e9 + self._goal_blacklist_duration_s)
+            self._blacklisted_goals = list(self._blacklist_expiry)
             self._pending_goal_xy = None
 
 

@@ -72,6 +72,7 @@ _LITE_PARAM_KEYS = (
     # defaults and the values in config.yaml are silently ignored -- this tuple
     # is a filter, not documentation.
     "goal_stuck_timeout_s",
+    "goal_blacklist_duration_s",
     "goal_stuck_epsilon_m",
     # Preempt gating. Without these in the allowlist a config.yaml that tunes
     # them is silently ignored and the node defaults stand -- which is how the

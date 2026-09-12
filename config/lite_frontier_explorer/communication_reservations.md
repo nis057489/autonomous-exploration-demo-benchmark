@@ -76,3 +76,23 @@ Either a fresh occupancy message or a fresh Nav2 map can confirm active-goal
 invalidity; repeated ticks on the same input pair cannot. These are corrections
 to the existing algorithm, not a reproduction of a published coordination
 algorithm. Closed-loop runs are still needed to measure efficiency and churn.
+
+Navigation recovery
+-------------------
+
+The default `goal_stuck_timeout_s` is now zero (disabled). Its translation-only
+12 s timeout could interrupt legitimate rotation and Nav2's recovery sequence.
+Nav2 retains its PoseProgressChecker (0.2 m translation or 0.5 rad rotation
+within 10 s) and the default bounded behavior-tree recovery sequence. Explicit
+map-based goal replacement and reservation handling remain active.
+
+Navigation failures exclude a target for `goal_blacklist_duration_s` (60 s of
+ROS time by default), after which it becomes eligible for evaluation again.
+Action-server rejection and ordinary cancellation do not establish that a
+frontier is unreachable. The optional legacy stuck watchdog, if explicitly
+enabled, also uses the temporary exclusion when it abandons a target.
+
+This fixes recovery interference and permanent loss of work after transient
+failures. It does not resolve reservation starvation: a robot waiting without
+an active navigation goal cannot be freed by a Nav2 recovery behavior. The
+unimpaired-run reservation allocation defect remains separate and unresolved.
