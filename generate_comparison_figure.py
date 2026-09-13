@@ -1188,15 +1188,17 @@ def peer_derived_series(run):
 
     For robot i at time t, in tiles:
       delivered_i = |(nav_i \\ own_i) & (U_{j!=i} own_j)|
-      peers_i     = |U_{j!=i} own_j|
-    i.e. peer-observed tiles robot i knows only because a peer sent them, over
-    all the peer-observed tiles there were to send. Intersecting with the
-    peers' union drops cells that are in nav_i but in no robot's /map --
-    fusion quantisation and slam_toolbox re-anchoring each leave a few -- so
-    the ratio stays a fraction of real peer ground instead of drifting past
-    1. A cell the robot later observes itself leaves delivered_i, so the
-    series can fall as well as rise: it is peer-ONLY knowledge at time t, not
-    a cumulative delivery total.
+      peers_i     = |(U_{j!=i} own_j) \\ own_i|
+    The denominator is the peer-observed ground robot i needs communication
+    to learn. Exclude its own observations from BOTH sets: otherwise even
+    complete sharing scores below 100% and exploration overlap confounds the
+    comparison. Intersecting with peers' observations rejects fusion-only
+    cells. Later self-observation removes a tile from both sets.
+
+    This is map completeness, not packet delivery: it uses cumulative map
+    cells, and still depends on map alignment and fusion. An unimpaired run
+    is an empirical comparator, not a mathematical upper bound across runs.
+    Ideal instantaneous sharing of all eligible cells scores 100%.
 
     own_i comes from local_cell_series (offset into the shared team frame),
     nav_i from nav_cell_series (already in it). own_i retains every key a
@@ -1208,7 +1210,8 @@ def peer_derived_series(run):
     list of (t, delivered_per_robot, peers_per_robot), each a tuple in
     `robots` order. Tile counts, not m^2 -- to_area_m2 with run_resolution
     converts, as for every other cell-set series here."""
-    robots = sorted(run)
+    # Older GUI selections included relay-node namespaces with no map streams.
+    robots = sorted(r for r, entry in run.items() if entry[4] or entry[5])
     bit = {r: 1 << i for i, r in enumerate(robots)}
     # Both streams merged into one timeline, so every cell's own/nav state is
     # evaluated against everything the team knew at that instant. entry[4] is
@@ -1247,7 +1250,8 @@ def peer_derived_series(run):
                 delivered[r] += counted(new_om, new_nm, r) - counted(om, nm, r)
                 if is_own:
                     b = bit[r]
-                    peers[r] += bool(new_om & ~b) - bool(om & ~b)
+                    peers[r] += (bool(new_om & ~b) and not bool(new_om & b)) - (
+                        bool(om & ~b) and not bool(om & b))
             if is_own:
                 own_mask[cell] = new_om
             else:
@@ -1263,10 +1267,12 @@ def peer_derived_series(run):
 
 
 def delivery_fractions(delivered, peers):
-    """Per-robot delivered share as percentages. A robot whose peers have
-    observed nothing yet scores 0 rather than dividing by zero -- there was
-    nothing to deliver. Single-robot runs have no peers and stay at 0."""
-    return [100.0 * d / p if p else 0.0 for d, p in zip(delivered, peers)]
+    """Peer-map completeness as percentages, excluding self-observed ground.
+
+    An empty eligible set scores 100%: no peer-only knowledge is missing.
+    This includes startup and single-robot runs, not evidence of traffic.
+    """
+    return [100.0 * d / p if p else 100.0 for d, p in zip(delivered, peers)]
 
 
 def peer_derived_area_series(run):
@@ -1279,7 +1285,7 @@ def peer_derived_area_series(run):
 
 
 def delivery_fraction_series(run):
-    """Mean per-robot share of peer-observed ground actually received, in
+    """Mean per-robot completeness of eligible peer-observed ground, in
     percent (see peer_derived_series). Averaging over robots hides an
     asymmetric link -- one fully-fed robot and one blind one reads the same as
     two half-fed ones -- so summarize() also keeps the per-robot spread, which
@@ -1371,9 +1377,8 @@ def summarize(results, conditions):
             "physical": (physical_mean, physical_std),
             "known": (known_mean, known_std),
             "redundant": (redundant_mean, redundant_std),
-            # Peer-relayed only: the robot's own observations are excluded, so
-            # unlike "known" this moves with the transport rather than with
-            # how much ground the run happened to explore.
+            # Peer-only knowledge and completeness of eligible peer ground.
+            # These still depend on exploration, alignment, and map fusion.
             "peer_derived": mean_std(peer_area),
             "delivered_pct": mean_std(peer_pct),
             # Per-robot, because the mean above cannot show an asymmetric link.
@@ -1398,7 +1403,7 @@ SUMMARY_COLUMNS = (
     ("known", "Largest map (m²)", "known_m2", 1.0, 1),
     ("known_to_physical_pct", "Largest map / union (%)", "known_to_physical_pct", 1.0, 1),
     ("peer_derived", "Peer-relayed (m²)", "peer_derived_m2", 1.0, 1),
-    ("delivered_pct", "Delivered (%)", "delivered_pct", 1.0, 1),
+    ("delivered_pct", "Peer-map completeness (%)", "delivered_pct", 1.0, 1),
     ("redundant", "Redundant (m²)", "redundant_m2", 1.0, 1),
     ("redundant_pct", "Redundant (%)", "redundant_pct", 1.0, 1),
 )
@@ -1464,8 +1469,8 @@ def plot_union_coverage(ax, results, conditions, series_fn, ylabel, unit="m²"):
 
     local_physical_union_series estimates observed map union;
     team_known_coverage_series measures the largest individual known map.
-    Neither is a ground-truth exploration or communication-success metric --
-    delivery_fraction_series is the panel that isolates communication.
+    delivery_fraction_series measures completeness of peer-only map knowledge,
+    including transport and fusion effects.
     `unit` only labels the legend value; the series carries its own units.
     """
     # End-of-run value carried in the legend entry, not annotated past the
@@ -1495,6 +1500,10 @@ def plot_union_coverage(ax, results, conditions, series_fn, ylabel, unit="m²"):
     ax.set_xlabel("Time since run start (s)", fontsize=FS_AXIS, color=TEXT_SECONDARY)
     ax.set_ylabel(ylabel, fontsize=FS_AXIS, color=TEXT_SECONDARY)
     style_ax(ax)
+    if series_fn is delivery_fraction_series:
+        handles.append(ax.axhline(100, color=TEXT_SECONDARY, linestyle="--",
+                                  linewidth=1, label="Ideal complete sharing (100%)"))
+        ax.set_ylim(0, 105)
     panel_legend(ax, handles)
 
 
@@ -1692,7 +1701,7 @@ def main():
         ("union_nav", plot_union_coverage, (results, conditions, team_known_coverage_series,
                                             "Largest individual known map (m²)")),
         ("delivered", plot_union_coverage, (results, conditions, delivery_fraction_series,
-                                            "Peer-observed area received (%)", "%")),
+                                            "Peer-map completeness (%, excluding own observations)", "%")),
         ("redundant", plot_redundant_coverage, (results, conditions, 4)),
     ]
 
@@ -1775,14 +1784,14 @@ def main():
         pct_suffix = f" ± {pct_std:.1f}" if n > 1 else ""
         print(f"{DISPLAY_NAMES[condition]:>10} peer-relayed coverage (mean per robot, own observations "
               f"excluded): {peer_mean:,.1f}{peer_suffix} m² -- "
-              f"{pct_mean:.1f}{pct_suffix}% of the ground its peers observed")
+              f"{pct_mean:.1f}{pct_suffix}% of peer-observed ground not observed itself")
         by_robot = summary[condition]["delivered_pct_by_robot"]
         # The mean above reads the same for one fully-fed robot beside a blind
         # one as for two half-fed ones, which is exactly what an asymmetric
         # link budget produces -- so print the robots separately too.
         if len(by_robot) > 1:
             spread = ", ".join(f"{robot} {mean:.1f}%" for robot, (mean, _) in by_robot.items())
-            print(f"{'':>10}   delivered per robot: {spread}")
+            print(f"{'':>10}   peer-map completeness per robot: {spread}")
     for condition in conditions:
         n = summary[condition]["runs"]
         redundant_mean, redundant_std = summary[condition]["redundant"]
