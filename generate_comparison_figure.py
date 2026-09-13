@@ -100,8 +100,12 @@ from matplotlib.patches import Patch
 TEXT_PRIMARY = "#1a1a1a"
 TEXT_SECONDARY = "#52514e"
 GRID_COLOR = "#cccccc"
-ALL_CONDITIONS = ("none", "baseline", "vxch", "zstd", "oracle")  # internal keys -- match run-dir/CLI naming, unrelated to display
-DISPLAY_NAMES = {"baseline": "Baseline", "vxch": "Wavestream", "zstd": "Zstd",
+ALL_CONDITIONS = ("none", "oracle", "baseline", "zstd", "vxch")  # internal keys -- match run-dir/CLI naming, unrelated to display
+# This tuple's order IS the presentation order: every panel plots/legends in
+# ALL_CONDITIONS order (top-to-bottom for the horizontal bars, and in the
+# legend for the time series), so the controls read first and the proposed
+# transport last. Reordering here reorders every chart at once.
+DISPLAY_NAMES = {"baseline": "Baseline", "vxch": "Wavestream (ours)", "zstd": "Zstd",
                  "none": "No sharing", "oracle": "Unimpaired sharing"}
 # Control arms change communication, not the exploration policy.
 CONDITION_COLORS = {"baseline": "#eb6834", "vxch": "#2a78d6", "zstd": "#3fa15c",
@@ -745,6 +749,14 @@ def resample_step(series, grid):
 # hatched "after DDIL throttling" bar beside it.
 DIRECTIONS = ((1, "Published before relay", ""), (0, "Received from peers", "///"))
 
+# Conditions left out of the bandwidth bars. Both are communication controls
+# rather than transports: "none" shares nothing, so its bars are a
+# structural zero that a log axis cannot even place, and "oracle" is the
+# same payload as the baseline with the impairment removed, so its bar only
+# restates the baseline. They stay in every other panel, where the coverage
+# they bound is the whole point.
+BANDWIDTH_OMITTED = ("none", "oracle")
+
 
 def format_kb(mean_kb, std_kb=None):
     """A KB total as a short label in whichever of KB/MB/GB keeps it readable.
@@ -761,6 +773,85 @@ def format_kb(mean_kb, std_kb=None):
     if std_kb:
         text += f" ± {std_kb / scale:,.{places}f}"
     return f"{text} {unit}"
+
+
+def fit_annotations_within(ax, annotations, left, max_passes=8):
+    """Grow a log x-axis\'s right limit until every annotation fits inside the
+    axes, measured rather than estimated.
+
+    BAR_LABEL_DECADES reserves headroom as a fraction of the axis span, which
+    is the right unit (the axes are a fixed physical width, so a fraction of
+    the span is a fixed number of inches) but only an estimate of how wide
+    these labels actually set -- "2.46 GB ± 0.01 GB" at FS_VALUE bold is far
+    wider than "0 KB". When the estimate is short the label runs off the panel
+    edge, so re-measure the rendered text and widen until it doesn\'t."""
+    fig = ax.figure
+    for _ in range(max_passes):
+        fig.canvas.draw()
+        axes_box = ax.get_window_extent()
+        overflow = max(
+            (a.get_window_extent().x1 for a in annotations), default=axes_box.x1
+        ) - axes_box.x1
+        if overflow <= 1 or axes_box.width <= 0:
+            return
+        right = ax.get_xlim()[1]
+        decades_per_px = math.log10(right / left) / axes_box.width
+        # +6px of slack so a pass that lands a hair short doesn\'t need another.
+        ax.set_xlim(left, right * 10 ** ((overflow + 6) * decades_per_px))
+
+
+def panel_bounds(ax):
+    """The pixel box a panel is entitled to: its own grid cell in a combined
+    multi-panel figure, the whole figure when it is the only panel. Used as
+    the limit for text that hangs outside the axes, so a fix for one panel
+    cannot push type into its neighbour."""
+    fig = ax.figure
+    spec = ax.get_subplotspec()
+    if spec is None:
+        return fig.get_window_extent()
+    return spec.get_position(fig).transformed(fig.transFigure)
+
+
+def fit_axis_label(ax, min_fontsize=12.0):
+    """Keep an x-axis label inside its panel.
+
+    The label is centred on the axes, but the axes are not centred in the
+    panel -- a long categorical tick label ("Wavestream (ours)") widens the
+    left gutter and shifts the axes right, which walks the x label off the
+    figure edge. So re-centre it on the panel rather than on the axes, and
+    shrink it only if it is genuinely too wide to fit even there."""
+    label = ax.xaxis.label
+    if not label.get_text():
+        return
+    fig = ax.figure
+    bounds = panel_bounds(ax)
+    fig.canvas.draw()
+    while (label.get_window_extent().width > bounds.width
+           and label.get_fontsize() > min_fontsize):
+        label.set_fontsize(max(min_fontsize, label.get_fontsize() - 0.5))
+        fig.canvas.draw()
+
+    box = label.get_window_extent()
+    ax_box = ax.get_window_extent()
+    if box.x0 >= bounds.x0 and box.x1 <= bounds.x1:
+        return
+    if ax_box.width <= 0:
+        return
+    shift = bounds.x0 + bounds.width / 2 - (box.x0 + box.width / 2)
+    # set_label_coords also pins y, so carry over the y tight_layout settled
+    # on (the label is va="top", so its anchor is the top of the drawn box).
+    ax.xaxis.set_label_coords(0.5 + shift / ax_box.width,
+                              (box.y1 - ax_box.y0) / ax_box.height)
+
+
+def refit_axes(fig):
+    """Re-run the label fitting every panel needs, after tight_layout has
+    settled the axes geometry those fits are measured against."""
+    for ax in fig.axes:
+        refit = getattr(ax, "_refit_labels", None)
+        if refit is not None:
+            refit()
+        fit_axis_label(ax)
 
 
 def plot_bandwidth(ax, results, conditions, xlabel):
@@ -782,10 +873,15 @@ def plot_bandwidth(ax, results, conditions, xlabel):
 
     results[c] is a list of per-run {robot: entry} dicts -- with more than one
     run, bars show the mean total across runs with a +/- std error bar."""
+    # Controls dropped here rather than by the caller so every other panel
+    # still gets the full set -- see BANDWIDTH_OMITTED. Kept only if that
+    # would leave nothing to draw (a run of controls alone).
+    plotted = tuple(c for c in conditions if c not in BANDWIDTH_OMITTED)
+    if plotted:
+        conditions = plotted
     robots = sorted({r for run in results.values() for entry in run for r in entry})
     y = np.arange(len(conditions))
     bar_height = 0.34
-    ratio_notes = []
     drawn = []  # (y, total, std) for every bar, to size the axis afterwards
 
     for (byte_index, direction_label, hatch), offset in zip(
@@ -810,18 +906,10 @@ def plot_bandwidth(ax, results, conditions, xlabel):
                     elinewidth=1.5, capsize=5, zorder=5)
         drawn.extend(zip(y + offset, totals, totals_std))
 
-        nonzero = [(c, t) for c, t in zip(conditions, totals) if t > 0]
-        if len(nonzero) >= 2:
-            (_, biggest_val) = max(nonzero, key=lambda ct: ct[1])
-            (winner, smallest_val) = min(nonzero, key=lambda ct: ct[1])
-            if biggest_val != smallest_val:
-                ratio_notes.append(
-                    f"{direction_label.split()[0]}: {biggest_val / smallest_val:,.0f}× "
-                    f"less data ({DISPLAY_NAMES[winner]})")
-
-    # A log axis cannot place 0, and a condition that shares nothing at all
-    # (the no-sharing control) is legitimately 0 -- so the axis starts below the
-    # smallest real value and those bars are drawn as nothing, labelled in place.
+    # A log axis cannot place 0, and a condition can legitimately be 0 (the
+    # no-sharing control, kept here only when nothing else is selected) -- so
+    # the axis starts below the smallest real value and those bars are drawn
+    # as nothing, labelled in place.
     positive = [t for _, t, _ in drawn if t > 0]
     left = min(positive) / 3 if positive else 0.1
     right = max(t + sd for _, t, sd in drawn) if drawn else 1.0
@@ -829,10 +917,12 @@ def plot_bandwidth(ax, results, conditions, xlabel):
     ax.set_xscale("log")
     ax.set_xlim(left, right)
 
-    for yi, total, std in drawn:
+    annotations = [
         ax.annotate(format_kb(total, std), xy=(max(total + std, left), yi),
                     xytext=(8, 0), textcoords="offset points", ha="left", va="center",
                     fontsize=FS_VALUE, fontweight="bold", color=TEXT_PRIMARY)
+        for yi, total, std in drawn
+    ]
 
     ax.set_yticks(y)
     ax.set_yticklabels([DISPLAY_NAMES[c] for c in conditions], fontsize=FS_AXIS,
@@ -841,19 +931,26 @@ def plot_bandwidth(ax, results, conditions, xlabel):
     # order), with a blank band above the first bar for the legend to sit in.
     # loc="best" is not enough here: it avoids bars but not the value labels
     # beside them, and it parked the legend on top of one. Reserving the band
-    # keeps both. Its size is in category slots, worked back from the ~1.4in
-    # the legend needs out of a panel's data area, so it holds whether two
-    # conditions are plotted or five.
-    ax.set_ylim(len(conditions) - 0.5, -0.5 - (0.32 * len(conditions) + 0.2))
+    # keeps both. Its size is in category slots, worked back from the ~0.8in
+    # the two-entry direction key needs out of a panel's data area, so it holds
+    # whether two conditions are plotted or five.
+    ax.set_ylim(len(conditions) - 0.5, -0.5 - (0.2 * len(conditions) + 0.15))
     ax.set_xlabel(xlabel, fontsize=FS_AXIS, color=TEXT_SECONDARY)
     style_ax(ax, grid_axis="x")
 
-    # The direction key and the headline ratios go in one legend rather than as
-    # free-floating text, which at this type size lands on a bar or a label.
+    # The direction key goes in a legend rather than as free-floating text,
+    # which at this type size lands on a bar or a label.
     handles = [Patch(facecolor="#b9b9b9", edgecolor="white", linewidth=1.5, hatch=hatch,
                      label=label) for _, label, hatch in DIRECTIONS]
-    handles += [Line2D([], [], linestyle="none", label=note) for note in ratio_notes]
     panel_legend(ax, handles, loc="upper right")
+    # The bars carry the only text that can leave the axes (the value labels
+    # sit outside their bar's end), so widen until they measurably fit. Fitting
+    # depends on the axes' final pixel width, which tight_layout only settles
+    # after every panel is drawn -- so leave the pass behind for refit_axes()
+    # to re-run then, and run it once now so a caller that never refits still
+    # gets labels inside the panel.
+    ax._refit_labels = lambda: fit_annotations_within(ax, annotations, left)
+    ax._refit_labels()
 
 
 def _step_value_at(series, t):
@@ -1631,7 +1728,7 @@ def main():
             robot_paths[condition] = [parse_robot_paths(pairs) for pairs in runs]
     if len(robot_paths) < 2:
         print("error: need at least 2 of "
-              "--none/--baseline/--vxch/--zstd/--oracle to compare", file=sys.stderr)
+              "--none/--oracle/--baseline/--zstd/--vxch to compare", file=sys.stderr)
         sys.exit(1)
     conditions = tuple(c for c in ALL_CONDITIONS if c in robot_paths)
 
@@ -1711,6 +1808,7 @@ def main():
             panel_fig, ax = plt.subplots(figsize=PANEL_SIZE)
             plot_fn(ax, *plot_args)
             panel_fig.tight_layout(pad=1.2)
+            refit_axes(panel_fig)
             panel_out = args.out.with_name(f"{args.out.stem}_{name}{args.out.suffix}")
             panel_fig.savefig(panel_out, dpi=200, facecolor="white")
             plt.close(panel_fig)
@@ -1730,6 +1828,7 @@ def main():
             ax.set_visible(False)
         # No suptitle -- see panels above.
         fig.tight_layout(pad=2.0)
+        refit_axes(fig)
         fig.savefig(args.out, dpi=200, facecolor="white")
 
     # Per-condition totals, computed once for both the lines below and --table.

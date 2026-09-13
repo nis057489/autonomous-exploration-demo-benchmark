@@ -37,7 +37,7 @@ FIGURE_SCRIPT = os.path.join(PROJECT_ROOT, "generate_comparison_figure.py")
 
 RUN_DIR_RE = re.compile(r"^(\d{8}_\d{6})_(baseline|vxch|zstd|none|oracle)_(\w+)$")
 SESSION_GAP_SECONDS = 90  # runs across robots within this gap = one session
-CONDITIONS = ("none", "baseline", "vxch", "zstd", "oracle")
+CONDITIONS = ("none", "oracle", "baseline", "zstd", "vxch")  # presentation order, matching generate_comparison_figure.ALL_CONDITIONS
 CONDITION_LABELS = {"baseline": "Baseline run", "vxch": "Wavestream run", "zstd": "Zstd run",
                     "none": "No-sharing run (control)", "oracle": "Unimpaired-sharing run (control)"}
 
