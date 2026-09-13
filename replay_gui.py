@@ -57,7 +57,8 @@ def run_bag_dir(robot, run_dir):
     return os.path.join(RUNS_DIR, robot, run_dir, "bag")
 
 
-TOPIC_NAME_RE = re.compile(r"^\s*name:\s*/([A-Za-z0-9_]+)/", re.MULTILINE)
+# A robot publishes a local map; relay/statistics namespaces are not robots.
+TOPIC_NAME_RE = re.compile(r"^\s*name:\s*/([A-Za-z0-9_]+)/map\s*$", re.MULTILINE)
 
 
 def robots_in_bag(bag_dir):
