@@ -19,6 +19,9 @@ What it adds over doing it by hand:
     nav2 global_costmap -> explorer). The known failure mode this catches is a
     nav2 lifecycle bringup that leaves global_costmap configured but never
     activated, where the explorer just logs "Still waiting for first costmap".
+    In a staggered run the wait is split in two, because a robot holding at its
+    start gate has already proven that whole chain and is only waiting on a
+    timer that runs on the SIM clock -- see phase 2a/2b in run_once().
 
   * Round-robins the methods instead of doing all of one then all of the next,
     so if you stop the sweep early (or it hits the deadline) you still have a
@@ -89,6 +92,16 @@ GOAL_RE = re.compile(r"\[(?:(robot\d+)\.)?lite_frontier_explorer\]:\s*Sending go
 # healthy startup) -- it is surfaced in the log summary to explain a timeout.
 COSTMAP_STALL_RE = re.compile(
     r"\[(?:(robot\d+)\.)?lite_frontier_explorer\]:\s*Still waiting for first costmap")
+# A robot holding at its deliberate start gate. The explorer only reaches this
+# point once its costmap, pose and nav2 action server all exist, so this proves
+# the same chain GOAL_RE does -- the robot is healthy and merely waiting out
+# explore_start_delay_s. The delay it reports is in SIM seconds.
+STAGGER_GATE_RE = re.compile(
+    r"\[(?:(robot\d+)\.)?lite_frontier_explorer\]:\s*Staggered start: ready at "
+    r"ROS time [\d.]+; release after (?P<delay>[\d.]+)s")
+# Wall-clock slack added on top of the sim->wall conversion of a start gate, to
+# cover the explorer's own tick period and the first plan after release.
+STAGGER_GRACE_S = 30.0
 # A launch description that raised. This is fatal and INSTANT: ros2 launch has
 # already given up, but docker.sh and the container stay alive, so without this
 # the run just sits there and is reported as the generic "no robot ever started
@@ -407,6 +420,8 @@ class DockerRun:
         self._log = None
         self.launched_at = None
         self.robots_ready = set()
+        # robot -> (sim-seconds of gate delay, time.monotonic() when it started)
+        self.robots_gated = {}
         self.saw_costmap_stall = set()
         self.launch_error = None
 
@@ -458,19 +473,40 @@ class DockerRun:
         self._buf += chunk
         *lines, self._buf = self._buf.split(b"\n")
         for raw in lines:
-            text = raw.decode("utf-8", "replace")
-            if self.launched_at is None and LAUNCH_ANCHOR in text:
-                self.launched_at = time.monotonic()
-            m = GOAL_RE.search(text)
-            if m:
-                self.robots_ready.add(m.group(1) or "robot1")
-            m = COSTMAP_STALL_RE.search(text)
-            if m:
-                self.saw_costmap_stall.add(m.group(1) or "robot1")
-            m = LAUNCH_ERROR_RE.search(text)
-            if m and self.launch_error is None:
-                self.launch_error = (m.group("msg") or m.group("msg2")).strip()
+            self.consume(raw.decode("utf-8", "replace"))
         return True
+
+    def now(self):
+        """Indirection so a recorded log can be replayed against its own
+        timestamps instead of this process's clock (see tools/tests)."""
+        return time.monotonic()
+
+    def consume(self, text):
+        """Update run state from one line of stack output."""
+        if self.launched_at is None and LAUNCH_ANCHOR in text:
+            self.launched_at = self.now()
+        m = GOAL_RE.search(text)
+        if m:
+            self.robots_ready.add(m.group(1) or "robot1")
+        m = STAGGER_GATE_RE.search(text)
+        if m:
+            # setdefault, not assignment: _ready_since is latched once per
+            # node, so a second line would mean a relaunched node rather
+            # than a restarted timer.
+            self.robots_gated.setdefault(
+                m.group(1) or "robot1",
+                (float(m.group("delay")), self.now()))
+        m = COSTMAP_STALL_RE.search(text)
+        if m:
+            self.saw_costmap_stall.add(m.group(1) or "robot1")
+        m = LAUNCH_ERROR_RE.search(text)
+        if m and self.launch_error is None:
+            self.launch_error = (m.group("msg") or m.group("msg2")).strip()
+
+    def robots_up(self):
+        """Robots whose full stack is proven alive: exploring, or holding at
+        their start gate (which requires the same costmap/pose/nav2 chain)."""
+        return self.robots_ready | set(self.robots_gated)
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
@@ -611,15 +647,13 @@ def do_one_run(args, method, attempt, num_robots, state, baseline_conf):
         print("    container started; waiting for all robots to begin exploring...",
               flush=True)
 
-        # --- phase 2: readiness -- every robot must send a frontier goal ----
-        # A staggered run has robots that are deliberately NOT exploring yet:
-        # robotN only sends its first goal (N-1)*stagger seconds after it is
-        # otherwise ready. Charging that against the startup timeout would fail
-        # the run for doing exactly what it was configured to do.
-        stagger_allowance = (num_robots - 1) * args.explore_start_stagger
-        ready_deadline = (run.launched_at + args.startup_timeout
-                          + stagger_allowance)
-        while len(run.robots_ready) < num_robots:
+        # --- phase 2a: every robot's stack must come up ---------------------
+        # Proven by a frontier goal, or -- in a staggered run -- by the robot
+        # reporting that it is holding at its start gate, which requires the
+        # same costmap/pose/nav2 chain. The deliberate stagger is deliberately
+        # NOT charged against this timeout; phase 2b waits that out separately.
+        ready_deadline = run.launched_at + args.startup_timeout
+        while len(run.robots_up()) < num_robots:
             if not run.alive() and not run.pump(0.2):
                 result["reason"] = "stack exited during startup"
                 return _finish(run, result, args, before)
@@ -631,16 +665,54 @@ def do_one_run(args, method, attempt, num_robots, state, baseline_conf):
                 result["fatal"] = True
                 return _finish(run, result, args, before)
             if time.monotonic() > ready_deadline:
-                missing = num_robots - len(run.robots_ready)
-                stalled = sorted(run.saw_costmap_stall)
+                up = run.robots_up()
+                # Only robots that never came up: the stall line is throttled
+                # and appears transiently during a healthy startup, so naming a
+                # robot that is already exploring sends the diagnosis after the
+                # wrong failure.
+                stalled = sorted(run.saw_costmap_stall - up)
                 result["reason"] = (
-                    f"{missing} robot(s) never started exploring within "
-                    f"{args.startup_timeout + stagger_allowance:.0f}s "
-                    f"(ready: {sorted(run.robots_ready) or 'none'}"
+                    f"{num_robots - len(up)} robot(s) never brought their stack "
+                    f"up within {args.startup_timeout:.0f}s "
+                    f"(up: {sorted(up) or 'none'}"
                     + (f"; stuck waiting for costmap: {stalled}" if stalled else "")
                     + ")")
                 return _finish(run, result, args, before)
             run.pump(0.5)
+
+        # --- phase 2b: let gated robots wait out their own stagger ----------
+        # explore_start_delay_s is enforced on the SIM clock, so it cannot be
+        # budgeted in wall-clock seconds: at a real-time factor of 0.6 a 120s
+        # stagger costs 200s of wall time, and charging it as 120s fails robots
+        # for doing exactly what they were configured to do. --min-rtf is the
+        # slowest sim we still call healthy. Being generous costs nothing: this
+        # loop exits the moment the last robot sends its first goal.
+        if len(run.robots_ready) < num_robots:
+            holding = {r: v for r, v in run.robots_gated.items()
+                       if r not in run.robots_ready}
+            gate_deadline = max(started + delay / args.min_rtf + STAGGER_GRACE_S
+                                for delay, started in holding.values())
+            print(f"    stack up on all {num_robots} robots; "
+                  f"{', '.join(sorted(holding))} holding at the start gate "
+                  f"(up to {gate_deadline - time.monotonic():.0f}s more)",
+                  flush=True)
+            while len(run.robots_ready) < num_robots:
+                if not run.alive() and not run.pump(0.2):
+                    result["reason"] = "stack exited during staggered start"
+                    return _finish(run, result, args, before)
+                if run.launch_error:
+                    result["reason"] = f"launch failed: {run.launch_error}"
+                    result["fatal"] = True
+                    return _finish(run, result, args, before)
+                if time.monotonic() > gate_deadline:
+                    still = sorted(set(run.robots_gated) - run.robots_ready)
+                    result["reason"] = (
+                        f"{num_robots - len(run.robots_ready)} robot(s) came up "
+                        f"but never left the staggered start gate: {still} "
+                        f"(sim-time stagger allowed down to rtf "
+                        f"{args.min_rtf:g})")
+                    return _finish(run, result, args, before)
+                run.pump(0.5)
 
         ready_at = time.monotonic()
         print(f"    all {num_robots} robots exploring after "
@@ -821,13 +893,24 @@ def main():
     p.add_argument("--cooldown", type=float, default=60.0,
                    help="seconds to wait after each run for docker cleanup (default 60)")
     p.add_argument("--explore-start-stagger", type=float, default=None,
-                   help="Seconds of deliberate per-robot exploration delay to "
-                        "allow for on top of --startup-timeout. Defaults to "
-                        "EXPLORE_START_STAGGER_S from experiment.conf, so a "
-                        "staggered run does not need this passed by hand.")
+                   help="Seconds of deliberate per-robot exploration delay, used "
+                        "only for the runtime estimate printed at startup. "
+                        "Defaults to EXPLORE_START_STAGGER_S from "
+                        "experiment.conf. The readiness deadline does not use "
+                        "it -- each robot reports its own delay as it starts "
+                        "holding, so it cannot drift out of sync with the conf.")
     p.add_argument("--startup-timeout", type=float, default=90.0,
-                   help="seconds after container start for every robot to begin "
-                        "exploring before the run is called invalid (default 90)")
+                   help="seconds after container start for every robot to bring "
+                        "its stack up -- exploring, or holding at its start "
+                        "gate -- before the run is called invalid (default 90). "
+                        "A deliberate stagger is not charged against this; see "
+                        "--min-rtf")
+    p.add_argument("--min-rtf", type=float, default=0.4,
+                   help="slowest sim real-time factor still considered healthy "
+                        "(default 0.4). Converts a robot's sim-time start "
+                        "stagger into a wall-clock cap, so a 120s stagger is "
+                        "allowed up to 300s of wall time. Raise it only to fail "
+                        "slow hosts sooner: a high floor invalidates good runs.")
     p.add_argument("--build-timeout", type=float, default=3600.0,
                    help="seconds to allow for image build + container start "
                         "(default 3600; the first run may build the image)")
@@ -894,6 +977,13 @@ def main():
     if args.target_runs < args.min_runs:
         args.target_runs = args.min_runs
 
+    # A zero or negative floor turns the sim->wall conversion of a start gate
+    # into a ZeroDivisionError or a deadline in the past, both of which would
+    # surface as a mystery invalid run.
+    if not (0.0 < args.min_rtf <= 1.0):
+        raise SystemExit("--min-rtf must be in (0, 1]: it is the slowest sim "
+                         "real-time factor still treated as healthy.")
+
     if args.robot:
         urdf_dir = (REPO / "simulation" / "Week-7-8-ROS2-Navigation"
                     / "bme_ros2_navigation" / "urdf")
@@ -953,7 +1043,10 @@ def main():
     print(f"world={args.world}  methods={args.methods}  robots={num_robots}")
     print(f"duration={args.duration}s (from {args.duration_from})  "
           f"cooldown={args.cooldown}s  min={args.min_runs} target={args.target_runs}")
-    est = (args.duration + 120 + args.cooldown) * len(args.methods)
+    # Startup allowance mirrors run_once: bringup, then the last robot's
+    # sim-time stagger converted to wall time at the --min-rtf floor.
+    startup_est = 120 + (num_robots - 1) * args.explore_start_stagger / args.min_rtf
+    est = (args.duration + startup_est + args.cooldown) * len(args.methods)
     print(f"rough estimate: {timedelta(seconds=int(est * args.min_runs))} for the "
           f"minimum, {timedelta(seconds=int(est * args.target_runs))} for the target")
 
