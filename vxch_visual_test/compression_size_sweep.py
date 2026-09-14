@@ -209,8 +209,8 @@ def plot(results, out_path):
 
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel("map size (cells)", fontsize=FS_AXIS, color=TEXT_SECONDARY)
-    ax.set_ylabel("encoded band stream (bytes)", fontsize=FS_AXIS, color=TEXT_SECONDARY)
+    ax.set_xlabel("Map size (cells)", fontsize=FS_AXIS, color=TEXT_SECONDARY)
+    ax.set_ylabel("Encoded band stream (bytes)", fontsize=FS_AXIS, color=TEXT_SECONDARY)
     ax.tick_params(colors=TEXT_SECONDARY, labelsize=FS_TICK)
     ax.grid(True, which="both", color=GRID_COLOR, linewidth=0.8, alpha=0.5)
     ax.set_axisbelow(True)
