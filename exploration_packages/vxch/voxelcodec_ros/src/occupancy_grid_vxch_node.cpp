@@ -96,20 +96,11 @@ public:
     // smaller tile_size_m_ than the default without re-checking the tradeoff).
     max_tiles_per_update_ = declare_parameter<int>("max_tiles_per_update", -1);
 
-    // "smart" = only queue a band when its fingerprint actually changed, and within a tile
-    // prefer whichever pending band has gone longest without a turn (see TileScheduler).
-    // "simple" = every tile's every band is queued fresh on every on_map() call (no change
-    // detection). Within a tile, bands still rotate least-recently-sent-first, same as
-    // "smart" -- what distinguishes "simple" is the absence of change detection, not the
-    // send order. (It used to take strictly the lowest pending band index, which combined
-    // with re-queueing everything every ingest meant band 0 was refilled and re-picked
-    // forever and no finer band was ever sent at all.) This is the
-    // same "just iterate over the tiles" scheme the baseline OccupancyGrid relay effectively
-    // gets for free: ddil_proxy_node has no dedup/priority logic for a plain map topic (only
-    // for band_N/manifest topics), so baseline already resends the whole map unconditionally
-    // on every SLAM map_update_interval tick. "simple" exists so a vxch-vs-baseline comparison
-    // can isolate what the wavelet/tiling encoding itself buys, independent of whether vxch's
-    // scheduling is also doing extra work baseline never does.
+    // "smart" = change detection with map-wide coarse-to-fine band ordering.
+    // Tick caps pause a layer without letting another tile's detail overtake
+    // pending coarse coverage. New coarse updates preempt refinements.
+    // "simple" = queue every band on every map update, rotating turns within
+    // each tile so re-queued band 0 cannot permanently starve its detail.
     // "rd" = rate-distortion: same change detection as "smart", but instead of round-robin
     // fairness across tiles, scores every pending band by estimated distortion-reduction-per-
     // byte (Haar coefficient energy / payload size) and drains highest score first across ALL

@@ -66,34 +66,11 @@ public:
     }
     loss_pct_ = declare_parameter<double>("loss_pct", 0.0);
     delay_ms_ = declare_parameter<double>("delay_ms", 0.0);
-    // Per-band-index step of the absolute starvation deadline (see BandQueue in
-    // ddil_proxy_logic.hpp): a queued band_k jumps ahead of every other band
-    // once it has waited priority_aging_ms * k. It is no longer a continuous
-    // decay -- as a decay at the old 250ms default it flattened every band to
-    // one priority tier within 750ms of queueing, which under a real backlog
-    // turned the whole queue into FIFO and destroyed coarsest-first entirely
-    // (measured: bands 0/1/2 sent 73/91/107 on a live 5 kbps link, i.e. more
-    // fine detail delivered than coarse).
-    //
-    // Default is deliberately far above max_queue_seconds below: the byte
-    // budget is what bounds waiting now, so this deadline should only ever
-    // fire on an unbounded queue (bandwidth_kbps=0, or max_queue_seconds=0).
+    // Legacy non-batched traffic can age and shed. Typed VXCH batches use
+    // strict band ordering and retain latest per-tile updates at every level.
+    // Their pending map state may exceed this soft queue budget, but repeated
+    // updates replace slots instead of accumulating a history of snapshots.
     priority_aging_ms_ = declare_parameter<double>("priority_aging_ms", 15000.0);
-    // How many seconds of this link's own capacity the queue may hold before
-    // it shreds its finest queued bands to stay inside that. 0 = unbounded
-    // (pre-shedding behavior).
-    //
-    // An unbounded queue was the single worst failure here. Measured live at
-    // 5 kbps: 4.0 MB queued, band_2's backlog ETA 1h47m, and the peer's
-    // decoder therefore holding 64 of the sender's 468 explored tiles -- it
-    // had effectively frozen on the first ~30 seconds of the run because
-    // everything after that went to the back of a queue draining at 1/12th
-    // the rate it filled. Nothing in the pipeline was shedding load, so the
-    // backlog grew for the whole run and the newest (i.e. only interesting)
-    // map content was always last in line.
-    //
-    // A few seconds is the useful range: it has to be long enough to smooth a
-    // send tick's burst, and short enough that what arrives is still current.
     max_queue_seconds_ = declare_parameter<double>("max_queue_seconds", 4.0);
     // Minimum spacing between relayed manifests. The manifest sits at a fixed
     // priority tier ahead of every band (the decoder cannot place a tile
@@ -212,11 +189,12 @@ private:
     const bool is_bypass = cfg.bypass;
     const std::string input_topic = cfg.input_topic;
     const EpochRole epoch_role = epoch_role_from_msg_type(cfg.msg_type);
+    const bool is_tile_batch = cfg.msg_type == "voxelcodec_msgs/msg/VoxelTileBatch";
     auto sub = create_generic_subscription(
       cfg.input_topic, cfg.msg_type, qos,
-      [this, pub, is_bypass, input_topic, epoch_role](
+      [this, pub, is_bypass, input_topic, epoch_role, is_tile_batch](
         std::shared_ptr<rclcpp::SerializedMessage> serialized) {
-        on_message(serialized, pub, is_bypass, input_topic, epoch_role);
+        on_message(serialized, pub, is_bypass, input_topic, epoch_role, is_tile_batch);
       });
     subscriptions_.push_back(sub);
 
@@ -231,7 +209,8 @@ private:
     std::shared_ptr<rclcpp::GenericPublisher> pub,
     bool bypass,
     const std::string & input_topic,
-    EpochRole epoch_role)
+    EpochRole epoch_role,
+    bool is_tile_batch)
   {
     if (bypass) {
       pub->publish(*serialized);
@@ -259,24 +238,15 @@ private:
     item.serialized = serialized;
     item.publisher = pub;
     item.epoch_role = epoch_role;
+    item.is_tile_batch = is_tile_batch;
 
     const int band_idx = band_index_from_topic(input_topic);
     if (band_idx >= 0) {
       item.band_priority = band_idx;
-      // Deliberately NO dedup key for band traffic.
-      //
-      // Each band message is now a VoxelTileBatch carrying every tile the
-      // encoder scheduled for that band in one send tick, and the scheduler
-      // only puts a tile in when its content actually changed. Two successive
-      // batches on the same band therefore describe DIFFERENT sets of tiles,
-      // not two versions of one tile -- replacing an older queued batch with a
-      // newer one would silently discard every tile the older one carried and
-      // the newer one doesn't, i.e. drop map updates outright.
-      //
-      // (The old per-(tile,band) dedup key made sense when one message meant
-      // one tile, where a newer state genuinely superseded the older. Batching
-      // removes both the need and the safety of that.) An empty dedup_key
-      // never dedups -- see BandQueueEmptyDedupKeyNeverDedups.
+      // BandQueue unpacks typed batches into retained per-tile slots and
+      // repacks them when selected. Whole-batch replacement would lose tiles
+      // absent from the newer batch; byte-budget shedding would lose updates
+      // that the encoder's change detection will never offer again.
       item.dedup_key.clear();
     } else if (is_manifest_topic(input_topic)) {
       // Manifest must arrive before any band (decoder needs it to parse coefficients).

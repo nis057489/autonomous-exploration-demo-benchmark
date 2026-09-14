@@ -322,6 +322,7 @@ if(BUILD_TESTING)
     test/test_ddil_proxy_logic.cpp
   )
   if(TARGET test_ddil_proxy_logic)
+    target_link_libraries(test_ddil_proxy_logic ${PROJECT_NAME})
     target_include_directories(test_ddil_proxy_logic PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
     ament_target_dependencies(test_ddil_proxy_logic rclcpp voxelcodec_msgs)
   endif()

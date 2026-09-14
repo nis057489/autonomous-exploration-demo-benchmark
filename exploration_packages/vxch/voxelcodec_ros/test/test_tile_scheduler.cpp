@@ -314,8 +314,10 @@ TEST(TileScheduler, TakePendingBandsRespectsMaxTilesPerUpdate)
   std::set<TileKey> tiles_serviced;
   for (const auto & item : scheduled) {tiles_serviced.insert(item.tile);}
   EXPECT_EQ(tiles_serviced.size(), 2U);
-  // The third tile is still queued, untouched, for a future tick.
-  EXPECT_EQ(scheduler.queued_tile_count(), 1U);
+  // Detail on the first two tiles must wait for coarse on the third.
+  EXPECT_EQ(scheduler.queued_tile_count(), 3U);
+  ASSERT_EQ(scheduled.size(), 2U);
+  for (const auto & item : scheduled) {EXPECT_EQ(item.band_index, 0);}
 }
 
 TEST(TileScheduler, SmartModePrefersNeverSentBandOverRecentlySentOne)
@@ -474,4 +476,29 @@ TEST(TileScheduler, RdModeAgingLetsAWaitingLowScoreBandEventuallyWinOverFreshHig
     }
   }
   EXPECT_TRUE(cold_tile_won) << "aging never let the waiting low-score band win";
+}
+
+TEST(TileScheduler, SmartModeCompletesEachLayerAcrossTilesDespiteTickCaps)
+{
+  TileScheduler scheduler(4.0, 2, "none", true, "smart");
+  scheduler.ingest_grid(make_grid(12, 4), 12, 4, 1.0);
+  std::vector<int> order;
+  while (scheduler.has_pending()) {
+    const auto scheduled = scheduler.take_pending_bands(3, 1);
+    ASSERT_FALSE(scheduled.empty());
+    for (const auto & item : scheduled) {order.push_back(item.band_index);}
+  }
+  EXPECT_EQ(order, (std::vector<int>{0, 0, 0, 1, 1, 1, 2, 2, 2}));
+}
+
+TEST(TileScheduler, SmartModeNewCoarseCoveragePreemptsOlderDetail)
+{
+  TileScheduler scheduler(4.0, 2, "none", true, "smart");
+  scheduler.ingest_grid(std::vector<std::int8_t>(16, 0), 4, 4, 1.0);
+  scheduler.take_pending_bands(1, -1);
+  scheduler.ingest_grid(std::vector<std::int8_t>(32, 0), 8, 4, 1.0);
+  const auto scheduled = scheduler.take_pending_bands(3, 1);
+  ASSERT_FALSE(scheduled.empty());
+  EXPECT_EQ(scheduled.front().band_index, 0);
+  EXPECT_EQ(scheduled.front().tile, (TileKey{0, 1}));
 }

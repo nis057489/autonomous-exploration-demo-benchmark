@@ -13,6 +13,9 @@
 #include <voxelcodec_msgs/msg/voxel_channel.hpp>
 
 #include "voxelcodec_ros/ddil_proxy_logic.hpp"
+#include "voxelcodec_ros/ros_messages.hpp"
+#include "voxelcodec_ros/tile_scheduler.hpp"
+#include "voxelcodec_ros/tile_reconstructor.hpp"
 
 namespace
 {
@@ -561,4 +564,200 @@ TEST(DdilProxyLogic, BandQueueSustainedFreshCoarseArrivalsCannotStarveAWaitingFi
   EXPECT_TRUE(fine_band_won) <<
     "band_5 never won against a sustained stream of fresh band_0 arrivals -- "
     "this is the starvation bug aging is supposed to bound.";
+}
+
+namespace
+{
+voxelcodec_ros::QueuedMessage tile_batch_message(
+  int band, std::initializer_list<int> columns, int stamp = 1,
+  const std::string & stream = "robot1")
+{
+  voxelcodec_msgs::msg::VoxelTileBatch batch;
+  batch.header.stamp.sec = stamp;
+  batch.stream_id = stream;
+  batch.band_index = band;
+  batch.haar_levels = 2;
+  batch.haar_total_bands = 3;
+  batch.tile_size_cells = 40;
+  batch.compression = "none";
+  for (int col : columns) {
+    voxelcodec_msgs::msg::VoxelTilePayload tile;
+    tile.tile_col = col;
+    tile.tile_width = 40;
+    tile.tile_height = 40;
+    tile.payload.assign(80, static_cast<uint8_t>(stamp));
+    batch.tiles.push_back(tile);
+  }
+  voxelcodec_ros::QueuedMessage msg;
+  msg.is_tile_batch = true;
+  msg.band_priority = band;
+  msg.serialized = std::make_shared<rclcpp::SerializedMessage>();
+  rclcpp::Serialization<voxelcodec_msgs::msg::VoxelTileBatch> ser;
+  ser.serialize_message(&batch, msg.serialized.get());
+  return msg;
+}
+
+voxelcodec_msgs::msg::VoxelTileBatch unpack_batch(const voxelcodec_ros::QueuedMessage & msg)
+{
+  voxelcodec_msgs::msg::VoxelTileBatch batch;
+  rclcpp::Serialization<voxelcodec_msgs::msg::VoxelTileBatch> ser;
+  ser.deserialize_message(msg.serialized.get(), &batch);
+  return batch;
+}
+}  // namespace
+
+TEST(DdilProxyLogic, TileBatchesRetainEveryLayerUnderTinyBudgetAndDrainCoarseFirst)
+{
+  // Zero aging interval deliberately makes legacy fine traffic promote
+  // immediately. Typed batches must remain strictly coarse-first regardless.
+  voxelcodec_ros::BandQueue queue(0.0);
+  queue.set_byte_budget(1);
+  for (int band : {2, 1, 0}) {
+    queue.push(tile_batch_message(band, {0, 1, 2, 3}));
+    queue.push(tile_batch_message(band, {4, 5, 6, 7}));
+  }
+  EXPECT_EQ(queue.size(), 24U);
+  EXPECT_EQ(queue.shed_count(), 0U);
+  // Capacity comes back, with NO encoder retransmission of this static map.
+  int last_band = 0;
+  std::map<int, std::set<int>> received;
+  while (!queue.empty()) {
+    const auto batch = unpack_batch(queue.pop());
+    EXPECT_GE(batch.band_index, last_band);
+    last_band = batch.band_index;
+    for (const auto & tile : batch.tiles) {
+      EXPECT_TRUE(received[batch.band_index].insert(tile.tile_col).second);
+    }
+  }
+  for (int band = 0; band < 3; ++band) {EXPECT_EQ(received[band].size(), 8U);}
+  EXPECT_EQ(queue.queued_bytes(), 0U);
+}
+
+TEST(DdilProxyLogic, TileBatchOverlapReplacesOnlyMatchingTilesAndKeepsOriginalStamps)
+{
+  voxelcodec_ros::BandQueue queue;
+  queue.push(tile_batch_message(0, {0, 1}));
+  EXPECT_TRUE(queue.push(tile_batch_message(0, {1, 2}, 2)));
+  EXPECT_EQ(queue.size(), 3U);
+  std::map<int, int> stamps;
+  while (!queue.empty()) {
+    const auto batch = unpack_batch(queue.pop());
+    for (const auto & tile : batch.tiles) {
+      EXPECT_EQ(tile.payload.front(), batch.header.stamp.sec);
+      EXPECT_TRUE(stamps.emplace(tile.tile_col, batch.header.stamp.sec).second);
+    }
+  }
+  EXPECT_EQ(stamps, (std::map<int, int>{{0, 1}, {1, 2}, {2, 2}}));
+  EXPECT_EQ(queue.queued_bytes(), 0U);
+}
+
+TEST(DdilProxyLogic, TileBatchRefreshKeepsFairPositionAndBoundsHistory)
+{
+  voxelcodec_ros::BandQueue queue;
+  queue.set_byte_budget(1);
+  queue.push(tile_batch_message(0, {0, 1, 2}));
+  for (int stamp = 2; stamp < 100; ++stamp) {
+    queue.push(tile_batch_message(0, {0}, stamp));
+  }
+  EXPECT_EQ(queue.size(), 3U);
+  const auto first = unpack_batch(queue.pop());
+  ASSERT_EQ(first.tiles.size(), 1U);
+  EXPECT_EQ(first.tiles.front().tile_col, 0);
+  EXPECT_EQ(first.header.stamp.sec, 99);
+  queue.push(tile_batch_message(0, {0}, 100));
+  const auto second = unpack_batch(queue.pop());
+  ASSERT_EQ(second.tiles.size(), 2U);
+  EXPECT_EQ(second.tiles[0].tile_col, 1);
+  EXPECT_EQ(second.tiles[1].tile_col, 2);
+}
+
+TEST(DdilProxyLogic, TileBatchesRepackWithinOriginalWireSize)
+{
+  voxelcodec_ros::BandQueue queue;
+  const auto input = tile_batch_message(0, {0, 1, 2});
+  const auto limit = input.serialized->size();
+  queue.push(input);
+  queue.push(tile_batch_message(0, {3, 4, 5}));
+  for (int packet = 0; packet < 2; ++packet) {
+    const auto output = queue.pop();
+    EXPECT_LE(output.serialized->size(), limit);
+    EXPECT_EQ(unpack_batch(output).tiles.size(), 3U);
+  }
+  EXPECT_TRUE(queue.empty());
+  EXPECT_EQ(queue.queued_bytes(), 0U);
+}
+
+TEST(DdilProxyLogic, TileBatchDedupSeparatesStreamsAndBands)
+{
+  voxelcodec_ros::BandQueue queue;
+  queue.push(tile_batch_message(0, {0}, 1, "robot1"));
+  queue.push(tile_batch_message(0, {0}, 1, "robot3"));
+  queue.push(tile_batch_message(1, {0}, 1, "robot1"));
+  EXPECT_EQ(queue.size(), 3U);
+  EXPECT_EQ(unpack_batch(queue.pop()).stream_id, "robot1");
+  EXPECT_EQ(unpack_batch(queue.pop()).stream_id, "robot3");
+  EXPECT_EQ(unpack_batch(queue.pop()).band_index, 1);
+}
+
+TEST(DdilProxyLogic, RetainedMapReconstructsFullCoarseCoverageThenExactDetail)
+{
+  voxelcodec_ros::TileScheduler encoder(4.0, 2, "zstd", true, "smart");
+  std::vector<std::int8_t> grid(12 * 8);
+  for (std::size_t i = 0; i < grid.size(); ++i) {grid[i] = (i * 7) % 101;}
+  encoder.ingest_grid(grid, 12, 8, 1.0);
+  voxelcodec_ros::BandQueue queue(0.0);
+  queue.set_byte_budget(1);  // even less space than a single coarse tile
+  std::map<int, std::vector<voxelcodec_msgs::msg::VoxelTilePayload>> tiles;
+  for (auto & item : encoder.take_pending_bands(3, -1)) {
+    tiles[item.band_index].push_back(voxelcodec_ros::tile_payload_to_msg(
+      item.tile.first, item.tile.second, item.channel.descriptor, std::move(item.channel.payload)));
+  }
+  ASSERT_FALSE(encoder.has_pending());
+  for (int band : {2, 1, 0}) {
+    voxelcodec_ros::TileBatchSpec spec;
+    spec.stream_id = "robot1";
+    spec.band_index = band;
+    spec.haar_levels = 2;
+    spec.haar_total_bands = 3;
+    spec.varint_encoding = true;
+    spec.compression = "zstd";
+    spec.tile_size_cells = 4;
+    for (const auto & batch : voxelcodec_ros::split_tiles_into_batches(
+        spec, std::move(tiles[band]), 300))
+    {
+      voxelcodec_ros::QueuedMessage msg;
+      msg.is_tile_batch = true;
+      msg.serialized = std::make_shared<rclcpp::SerializedMessage>();
+      rclcpp::Serialization<voxelcodec_msgs::msg::VoxelTileBatch> ser;
+      ser.serialize_message(&batch, msg.serialized.get());
+      queue.push(std::move(msg));
+    }
+  }
+  voxelcodec_ros::TileReconstructor decoder(2);
+  ASSERT_TRUE(decoder.ingest_manifest({
+    {"grid_width", "12"}, {"grid_height", "8"}, {"tile_size_cells", "4"},
+    {"resolution", "1"}, {"origin_x", "0"}, {"origin_y", "0"}}, {}));
+  std::size_t coarse_tiles = 0;
+  bool checked_coarse = false;
+  while (!queue.empty()) {
+    const auto batch = unpack_batch(queue.pop());
+    if (batch.band_index > 0 && !checked_coarse) {
+      ASSERT_EQ(coarse_tiles, 6U);
+      const auto coarse = decoder.reconstruct();
+      ASSERT_TRUE(coarse.has_value());
+      EXPECT_EQ(std::count(coarse->data.begin(), coarse->data.end(), -1), 0);
+      EXPECT_NE(coarse->data, grid);
+      checked_coarse = true;
+    }
+    for (const auto & tile : batch.tiles) {
+      EXPECT_FALSE(decoder.ingest_band(batch.band_index,
+        voxelcodec_ros::tile_payload_to_descriptor(batch, tile, batch.band_index),
+        tile.payload).has_value());
+      if (batch.band_index == 0) {++coarse_tiles;}
+    }
+  }
+  EXPECT_TRUE(checked_coarse);
+  const auto full = decoder.reconstruct();
+  ASSERT_TRUE(full.has_value());
+  EXPECT_EQ(full->data, grid);
 }

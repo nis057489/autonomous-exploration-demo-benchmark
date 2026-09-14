@@ -253,7 +253,7 @@ public:
           // Two separate gates, and both matter:
           //   fp_for_tile[k]  -- what was last QUEUED, so a band doesn't get
           //                      re-queued every ingest while it waits its turn.
-          //   last_sent_fp_   -- what the receiver was last actually GIVEN.
+          //   last_sent_fp_   -- what was last offered to the transport (not an ACK).
           // The second is what stops re-sending a state the peer already holds.
           // Origin motion re-clips edge tiles every tick, so a tile is
           // re-encoded constantly; whenever that re-encode lands back on the
@@ -292,15 +292,18 @@ public:
     EncodedChannel channel;
   };
 
-  // Round-robin dequeue across tiles with pending bands: each tile gets up to
-  // max_bands_per_update of its own highest-priority pending bands this tick,
-  // then -- if it still has more pending -- goes to the back of the queue.
-  // max_tiles_per_update < 0 means no cap (every tile currently queued gets a turn).
+  // Per-tick caps apply in every mode. Smart completes map-wide layers;
+  // simple rotates bands within each tile; rd ranks candidates by score.
+  // max_tiles_per_update < 0 means no distinct-tile cap.
   std::vector<ScheduledBand> take_pending_bands(int max_bands_per_update, int max_tiles_per_update)
   {
     std::vector<ScheduledBand> out;
     if (tile_queue_.empty()) {
       return out;
+    }
+
+    if (schedule_mode_ == "smart") {
+      return take_pending_bands_coarse(max_bands_per_update, max_tiles_per_update);
     }
 
     if (schedule_mode_ == "rd") {
@@ -328,7 +331,7 @@ public:
         // coarsest-first, so a band that was just delivered doesn't cut back in
         // line ahead of one that's been waiting longer.
         //
-        // This rotation applies in EVERY mode, not just "smart". Taking
+        // This rotation applies to the "simple" resend-everything mode. Taking
         // bands_for_tile.begin() unconditionally (it is keyed by band index, so
         // begin() is the coarsest) looks like a harmless "coarsest-first"
         // policy, but combined with "simple" mode's re-queue-everything ingest
@@ -381,6 +384,52 @@ public:
   int tile_size_cells() const {return tile_size_cells_;}
 
 private:
+  // Complete each pending resolution layer across the map before advancing.
+  // A per-tick cap may pause a layer, but must not let detail on an earlier
+  // tile jump ahead of coarse coverage on a later tile.
+  std::vector<ScheduledBand> take_pending_bands_coarse(int max_bands, int max_tiles)
+  {
+    std::vector<ScheduledBand> out;
+    std::map<TileKey, int> taken;
+    for (int band_index = 0; band_index <= haar_levels_; ++band_index) {
+      bool layer_pending = false;
+      for (const auto & key : tile_queue_) {
+        auto & bands = pending_by_tile_.at(key);
+        auto band = bands.find(band_index);
+        if (band == bands.end()) {continue;}
+        const auto count = taken.find(key);
+        if (max_bands <= 0 || (count != taken.end() && count->second >= max_bands) ||
+          (count == taken.end() && max_tiles >= 0 &&
+          static_cast<int>(taken.size()) >= max_tiles))
+        {
+          layer_pending = true;
+          continue;
+        }
+        out.push_back({key, band_index, std::move(band->second)});
+        bands.erase(band);
+        ++taken[key];
+        last_sent_seq_[key][band_index] = ++send_seq_counter_;
+        record_sent(key, band_index);
+      }
+      if (layer_pending) {break;}
+    }
+    std::deque<TileKey> remaining;
+    std::deque<TileKey> serviced;
+    for (const auto & key : tile_queue_) {
+      if (pending_by_tile_.at(key).empty()) {
+        pending_by_tile_.erase(key);
+        tiles_in_queue_.erase(key);
+      } else if (taken.count(key)) {
+        serviced.push_back(key);
+      } else {
+        remaining.push_back(key);
+      }
+    }
+    remaining.insert(remaining.end(), serviced.begin(), serviced.end());
+    tile_queue_ = std::move(remaining);
+    return out;
+  }
+
   // "rd" (rate-distortion) selection: unlike the round-robin path above,
   // this scores every currently-pending (tile, band) at once and drains
   // highest score first, so a hot tile's high-value band can outrank a
@@ -478,7 +527,7 @@ private:
     return out;
   }
 
-  // Moves a band's queued fingerprint into the "delivered" record.
+  // Records a band offered to the transport; this is not a receiver ACK.
   void record_sent(const TileKey & key, int band_index)
   {
     auto pend = pending_fp_.find(key);
