@@ -102,5 +102,33 @@ class ComparisonMetricsTest(unittest.TestCase):
                 load_summary(path)
 
 
+class BootstrapConfidenceIntervalTest(unittest.TestCase):
+    def test_two_run_interval_matches_exact_bootstrap_distribution(self):
+        # Four equally likely ordered resamples give means 0, 50, 50, 100.
+        # Their 95% percentile interval is [0, 100], unlike the data IQR.
+        lower, mean, upper = metrics.bootstrap_mean_interval(np.array([[0.0], [100.0]]))
+        np.testing.assert_array_equal(lower, [0.0])
+        np.testing.assert_array_equal(mean, [50.0])
+        np.testing.assert_array_equal(upper, [100.0])
+
+    def test_whole_run_resampling_preserves_affine_time_relationship(self):
+        values = np.arange(10, dtype=float) ** 2
+        trajectories = np.column_stack([values, 2 * values + 5])
+        first = metrics.bootstrap_mean_interval(trajectories)
+        second = metrics.bootstrap_mean_interval(trajectories)
+        for interval, repeated in zip(first, second):
+            np.testing.assert_array_equal(interval, repeated)
+            np.testing.assert_allclose(interval[1], 2 * interval[0] + 5)
+        lower, mean, upper = first
+        np.testing.assert_allclose(mean, [28.5, 62.0])
+        assert np.all(lower >= trajectories.min(axis=0))
+        assert np.all(upper <= trajectories.max(axis=0))
+
+    def test_one_run_has_no_estimated_confidence_interval(self):
+        lower, mean, upper = metrics.bootstrap_mean_interval([[10.0, 80.0]])
+        assert lower is None and upper is None
+        np.testing.assert_array_equal(mean, [10.0, 80.0])
+
+
 if __name__ == '__main__':
     unittest.main()
