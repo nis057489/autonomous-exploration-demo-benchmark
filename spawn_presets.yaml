@@ -58,20 +58,40 @@ mine:
   default:
     - { x: 0.00, y: 0.00, yaw: 0.00 }
 
-# Branch-exchange layout: each robot starts near the closed end of its own
-# 3 m wide branch, facing the common hall. Three explicit, non-overlapping
-# positions. See simulation/worlds/long_t/README.md and overview.svg.
+# long_t is a plain T: a 20 m east-west cross hall (x -10..10, y -2..2), a 20 m
+# southbound stem (x -2..2, y -20..0), and two dead-end "trap" branches hanging
+# south off the hall ends (x -10..-6 and 6..10, y -17..-2). Floor spans
+# y -20..2 -- the old branch-exchange starts at y=16 were off the map entirely.
+# All positions below are on floor with 2.0 m clearance to the nearest wall.
 long_t:
+  # Stem dead end, facing north up the stem toward the T junction. Matches the
+  # suggested start pose in long_t.sdf and the hardcoded default in launch.sh.
   default:
-    - { x: 0.00, y: 16.00, yaw: -1.5707963267948966 }
+    - { x: 0.00, y: -17.00, yaw: 1.5707963267948966 }
+
+  # One robot at each of the three dead ends -- stem tip, left trap, right trap
+  # -- every one facing north toward the cross hall they share.
   distributed:
-    - { x: -4.00, y: 16.00, yaw: -1.5707963267948966 }
-    - { x: 0.00, y: 16.00, yaw: -1.5707963267948966 }
-    - { x: 4.00, y: 16.00, yaw: -1.5707963267948966 }
-  reversed:
-    - { x: 4.00, y: 16.00, yaw: -1.5707963267948966 }
-    - { x: 0.00, y: 16.00, yaw: -1.5707963267948966 }
-    - { x: -4.00, y: 16.00, yaw: -1.5707963267948966 }
+    - { x: 0.00, y: -17.00, yaw: 1.5707963267948966 }
+    - { x: -8.00, y: -15.00, yaw: 1.5707963267948966 }
+    - { x: 8.00, y: -15.00, yaw: 1.5707963267948966 }
+
+  # Two robots at opposite ends of the T: robot1 on the crossbar (the top of the
+  # T, on the hall centerline directly above the stem mouth, facing the closed
+  # north wall so neither hall arm is favored), robot2 at the stem dead end (the
+  # bottom of the T, facing north up the stem). 17 m apart, neither can see the
+  # other's half of the map at t=0.
+  top_bottom:
+    - { x: 0.00, y: 0.00, yaw: 1.5707963267948966 }
+    - { x: 0.00, y: -17.00, yaw: 1.5707963267948966 }
+
+  # Shared cross hall: abreast on the hall centerline over the stem mouth, so no
+  # robot's start assigns it a branch. All face north at the closed hall wall,
+  # leaving the stem, left trap and right trap equidistant behind/beside them.
+  shared_hall:
+    - { x: -1.50, y: 0.00, yaw: 1.5707963267948966 }
+    - { x: 0.00, y: 0.00, yaw: 1.5707963267948966 }
+    - { x: 1.50, y: 0.00, yaw: 1.5707963267948966 }
 
 small_maze:
   default:

@@ -167,9 +167,13 @@ if [[ "${WORLD}" == "warehouse" ]]; then
 fi
 
 if [[ "${WORLD}" == "long_t" ]]; then
+  # Stem dead end, facing north toward the T junction. Matches spawn_presets.yaml's
+  # long_t/default and the suggested start pose in long_t.sdf. The previous
+  # (0, 16) predates the current plain-T world, whose floor ends at y=2 -- robots
+  # spawned 14 m off the map and Nav2 reported them out of costmap bounds.
   SPAWN_X="0.0"
-  SPAWN_Y="16.0"
-  SPAWN_YAW="-1.5707963267948966"
+  SPAWN_Y="-17.0"
+  SPAWN_YAW="1.5707963267948966"
 fi
 
 if [[ "${WORLD}" == "maze" ]]; then
