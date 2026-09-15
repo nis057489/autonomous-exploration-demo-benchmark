@@ -21,7 +21,9 @@ What it adds over doing it by hand:
     activated, where the explorer just logs "Still waiting for first costmap".
     In a staggered run the wait is split in two, because a robot holding at its
     start gate has already proven that whole chain and is only waiting on a
-    timer that runs on the SIM clock -- see phase 2a/2b in run_once().
+    timer that runs on the SIM clock -- see phase 2a/2b in do_one_run().
+    By default --duration starts at robot1's first exploration goal, so the
+    other robots' staggered starts are included in the wall-clock run budget.
 
   * Round-robins the methods instead of doing all of one then all of the next,
     so if you stop the sweep early (or it hits the deadline) you still have a
@@ -99,6 +101,8 @@ COSTMAP_STALL_RE = re.compile(
 STAGGER_GATE_RE = re.compile(
     r"\[(?:(robot\d+)\.)?lite_frontier_explorer\]:\s*Staggered start: ready at "
     r"ROS time [\d.]+; release after (?P<delay>[\d.]+)s")
+SPAWN_SCHEDULE_RE = re.compile(
+    r"Scheduled spawn: (robot\d+) at simulation time ([\d.]+)s")
 # Wall-clock slack added on top of the sim->wall conversion of a start gate, to
 # cover the explorer's own tick period and the first plan after release.
 STAGGER_GRACE_S = 30.0
@@ -420,8 +424,10 @@ class DockerRun:
         self._log = None
         self.launched_at = None
         self.robots_ready = set()
+        self.robots_started_at = {}
         # robot -> (sim-seconds of gate delay, time.monotonic() when it started)
         self.robots_gated = {}
+        self.robot_spawn_times = {}
         self.saw_costmap_stall = set()
         self.launch_error = None
 
@@ -487,7 +493,9 @@ class DockerRun:
             self.launched_at = self.now()
         m = GOAL_RE.search(text)
         if m:
-            self.robots_ready.add(m.group(1) or "robot1")
+            robot = m.group(1) or "robot1"
+            self.robots_ready.add(robot)
+            self.robots_started_at.setdefault(robot, self.now())
         m = STAGGER_GATE_RE.search(text)
         if m:
             # setdefault, not assignment: _ready_since is latched once per
@@ -496,12 +504,23 @@ class DockerRun:
             self.robots_gated.setdefault(
                 m.group(1) or "robot1",
                 (float(m.group("delay")), self.now()))
+        m = SPAWN_SCHEDULE_RE.search(text)
+        if m:
+            self.robot_spawn_times.setdefault(m.group(1), float(m.group(2)))
         m = COSTMAP_STALL_RE.search(text)
         if m:
             self.saw_costmap_stall.add(m.group(1) or "robot1")
         m = LAUNCH_ERROR_RE.search(text)
         if m and self.launch_error is None:
             self.launch_error = (m.group("msg") or m.group("msg2")).strip()
+
+    def duration_origin(self, mode):
+        """Latched wall-clock origin; 'ready' is used only after all start."""
+        if mode == "first":
+            return self.robots_started_at.get("robot1")
+        if mode == "launch":
+            return self.launched_at
+        return max(self.robots_started_at.values(), default=None)
 
     def robots_up(self):
         """Robots whose full stack is proven alive: exploring, or holding at
@@ -626,7 +645,25 @@ def do_one_run(args, method, attempt, num_robots, state, baseline_conf):
                     robot=args.robot)
     result = {"method": method, "attempt": attempt, "started": stamp,
               "log": rel(log_path), "valid": False,
+              "duration": args.duration, "duration_from": args.duration_from,
               "reason": None, "run_dirs": [], "robots_ready": []}
+
+    def budget_remaining():
+        # Legacy 'ready' timing deliberately waits for every robot first.
+        origin = (None if args.duration_from == "ready"
+                  else run.duration_origin(args.duration_from))
+        return (float("inf") if origin is None
+                else origin + args.duration - time.monotonic())
+
+    def budget_expired():
+        if budget_remaining() > 0:
+            return False
+        result["reason"] = (
+            f"{args.duration:g}s duration reached (from {args.duration_from}) "
+            f"before all {num_robots} robots began exploring "
+            f"(exploring: {sorted(run.robots_ready) or 'none'})")
+        return True
+
     try:
         run.start()
 
@@ -652,8 +689,10 @@ def do_one_run(args, method, attempt, num_robots, state, baseline_conf):
         # reporting that it is holding at its start gate, which requires the
         # same costmap/pose/nav2 chain. The deliberate stagger is deliberately
         # NOT charged against this timeout; phase 2b waits that out separately.
-        ready_deadline = run.launched_at + args.startup_timeout
+        expected_robots = {f"robot{i + 1}" for i in range(num_robots)}
         while len(run.robots_up()) < num_robots:
+            if budget_expired():
+                return _finish(run, result, args, before)
             if not run.alive() and not run.pump(0.2):
                 result["reason"] = "stack exited during startup"
                 return _finish(run, result, args, before)
@@ -664,39 +703,51 @@ def do_one_run(args, method, attempt, num_robots, state, baseline_conf):
                 result["reason"] = f"launch failed: {run.launch_error}"
                 result["fatal"] = True
                 return _finish(run, result, args, before)
-            if time.monotonic() > ready_deadline:
-                up = run.robots_up()
+            up = run.robots_up()
+            # A robot deliberately absent until a simulation timestamp gets
+            # its normal bringup allowance after that scheduled spawn. This
+            # does not extend the overall duration measured from robot1.
+            overdue = sorted(r for r in expected_robots - up
+                             if time.monotonic() > run.launched_at
+                             + run.robot_spawn_times.get(r, 0.0) / args.min_rtf
+                             + args.startup_timeout)
+            if overdue:
                 # Only robots that never came up: the stall line is throttled
                 # and appears transiently during a healthy startup, so naming a
                 # robot that is already exploring sends the diagnosis after the
                 # wrong failure.
-                stalled = sorted(run.saw_costmap_stall - up)
+                stalled = sorted(run.saw_costmap_stall & set(overdue))
                 result["reason"] = (
-                    f"{num_robots - len(up)} robot(s) never brought their stack "
+                    f"{len(overdue)} robot(s) never brought their stack "
                     f"up within {args.startup_timeout:.0f}s "
-                    f"(up: {sorted(up) or 'none'}"
+                    f"of their allowed spawn time (overdue: {overdue}; "
+                    f"up: {sorted(up) or 'none'}"
                     + (f"; stuck waiting for costmap: {stalled}" if stalled else "")
                     + ")")
                 return _finish(run, result, args, before)
-            run.pump(0.5)
+            run.pump(max(0.0, min(0.5, budget_remaining())))
 
         # --- phase 2b: let gated robots wait out their own stagger ----------
         # explore_start_delay_s is enforced on the SIM clock, so it cannot be
         # budgeted in wall-clock seconds: at a real-time factor of 0.6 a 120s
         # stagger costs 200s of wall time, and charging it as 120s fails robots
         # for doing exactly what they were configured to do. --min-rtf is the
-        # slowest sim we still call healthy. Being generous costs nothing: this
-        # loop exits the moment the last robot sends its first goal.
+        # slowest sim we still call healthy. The overall run duration remains
+        # a hard cap when measured from robot1 or container launch.
         if len(run.robots_ready) < num_robots:
             holding = {r: v for r, v in run.robots_gated.items()
                        if r not in run.robots_ready}
             gate_deadline = max(started + delay / args.min_rtf + STAGGER_GRACE_S
                                 for delay, started in holding.values())
+            gate_remaining = max(0.0, min(gate_deadline - time.monotonic(),
+                                          budget_remaining()))
             print(f"    stack up on all {num_robots} robots; "
                   f"{', '.join(sorted(holding))} holding at the start gate "
-                  f"(up to {gate_deadline - time.monotonic():.0f}s more)",
+                  f"(up to {gate_remaining:.0f}s more)",
                   flush=True)
             while len(run.robots_ready) < num_robots:
+                if budget_expired():
+                    return _finish(run, result, args, before)
                 if not run.alive() and not run.pump(0.2):
                     result["reason"] = "stack exited during staggered start"
                     return _finish(run, result, args, before)
@@ -712,23 +763,26 @@ def do_one_run(args, method, attempt, num_robots, state, baseline_conf):
                         f"(sim-time stagger allowed down to rtf "
                         f"{args.min_rtf:g})")
                     return _finish(run, result, args, before)
-                run.pump(0.5)
+                run.pump(max(0.0, min(0.5, budget_remaining())))
 
         ready_at = time.monotonic()
+        origin = run.duration_origin(args.duration_from)
+        result["duration_started_after_launch_s"] = origin - run.launched_at
+        end = origin + args.duration
         print(f"    all {num_robots} robots exploring after "
-              f"{ready_at - run.launched_at:.0f}s -- running for {args.duration}s",
+              f"{ready_at - run.launched_at:.0f}s -- "
+              f"{max(0.0, end - ready_at):.1f}s remaining of {args.duration:g}s "
+              f"(from {args.duration_from})",
               flush=True)
 
         # --- phase 3: hold for the run duration ----------------------------
-        origin = ready_at if args.duration_from == "ready" else run.launched_at
-        end = origin + args.duration
         next_note = time.monotonic() + 120
         while time.monotonic() < end:
             if not run.alive() and not run.pump(0.2):
                 elapsed = time.monotonic() - origin
                 result["reason"] = f"stack exited early after {elapsed:.0f}s"
                 return _finish(run, result, args, before)
-            run.pump(0.5)
+            run.pump(max(0.0, min(0.5, end - time.monotonic())))
             if time.monotonic() >= next_note:
                 print(f"    ... {end - time.monotonic():.0f}s remaining", flush=True)
                 next_note += 120
@@ -746,6 +800,14 @@ def do_one_run(args, method, attempt, num_robots, state, baseline_conf):
 
 
 def _finish(run, result, args, before):
+    result["robots_ready"] = sorted(run.robots_ready)
+    origin = (run.duration_origin(args.duration_from)
+              if args.duration_from != "ready"
+              or "duration_started_after_launch_s" in result else None)
+    if origin is not None:
+        result["duration_elapsed_s"] = time.monotonic() - origin
+        if run.launched_at is not None:
+            result["duration_started_after_launch_s"] = origin - run.launched_at
     result["stop"] = run.stop(grace=args.stop_grace)
     run.close()
     force_cleanup_container(args.container_name, args.dry_run)
@@ -886,10 +948,11 @@ def main():
     p.add_argument("--target-runs", type=int, default=10,
                    help="valid runs per method to aim for (default 10)")
     p.add_argument("--duration", type=float, default=730.0,
-                   help="seconds to let each run go (default 730)")
-    p.add_argument("--duration-from", choices=("ready", "launch"), default="ready",
-                   help="measure duration from when all robots are exploring "
-                        "(default, keeps runs comparable) or from container start")
+                   help="wall-clock seconds to let each run go (default 730)")
+    p.add_argument("--duration-from", choices=("first", "ready", "launch"), default="first",
+                   help="measure duration from robot1's first exploration goal "
+                        "(first, default; includes other robots' start delays), "
+                        "all robots exploring (ready), or container start (launch)")
     p.add_argument("--cooldown", type=float, default=60.0,
                    help="seconds to wait after each run for docker cleanup (default 60)")
     p.add_argument("--explore-start-stagger", type=float, default=None,
@@ -959,7 +1022,7 @@ def main():
     p.add_argument("--max-duration", type=float, default=None,
                    help="clip each bag to this many seconds for the summary/figure. "
                         "Note bags start recording at container launch while the run "
-                        "window starts once every robot is exploring, so this is not "
+                        "window defaults to robot1's first exploration goal, so this is not "
                         "the same as --duration.")
     p.add_argument("--distrobox", default="jazzy_env",
                    help="distrobox holding rosbag2_py/rclpy (default jazzy_env)")
@@ -1043,9 +1106,10 @@ def main():
     print(f"world={args.world}  methods={args.methods}  robots={num_robots}")
     print(f"duration={args.duration}s (from {args.duration_from})  "
           f"cooldown={args.cooldown}s  min={args.min_runs} target={args.target_runs}")
-    # Startup allowance mirrors run_once: bringup, then the last robot's
-    # sim-time stagger converted to wall time at the --min-rtf floor.
-    startup_est = 120 + (num_robots - 1) * args.explore_start_stagger / args.min_rtf
+    # Only add time that is outside the selected duration window.
+    startup_est = 0 if args.duration_from == "launch" else 120
+    if args.duration_from == "ready":
+        startup_est += (num_robots - 1) * args.explore_start_stagger / args.min_rtf
     est = (args.duration + startup_est + args.cooldown) * len(args.methods)
     print(f"rough estimate: {timedelta(seconds=int(est * args.min_runs))} for the "
           f"minimum, {timedelta(seconds=int(est * args.target_runs))} for the target")

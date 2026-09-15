@@ -355,6 +355,9 @@ def _create_all_actions(context):
                 "num_robots": str(num_robots),
                 "use_sim_time": use_sim_time_str,
                 "params_file": frontier_params_file,
+                "params_override_file": (
+                    "config/lite_frontier_explorer/long_t_left_first.yaml"
+                    if world == "long_t" else ""),
                 "start_stagger_s": str(explore_start_stagger_s),
             }.items(),
         )
@@ -735,7 +738,8 @@ def generate_launch_description():
             DeclareLaunchArgument("rviz", default_value="true"),
             DeclareLaunchArgument(
                 "spawn_positions_json", default_value="[]",
-                description="JSON array of {x,y,yaw} dicts, one per robot. "
+                description="JSON array of {x,y,yaw} dicts, one per robot, with "
+                            "optional spawn_time_s (absolute simulation seconds). "
                             "Empty array uses automatic grid/line offset."),
 
             OpaqueFunction(function=_create_all_actions),

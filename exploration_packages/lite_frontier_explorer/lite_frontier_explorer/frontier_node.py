@@ -15,6 +15,7 @@ from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import PoseArray, Pose
 from rclpy.qos import qos_profile_sensor_data
 from lite_frontier_explorer.reservations import GoalReservations
+from lite_frontier_explorer.branch_priority import BranchPriority
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
@@ -60,6 +61,11 @@ class LiteFrontierExplorer(Node):
         # visible_gain scores wall-occluded unknown area at reachable viewpoints.
         # nearest, best_gain and nearest_high_gain remain as legacy comparisons.
         self.declare_parameter('selection_strategy', 'visible_gain')
+        self.declare_parameter('branch_priority', False)
+        self.declare_parameter('branch_left_region', [-9.5, -16.5, -6.5, 1.5])
+        self.declare_parameter('branch_right_region', [6.5, -16.5, 9.5, 1.5])
+        self.declare_parameter('branch_split_x', 0.0)
+        self.declare_parameter('branch_unknown_tolerance', 0.05)
         self.declare_parameter('frontier_assignment', 'independent')
         self.declare_parameter('robot_index', 0)  # zero-based, supplied by launch
         self.declare_parameter('team_size', 1)
@@ -255,6 +261,17 @@ class LiteFrontierExplorer(Node):
         self._start_release_logged = False
 
         self._information_map_topic = self.get_parameter('information_map_topic').value
+        self._branch_policy = None
+        if self.get_parameter('branch_priority').value:
+            if self._selection_strategy != 'visible_gain' or not self._information_map_topic:
+                raise ValueError('branch_priority requires visible_gain and an information map')
+            if self._frontier_assignment != 'independent':
+                raise ValueError('branch_priority requires independent frontier assignment')
+            self._branch_policy = BranchPriority(
+                self.get_parameter('branch_left_region').value,
+                self.get_parameter('branch_right_region').value,
+                self.get_parameter('branch_split_x').value,
+                self.get_parameter('branch_unknown_tolerance').value)
         self._information_occ_threshold = int(self.get_parameter('information_occ_threshold').value)
         if not 0 < self._information_occ_threshold <= 100:
             raise ValueError('information_occ_threshold must be in 1..100')
@@ -460,6 +477,22 @@ class LiteFrontierExplorer(Node):
                 # and distance gates must not renumber other robots' ranks.
                 candidates = clusters
 
+        branch_policy = getattr(self, '_branch_policy', None)
+        if branch_policy is not None:
+            # Use the complete delivered map, not its crop to Nav2's extent.
+            info = self._latest_information_map.info
+            branch_policy.update(self._latest_information_map.data,
+                                 info.width, info.height, info.resolution,
+                                 info.origin.position.x, info.origin.position.y)
+            candidates = branch_policy.filter_clusters(
+                candidates, costmap.info.resolution, costmap.info.origin.position.x)
+            self.get_logger().info(
+                f"Branch priority: {('left', 'right', 'complete')[branch_policy.stage]}; "
+                f"unknown fractions left={branch_policy.fractions[0]:.3f}, "
+                f"right={branch_policy.fractions[1]:.3f}; "
+                f"completion tolerance={branch_policy.tolerance:.3f}",
+                throttle_duration_sec=9.0)
+
         reservations = (self._reservations.active(self.get_clock().now().nanoseconds / 1e9)
                         if self._reservation_topic else {})
         # Every new assignment respects every live claim. Simultaneous claims
@@ -542,6 +575,14 @@ class LiteFrontierExplorer(Node):
         self._publish_frontier_markers(cluster_xy, cluster_status, goal)
 
         if self._goal_active:
+            if (branch_policy is not None and self._pending_goal_xy is not None
+                    and not branch_policy.accepts(self._pending_goal_xy[0])
+                    and not self._preempting and not self._abandoning_stuck):
+                self.get_logger().info('Branch complete in available map; cancelling its goal.')
+                self._preempting = True
+                if self._goal_handle is not None:
+                    self._goal_handle.cancel_goal_async()
+                return
             # Invalid active viewpoints previously returned {}, which made
             # the utility comparison fail forever. Require two distinct map
             # updates to reject a goal, so a transient costmap obstruction
@@ -699,7 +740,7 @@ class LiteFrontierExplorer(Node):
             # the markers show the newly identified frontier while the
             # robot keeps executing whatever goal was in flight when it was
             # found, which looks like it's ignoring the frontier entirely.
-            committed = (self._selection_strategy != 'visible_gain'
+            committed = branch_policy is not None or (self._selection_strategy != 'visible_gain'
                          and self._max_consecutive_preemptions > 0
                          and self._preempt_streak >= self._max_consecutive_preemptions)
             if (not self._preempting and goal is not None

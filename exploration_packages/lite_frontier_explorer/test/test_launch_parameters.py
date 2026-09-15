@@ -15,6 +15,9 @@ class LaunchParameterTests(unittest.TestCase):
         ) or (isinstance(node, ast.FunctionDef) and node.name == '_frontier_params')]
         settings = {
             'selection_strategy': 'nearest', 'path_occ_threshold': 90,
+            'branch_priority': True, 'branch_left_region': [-9.5, -16.5, -6.5, 1.5],
+            'branch_right_region': [6.5, -16.5, 9.5, 1.5],
+            'branch_split_x': 0.0, 'branch_unknown_tolerance': 0.05,
             'frontier_assignment': 'robot_rank', 'information_occ_threshold': 50,
             'sensor_range_m': 4.0, 'gain_distance_weight': 2.0, 'gain_max_viewpoints': 7,
             'gain_threshold_ratio': 0.5, 'gain_region_cap': 8000,

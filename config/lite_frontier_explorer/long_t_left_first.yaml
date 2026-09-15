@@ -1,0 +1,15 @@
+# Controlled long_t experiment: identical branch order for every robot/method.
+# Regions are a declared layout prior in the shared map frame. Whether they
+# have been observed is determined only from /<robot>/nav_map, never Gazebo.
+# Rectangles cover each branch interior, inset 0.5 m from its outer walls.
+frontier_explorer:
+  ros__parameters:
+    selection_strategy: visible_gain
+    frontier_assignment: independent
+    branch_priority: true
+    branch_left_region: [-9.5, -16.5, -6.5, 1.5]
+    branch_right_region: [6.5, -16.5, 9.5, 1.5]
+    branch_split_x: 0.0
+    # Move on at 95% known; latch completion so small SLAM holes cannot reopen
+    # a branch. Within the selected branch, retain reachable gain-based goals.
+    branch_unknown_tolerance: 0.05

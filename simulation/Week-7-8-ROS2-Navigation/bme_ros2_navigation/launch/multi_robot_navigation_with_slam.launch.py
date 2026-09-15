@@ -22,7 +22,8 @@ from launch.event_handlers import OnProcessExit
 from launch.events import matches_action
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration
-from launch_ros.actions import LifecycleNode, Node, PushROSNamespace
+from launch_ros.actions import LifecycleNode, Node, PushROSNamespace, ROSTimer, SetUseSimTime
+from launch_ros.ros_adapters import get_ros_node
 from launch_ros.events.lifecycle import ChangeState
 from launch_ros.parameter_descriptions import ParameterValue
 from lifecycle_msgs.msg import Transition
@@ -30,6 +31,15 @@ from lifecycle_msgs.msg import Transition
 
 def _bool_value(value):
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _at_sim_time(context, *, spawn_time_s, actions):
+    """Schedule against the world's clock, including if launch started late."""
+    now_s = get_ros_node(context).get_clock().now().nanoseconds / 1e9
+    remaining = spawn_time_s - now_s
+    if remaining <= 0:
+        return actions
+    return [ROSTimer(period=remaining, actions=actions)]
 
 
 def _load_yaml(path):
@@ -788,8 +798,16 @@ def _create_multi_robot_actions(context):
     )
 
     for index, namespace in enumerate(namespaces):
+        robot_action_start = len(actions)
+        spawn_time_s = None
         if spawn_positions:
             pos = spawn_positions[index % len(spawn_positions)]
+            if "spawn_time_s" in pos:
+                spawn_time_s = float(pos["spawn_time_s"])
+                if not math.isfinite(spawn_time_s) or spawn_time_s < 0:
+                    raise RuntimeError(f"{namespace}: spawn_time_s must be finite and nonnegative")
+                if not use_sim_time:
+                    raise RuntimeError("spawn_time_s requires use_sim_time=True")
             robot_x = float(pos["x"])
             robot_y = float(pos["y"])
             robot_z = z
@@ -843,7 +861,11 @@ def _create_multi_robot_actions(context):
             ]
         )
 
-        actions.append(TimerAction(period=index * ROBOT_STAGGER_S, actions=[
+        # Explicit simulation-time spawns start their own bringup sequence;
+        # the default wall-clock staggering still applies to other robots.
+        spawn_offset = index * ROBOT_STAGGER_S if spawn_time_s is None else 0.0
+        nav_offset = index * NAV2_STAGGER_S if spawn_time_s is None else 0.0
+        actions.append(TimerAction(period=spawn_offset, actions=[
                 Node(
                     package="topic_tools",
                     executable="relay",
@@ -948,11 +970,11 @@ def _create_multi_robot_actions(context):
             ],
         )
         actions.append(TimerAction(
-            period=SLAM_BASE_S + index * ROBOT_STAGGER_S,
+            period=SLAM_BASE_S + spawn_offset,
             actions=_autostart_lifecycle_node(slam_node),
         ))
         actions.append(TimerAction(
-            period=NAV2_BASE_S + index * NAV2_STAGGER_S,
+            period=NAV2_BASE_S + nav_offset,
             actions=[
                 GroupAction(
                     actions=[
@@ -971,6 +993,16 @@ def _create_multi_robot_actions(context):
                 )
             ],
         ))
+
+        if spawn_time_s is not None:
+            robot_actions = actions[robot_action_start:]
+            actions[robot_action_start:] = [
+                LogInfo(msg=f"Scheduled spawn: {namespace} at simulation time {spawn_time_s:g}s"),
+                SetUseSimTime(True),
+                OpaqueFunction(function=_at_sim_time, kwargs={
+                    "spawn_time_s": spawn_time_s, "actions": robot_actions,
+                }),
+            ]
 
     for namespace in namespaces:
         actions.append(
@@ -1097,7 +1129,8 @@ def generate_launch_description():
                 description="Gazebo physics RNG seed (-1 = non-deterministic)"),
             DeclareLaunchArgument(
                 "spawn_positions_json", default_value="[]",
-                description="JSON array of {x,y,yaw} dicts, one per robot. "
+                description="JSON array of {x,y,yaw} dicts, one per robot, with "
+                            "optional spawn_time_s (absolute simulation seconds). "
                             "Empty array uses automatic grid/line offset."),
             world_launch,
             OpaqueFunction(function=_create_multi_robot_actions),

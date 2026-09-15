@@ -70,6 +70,20 @@ STARTUP = 90.0  # the --startup-timeout default
 
 
 class StartGateParsing(unittest.TestCase):
+    def test_duration_origin_is_robot1_first_goal_not_another_robot(self):
+        run = Replay()
+        run.clock = 1.0
+        run.consume(sweep.LAUNCH_ANCHOR)
+        run.clock = 2.0
+        run.consume('[robot2.lite_frontier_explorer]: Sending goal to frontier')
+        self.assertIsNone(run.duration_origin("first"))
+        run.clock = 3.0
+        run.consume('[robot1.lite_frontier_explorer]: Sending goal to frontier')
+        run.clock = 4.0
+        run.consume('[robot1.lite_frontier_explorer]: Sending goal to frontier')
+        self.assertEqual(run.duration_origin("first"), 3.0)
+        self.assertEqual(run.duration_origin("launch"), 1.0)
+
     def test_gate_line_is_recognised_with_its_sim_delay(self):
         run = replay(VALID)
         self.assertEqual({r: d for r, (d, _) in run.robots_gated.items()},
@@ -209,6 +223,48 @@ def drive(body, **over):
 
 
 class DriverWaits(unittest.TestCase):
+    def test_scheduled_spawn_gets_bringup_time_after_creation(self):
+        body = "\n".join([
+            'echo "Scheduled spawn: robot3 at simulation time 2s"',
+            GOAL.format(n=2), "sleep 2", GOAL.format(n=3),
+        ])
+        result = drive(body, startup_timeout=1.0, min_rtf=1.0,
+                       duration=2.5, duration_from="first")
+        self.assertTrue(result["valid"], result["reason"])
+        self.assertAlmostEqual(result["duration_elapsed_s"], 2.5, delta=0.25)
+
+    def test_stagger_counts_toward_duration_from_robot1(self):
+        body = "\n".join([
+            GATE.format(n=2, d=1.0), GATE.format(n=3, d=1.0),
+            "sleep 1", GOAL.format(n=2), GOAL.format(n=3),
+        ])
+        result = drive(body, duration=1.5, duration_from="first")
+        self.assertTrue(result["valid"], result["reason"])
+        self.assertAlmostEqual(result["duration_elapsed_s"], 1.5, delta=0.25)
+        self.assertGreater(result["duration_started_after_launch_s"], 0.2)
+
+    def test_duration_caps_gate_wait(self):
+        body = "\n".join([GATE.format(n=2, d=60.0),
+                          GATE.format(n=3, d=120.0)])
+        result = drive(body, duration=0.6, duration_from="first")
+        self.assertFalse(result["valid"])
+        self.assertIn("duration reached", result["reason"])
+        self.assertEqual(result["robots_ready"], ["robot1"])
+        self.assertAlmostEqual(result["duration_elapsed_s"], 0.6, delta=0.25)
+
+    def test_duration_caps_stack_startup_wait(self):
+        result = drive("", duration=0.6, duration_from="first")
+        self.assertFalse(result["valid"])
+        self.assertIn("duration reached", result["reason"])
+        self.assertAlmostEqual(result["duration_elapsed_s"], 0.6, delta=0.25)
+
+    def test_launch_duration_caps_wait_before_robot1_starts(self):
+        result = drive("", duration=0.1, duration_from="launch")
+        self.assertFalse(result["valid"])
+        self.assertIn("duration reached", result["reason"])
+        self.assertEqual(result["robots_ready"], [])
+        self.assertAlmostEqual(result["duration_elapsed_s"], 0.1, delta=0.1)
+
     def test_gated_robots_are_waited_out_not_failed(self):
         # robot3 reports a 4s gate and only explores after 4s of wall time --
         # past a 3s --startup-timeout, which is the case that used to fail.

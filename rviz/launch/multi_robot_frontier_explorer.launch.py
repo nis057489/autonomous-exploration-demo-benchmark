@@ -60,6 +60,11 @@ _LITE_PARAM_KEYS = (
     "occ_threshold",
     "path_occ_threshold",
     "selection_strategy",
+    "branch_priority",
+    "branch_left_region",
+    "branch_right_region",
+    "branch_split_x",
+    "branch_unknown_tolerance",
     "frontier_assignment",
     "sensor_range_m",
     "gain_max_viewpoints",
@@ -99,9 +104,11 @@ _MARKER_COLORS_255 = [
 ]
 
 
-def _frontier_params(base_path, namespace, use_sim_time, color_255, robot_index=0, team_size=1):
+def _frontier_params(base_path, namespace, use_sim_time, color_255, robot_index=0, team_size=1,
+                     overrides=None):
     data = _load_yaml(base_path)
     source = data.get("frontier_explorer", {}).get("ros__parameters", {})
+    source = {**source, **(overrides or {})}
     params = {k: source[k] for k in _LITE_PARAM_KEYS if k in source}
     params["use_sim_time"] = use_sim_time
     params["robot_index"] = robot_index
@@ -126,6 +133,10 @@ def _create_explorer_actions(context):
     package_share = get_package_share_directory("rviz_autonomous_exploration_benchmark")
     num_robots = int(LaunchConfiguration("num_robots").perform(context))
     params_file = _resolve_params_file(LaunchConfiguration("params_file").perform(context), package_share)
+    override_file = LaunchConfiguration("params_override_file").perform(context)
+    overrides = (_load_yaml(_resolve_params_file(override_file, package_share))
+                 .get("frontier_explorer", {}).get("ros__parameters", {})
+                 if override_file else {})
     use_sim_time = _bool_value(LaunchConfiguration("use_sim_time").perform(context))
     log_level = LaunchConfiguration("log_level").perform(context)
     # Seconds between one robot starting to explore and the next. robot1 always
@@ -142,7 +153,8 @@ def _create_explorer_actions(context):
         namespace = f"robot{index + 1}"
         color_255 = _MARKER_COLORS_255[min(index, len(_MARKER_COLORS_255) - 1)]
         generated_params = _frontier_params(params_file, namespace, use_sim_time, color_255,
-                                            robot_index=index, team_size=num_robots)
+                                            robot_index=index, team_size=num_robots,
+                                            overrides=overrides)
         generated_params["explore_start_delay_s"] = index * start_stagger_s
         actions.append(
             Node(
@@ -170,6 +182,7 @@ def generate_launch_description():
                 "params_file",
                 default_value="config/lite_frontier_explorer/config_visit_once.yaml"),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
+            DeclareLaunchArgument("params_override_file", default_value=""),
             DeclareLaunchArgument("log_level", default_value="info"),
             DeclareLaunchArgument("start_stagger_s", default_value="0.0"),
             OpaqueFunction(function=_create_explorer_actions),

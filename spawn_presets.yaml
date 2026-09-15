@@ -1,6 +1,8 @@
 # Robot spawn position presets.
 #
 # Structure: world → preset_name → list of {x, y, yaw} positions.
+# Optional spawn_time_s creates that robot at an absolute simulation time;
+# its SLAM/Nav2 bringup follows creation. Omit for normal startup staggering.
 # Robot N gets positions[N-1]; cycles if there are more robots than positions.
 #
 # Usage:
@@ -61,18 +63,18 @@ mine:
 # long_t is a plain T: a 20 m east-west cross hall (x -10..10, y -2..2), a 5 m
 # southbound stem (x -2..2, y -5..0), and two dead-end "trap" branches hanging
 # south off the hall ends (x -10..-6 and 6..10, y -17..-2). Floor spans
-# y -17..2. The two centerline starts can see the nearby stem bottom wall.
+# y -17..2. The shared centerline start can see the nearby stem bottom wall.
 long_t:
   # Short stem, facing north toward the T junction. Matches the
   # suggested start pose in long_t.sdf and the hardcoded default in launch.sh.
   default:
     - { x: 0.00, y: -3.00, yaw: 1.5707963267948966 }
 
-  # Robot 1's start is retained; robot 2 is 1 m directly behind it.
-  # Both face north. EXPLORE_START_STAGGER_S controls robot 2's delayed release.
+  # Same initial viewpoint: robot 2 is created at simulation time 30 s, after
+  # robot 1 has left. No additional exploration stagger is needed.
   distributed:
     - { x: 0.00, y: -3.00, yaw: 1.5707963267948966 }
-    - { x: 0.00, y: -4.00, yaw: 1.5707963267948966 }
+    - { x: 0.00, y: -3.00, yaw: 1.5707963267948966, spawn_time_s: 90.0 }
 
 
   # Shared cross hall: abreast on the hall centerline over the stem mouth, so no
