@@ -7,6 +7,20 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(gz_transport_vendor REQUIRED)
+find_package(gz_msgs_vendor REQUIRED)
+find_package(gz-transport13 REQUIRED)
+find_package(gz-msgs10 REQUIRED)
+
+add_executable(ground_truth_coverage scripts/ground_truth_coverage.cpp)
+target_compile_features(ground_truth_coverage PRIVATE cxx_std_17)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  # Every native laser beam is evaluated; avoid slowing the simulator in
+  # colcon's default configuration, which otherwise has no optimization.
+  target_compile_options(ground_truth_coverage PRIVATE -O2)
+endif()
+target_link_libraries(ground_truth_coverage gz-transport13::core gz-msgs10::core)
+install(TARGETS ground_truth_coverage DESTINATION lib/${PROJECT_NAME})
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)

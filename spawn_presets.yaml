@@ -72,18 +72,9 @@ long_t:
   # One robot at each of the three dead ends -- stem tip, left trap, right trap
   # -- every one facing north toward the cross hall they share.
   distributed:
+    - { x: 0.00, y: -3.00, yaw: 1.5707963267948966 }
     - { x: 0.00, y: -17.00, yaw: 1.5707963267948966 }
-    - { x: -8.00, y: -15.00, yaw: 1.5707963267948966 }
-    - { x: 8.00, y: -15.00, yaw: 1.5707963267948966 }
 
-  # Two robots at opposite ends of the T: robot1 on the crossbar (the top of the
-  # T, on the hall centerline directly above the stem mouth, facing the closed
-  # north wall so neither hall arm is favored), robot2 at the stem dead end (the
-  # bottom of the T, facing north up the stem). 17 m apart, neither can see the
-  # other's half of the map at t=0.
-  top_bottom:
-    - { x: 0.00, y: 0.00, yaw: 1.5707963267948966 }
-    - { x: 0.00, y: -17.00, yaw: 1.5707963267948966 }
 
   # Shared cross hall: abreast on the hall centerline over the stem mouth, so no
   # robot's start assigns it a branch. All face north at the closed hall wall,

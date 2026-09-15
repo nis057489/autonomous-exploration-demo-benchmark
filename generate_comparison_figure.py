@@ -97,6 +97,8 @@ import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
+from tools.ground_truth_metrics import load_comparison as load_ground_truth_comparison
+
 TEXT_PRIMARY = "#1a1a1a"
 TEXT_SECONDARY = "#52514e"
 GRID_COLOR = "#cccccc"
@@ -1604,7 +1606,7 @@ def plot_union_coverage(ax, results, conditions, series_fn, ylabel, unit="m²"):
     panel_legend(ax, handles)
 
 
-def figure_data(results, conditions, summary, robot_paths, max_duration):
+def figure_data(results, conditions, summary, robot_paths, max_duration, ground_truth=None):
     """Every number the figure draws, as plain JSON-able lists.
 
     Each panel's series is taken from the same function that panel plots, so
@@ -1666,6 +1668,16 @@ def figure_data(results, conditions, summary, robot_paths, max_duration):
     timeline = capacity_timeline(results, conditions)
     data["capacity_timeline"] = (
         None if timeline is None else [[float(t), float(kbps)] for t, kbps in timeline])
+    if ground_truth is not None:
+        data["ground_truth"] = {
+            "pose_source": "Gazebo LaserScan.world_pose at sensor timestamp",
+            "area_definition": "XY cells traversed by laser rays, excluding terminal cells",
+            "range_noise": "as configured in the simulated sensor",
+            "runs": ground_truth,
+        }
+        for metric in ("union", "overlap"):
+            data["series"]["ground_truth_" + metric] = {
+                c: [series(run[metric]) for run in ground_truth[c]] for c in conditions}
     return data
 
 
@@ -1731,6 +1743,11 @@ def main():
               "--none/--oracle/--baseline/--zstd/--vxch to compare", file=sys.stderr)
         sys.exit(1)
     conditions = tuple(c for c in ALL_CONDITIONS if c in robot_paths)
+
+    try:
+        ground_truth = load_ground_truth_comparison(robot_paths, args.max_duration)
+    except (ValueError, KeyError, OSError) as exc:
+        parser.error(str(exc))
 
     # results[c] is a list of per-run {robot: read_bag() result} dicts, one
     # per --<condition> occurrence -- more than one run per condition drives
@@ -1801,6 +1818,11 @@ def main():
                                             "Peer-map completeness (%, excluding own observations)", "%")),
         ("redundant", plot_redundant_coverage, (results, conditions, 4)),
     ]
+    if ground_truth is not None:
+        for metric, label in (("union", "Ground-truth-pose observed union (m²)"),
+                              ("overlap", "Ground-truth-pose observed overlap (m²)")):
+            panels.append(("ground_truth_" + metric, plot_union_coverage,
+                           (ground_truth, conditions, lambda run, key=metric: run[key], label)))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     if args.separate_figures:
@@ -1838,7 +1860,7 @@ def main():
         data_out = args.data_out or args.out.with_suffix(".json")
         data_out.parent.mkdir(parents=True, exist_ok=True)
         data_out.write_text(json.dumps(
-            figure_data(results, conditions, summary, robot_paths, args.max_duration),
+            figure_data(results, conditions, summary, robot_paths, args.max_duration, ground_truth),
             indent=1) + "\n")
         print(f"figure data written to {data_out.resolve()}")
     for c in conditions:

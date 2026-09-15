@@ -396,6 +396,8 @@ cleanup() {
   [[ -n "${STACK_PID:-}" ]] && kill "${STACK_PID}" 2>/dev/null || true
   [[ -n "${BAG_PID:-}" ]] && kill "${BAG_PID}" 2>/dev/null || true
   [[ -n "${BAG_PID:-}" ]] && wait "${BAG_PID}" 2>/dev/null || true
+  [[ -n "${TRUTH_PID:-}" ]] && kill "${TRUTH_PID}" 2>/dev/null || true
+  [[ -n "${TRUTH_PID:-}" ]] && wait "${TRUTH_PID}" 2>/dev/null || true
   [[ -n "${IMPAIRMENT_DELAY_PID:-}" ]] && kill "${IMPAIRMENT_DELAY_PID}" 2>/dev/null || true
   if [[ "${IMPAIRMENT_MODE}" == "tc" && "${NUM_ROBOTS}" -gt 1 ]]; then
     "${DDIL_NETNS_SCRIPT}" down "${NUM_ROBOTS}" 2>/dev/null || true
@@ -529,6 +531,25 @@ if [[ "${RECORD_METRICS}" == true ]]; then
     -o "${RUN_DIR}/bag" "${BAG_TOPICS[@]}" \
     >"${RUN_DIR}/bag_record.log" 2>&1 &
   BAG_PID=$!
+
+  # Evaluation only: native Gazebo scans include the sensor's exact world pose.
+  # Sidecar output never enters ROS navigation or the impaired map links.
+  TRUTH_EXE="$(ros2 pkg prefix bme_ros2_navigation)/lib/bme_ros2_navigation/ground_truth_coverage"
+  if [[ ! -x "${TRUTH_EXE}" ]]; then
+    echo "Ground-truth recorder missing; rebuild bme_ros2_navigation (or the Docker image)." >&2
+    exit 1
+  fi
+  TRUTH_TOPICS=()
+  if (( NUM_ROBOTS > 1 )); then
+    for ((i = 1; i <= NUM_ROBOTS; i++)); do
+      TRUTH_TOPICS+=("robot${i}=/robot${i}/scan")
+    done
+  else
+    TRUTH_TOPICS+=("robot1=/scan")
+  fi
+  "${TRUTH_EXE}" "${RUN_DIR}/ground_truth_coverage.csv" 0.05 "${TRUTH_TOPICS[@]}" \
+    >"${RUN_DIR}/ground_truth_coverage.log" 2>&1 &
+  TRUTH_PID=$!
 fi
 
 # ── Link capacity schedule (LINK_PROFILE != static) ─────────────────────────
