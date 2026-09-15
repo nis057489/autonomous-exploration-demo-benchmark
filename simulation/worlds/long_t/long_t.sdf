@@ -32,7 +32,7 @@
     <!-- Point lights keep the corridor visible even on renderers that do not
          apply the directional light or material ambient term consistently. -->
     <light name="stem_light_1" type="point">
-      <pose>0 -16 4 0 0 0</pose>
+      <pose>0 -4.5 4 0 0 0</pose>
       <cast_shadows>false</cast_shadows>
       <diffuse>1 0.98 0.92 1</diffuse>
       <specular>0.2 0.2 0.2 1</specular>
@@ -74,19 +74,19 @@
       <attenuation><range>18</range><constant>0.4</constant><linear>0.02</linear><quadratic>0.002</quadratic></attenuation>
     </light>
 
-    <!-- T-shaped floor: a 20 m stem and a 20 m cross corridor, both 4 m wide,
+    <!-- T-shaped floor: a 5 m stem and a 20 m cross corridor, both 4 m wide,
          with a 15 m dead-end trap turning down at each end. -->
     <model name="t_intersection">
       <static>true</static>
 
       <link name="floor">
         <collision name="stem_collision">
-          <pose>0 -10 -0.10 0 0 0</pose>
-          <geometry><box><size>4 20 0.20</size></box></geometry>
+          <pose>0 -2.5 -0.10 0 0 0</pose>
+          <geometry><box><size>4 5 0.20</size></box></geometry>
         </collision>
         <visual name="stem_visual">
-          <pose>0 -10 -0.10 0 0 0</pose>
-          <geometry><box><size>4 20 0.20</size></box></geometry>
+          <pose>0 -2.5 -0.10 0 0 0</pose>
+          <geometry><box><size>4 5 0.20</size></box></geometry>
           <material><ambient>0.32 0.32 0.34 1</ambient><diffuse>0.38 0.38 0.40 1</diffuse></material>
         </visual>
         <collision name="cross_collision">
@@ -120,14 +120,14 @@
 
       <!-- Each wall is 20 cm thick and 1.5 m tall, suitable for 2D lidar. -->
       <link name="walls">
-        <collision name="stem_left_collision"><pose>-2.1 -11.05 0.75 0 0 0</pose><geometry><box><size>0.2 17.9 1.5</size></box></geometry></collision>
-        <visual name="stem_left_visual"><pose>-2.1 -11.05 0.75 0 0 0</pose><geometry><box><size>0.2 17.9 1.5</size></box></geometry><material><diffuse>0.82 0.82 0.78 1</diffuse></material></visual>
+        <collision name="stem_left_collision"><pose>-2.1 -3.55 0.75 0 0 0</pose><geometry><box><size>0.2 2.9 1.5</size></box></geometry></collision>
+        <visual name="stem_left_visual"><pose>-2.1 -3.55 0.75 0 0 0</pose><geometry><box><size>0.2 2.9 1.5</size></box></geometry><material><diffuse>0.82 0.82 0.78 1</diffuse></material></visual>
 
-        <collision name="stem_right_collision"><pose>2.1 -11.05 0.75 0 0 0</pose><geometry><box><size>0.2 17.9 1.5</size></box></geometry></collision>
-        <visual name="stem_right_visual"><pose>2.1 -11.05 0.75 0 0 0</pose><geometry><box><size>0.2 17.9 1.5</size></box></geometry><material><diffuse>0.82 0.82 0.78 1</diffuse></material></visual>
+        <collision name="stem_right_collision"><pose>2.1 -3.55 0.75 0 0 0</pose><geometry><box><size>0.2 2.9 1.5</size></box></geometry></collision>
+        <visual name="stem_right_visual"><pose>2.1 -3.55 0.75 0 0 0</pose><geometry><box><size>0.2 2.9 1.5</size></box></geometry><material><diffuse>0.82 0.82 0.78 1</diffuse></material></visual>
 
-        <collision name="stem_end_collision"><pose>0 -20.1 0.75 0 0 0</pose><geometry><box><size>4.4 0.2 1.5</size></box></geometry></collision>
-        <visual name="stem_end_visual"><pose>0 -20.1 0.75 0 0 0</pose><geometry><box><size>4.4 0.2 1.5</size></box></geometry><material><diffuse>0.82 0.82 0.78 1</diffuse></material></visual>
+        <collision name="stem_end_collision"><pose>0 -5.1 0.75 0 0 0</pose><geometry><box><size>4.4 0.2 1.5</size></box></geometry></collision>
+        <visual name="stem_end_visual"><pose>0 -5.1 0.75 0 0 0</pose><geometry><box><size>4.4 0.2 1.5</size></box></geometry><material><diffuse>0.82 0.82 0.78 1</diffuse></material></visual>
 
         <collision name="cross_top_collision"><pose>0 2.1 0.75 0 0 0</pose><geometry><box><size>20.2 0.2 1.5</size></box></geometry></collision>
         <visual name="cross_top_visual"><pose>0 2.1 0.75 0 0 0</pose><geometry><box><size>20.2 0.2 1.5</size></box></geometry><material><diffuse>0.82 0.82 0.78 1</diffuse></material></visual>
@@ -158,7 +158,8 @@
       </link>
     </model>
 
-    <!-- Suggested robot start pose: x=0, y=-17, yaw=+90 degrees.
+    <!-- Robot 1 starts at (0, -3), robot 2 directly behind at (0, -4),
+         both facing north (+90 degrees). Bottom wall is at y=-5.
          No custom <gui> block is used: Gazebo Harmonic's complete default
          GUI configuration is more portable across Ogre / GPU setups. -->
   </world>

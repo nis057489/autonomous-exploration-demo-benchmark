@@ -167,12 +167,10 @@ if [[ "${WORLD}" == "warehouse" ]]; then
 fi
 
 if [[ "${WORLD}" == "long_t" ]]; then
-  # Stem dead end, facing north toward the T junction. Matches spawn_presets.yaml's
-  # long_t/default and the suggested start pose in long_t.sdf. The previous
-  # (0, 16) predates the current plain-T world, whose floor ends at y=2 -- robots
-  # spawned 14 m off the map and Nav2 reported them out of costmap bounds.
+  # Short stem, facing north toward the T junction. Matches spawn_presets.yaml's
+  # long_t/default; the central stem now ends at y=-5.
   SPAWN_X="0.0"
-  SPAWN_Y="-17.0"
+  SPAWN_Y="-3.0"
   SPAWN_YAW="1.5707963267948966"
 fi
 
@@ -275,11 +273,10 @@ with open(path) as f:
     data = yaml.safe_load(f)
 positions = data.get(world, {}).get(preset)
 if world == "long_t" and preset == "default" and num_robots > 1:
-    # The redesigned world has three narrow, separate start branches. A grid
-    # around the single-robot default would place robots in dividing walls.
+    # Use the explicit centerline starts rather than an automatic spawn grid.
     positions = data[world]["distributed"]
 if world == "long_t" and positions and num_robots > len(positions):
-    raise SystemExit("long_t supports at most three robots with these presets; "
+    raise SystemExit(f"long_t preset {preset!r} has only {len(positions)} starts; "
                      "refusing to cycle spawn positions onto another robot")
 if positions is None:
     if preset != "default":

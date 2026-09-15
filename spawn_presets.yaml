@@ -9,7 +9,7 @@
 # "default" preset: single base position matching the hardcoded defaults in launch.sh.
 #   Multi-robot runs with the default preset still use the automatic grid/line offset
 #   logic (the list is ignored for multi-robot when SPAWN_PRESET=default).
-#   Exception: long_t uses its three distributed positions for multi-robot default.
+#   Exception: long_t uses its distributed positions for multi-robot default.
 #
 # "distributed" preset: each robot placed in a distinct section of the map so they
 #   explore independently without overlapping initial frontiers.
@@ -58,22 +58,21 @@ mine:
   default:
     - { x: 0.00, y: 0.00, yaw: 0.00 }
 
-# long_t is a plain T: a 20 m east-west cross hall (x -10..10, y -2..2), a 20 m
-# southbound stem (x -2..2, y -20..0), and two dead-end "trap" branches hanging
+# long_t is a plain T: a 20 m east-west cross hall (x -10..10, y -2..2), a 5 m
+# southbound stem (x -2..2, y -5..0), and two dead-end "trap" branches hanging
 # south off the hall ends (x -10..-6 and 6..10, y -17..-2). Floor spans
-# y -20..2 -- the old branch-exchange starts at y=16 were off the map entirely.
-# All positions below are on floor with 2.0 m clearance to the nearest wall.
+# y -17..2. The two centerline starts can see the nearby stem bottom wall.
 long_t:
-  # Stem dead end, facing north up the stem toward the T junction. Matches the
+  # Short stem, facing north toward the T junction. Matches the
   # suggested start pose in long_t.sdf and the hardcoded default in launch.sh.
   default:
-    - { x: 0.00, y: -17.00, yaw: 1.5707963267948966 }
+    - { x: 0.00, y: -3.00, yaw: 1.5707963267948966 }
 
-  # One robot at each of the three dead ends -- stem tip, left trap, right trap
-  # -- every one facing north toward the cross hall they share.
+  # Robot 1's start is retained; robot 2 is 1 m directly behind it.
+  # Both face north. EXPLORE_START_STAGGER_S controls robot 2's delayed release.
   distributed:
     - { x: 0.00, y: -3.00, yaw: 1.5707963267948966 }
-    - { x: 0.00, y: -17.00, yaw: 1.5707963267948966 }
+    - { x: 0.00, y: -4.00, yaw: 1.5707963267948966 }
 
 
   # Shared cross hall: abreast on the hall centerline over the stem mouth, so no
