@@ -55,7 +55,7 @@ Usage:
   Add --max-duration <seconds> to clip each bag to that much time since its
   start (e.g. to match a replay clipped with REPLAY_MAX_DURATION).
 
-  Repeat --baseline/--vxch/--zstd to compare a condition over several runs,
+  Repeat --baseline/--vxch/--zstd to average a condition over several runs,
   each occurrence being one run's robot=bag_dir set:
     ./generate_comparison_figure.py \\
         --baseline robot1=<run1_bag_dir> robot2=<run1_bag_dir> \\
@@ -64,9 +64,8 @@ Usage:
         --vxch     robot1=<run2_bag_dir> robot2=<run2_bag_dir> \\
         --out figures/compare.png
   With more than one run for a condition, bar charts show mean +/- std
-  error bars. Time-series plots show the mean with pointwise 95% bootstrap
-  confidence intervals (5,000 whole-run resamples, fixed seed). Tables retain
-  mean +/- std. A single run has no confidence band.
+  error bars and time-series plots show a mean line with a +/- std band,
+  computed across those runs.
 
 Reading a bag is the entire cost here (minutes per multi-GB run); the plots
 themselves are pure functions of what comes out of it. So each bag is decoded
@@ -716,25 +715,18 @@ def style_ax(ax, grid_axis="y"):
     ax.set_axisbelow(True)
 
 
-def panel_legend(ax, handles, loc="best", title=None, outside=False):
-    """Place the legend inside the axes or below them, reserving layout space."""
+def panel_legend(ax, handles, loc="best"):
+    """Every panel's legend, placed with loc="best" and given a soft white
+    backing. "best" rather than a fixed corner because these legends now carry
+    the per-series end-of-run numbers that used to be annotated at the line
+    ends -- moving them into the legend is what keeps two curves that finish
+    close together from printing their labels on top of each other, but it
+    also makes the legend big enough that a hardcoded corner would sooner or
+    later sit on the data. The backing keeps it legible wherever it lands."""
     if not handles:
         return
-    if outside:
-        # Wrap values below each name so three columns fit at panel width.
-        labels = [h.get_label().replace(" — ", "\n").replace(
-            "Ideal complete sharing (100%)", "Ideal complete sharing\n(100%)") for h in handles]
-        # Large area values need wider columns than percentages.
-        columns = 2 if any(len(label.split("\n")[-1]) > 20 for label in labels) else 3
-        ax.legend(handles=handles, labels=labels, loc="upper center",
-                  bbox_to_anchor=(0.5, -0.20), ncols=min(columns, len(handles)),
-                  fontsize=FS_INLINE - 1, title=title, title_fontsize=FS_INLINE - 1,
-                  handlelength=1.8, columnspacing=1.1, labelspacing=0.8,
-                  frameon=False)
-    else:
-        ax.legend(handles=handles, fontsize=FS_LEGEND, loc=loc,
-                  title=title, title_fontsize=FS_INLINE,
-                  frameon=True, facecolor="white", edgecolor="none", framealpha=0.85)
+    ax.legend(handles=handles, fontsize=FS_LEGEND, loc=loc,
+              frameon=True, facecolor="white", edgecolor="none", framealpha=0.85)
 
 
 def resample_step(series, grid):
@@ -1055,72 +1047,13 @@ def shade_capacity(ax, spans):
                    linewidth=0, zorder=0)
 
 
-BOOTSTRAP_RESAMPLES = 5000
-BOOTSTRAP_SEED = 42
-TIME_SERIES_DISPLAY = {
-    "center": "mean",
-    "interval": "percentile_bootstrap",
-    "confidence_level": 0.95,
-    "pointwise": True,
-    "resampling_unit": "independent_run",
-    "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
-    "bootstrap_seed": BOOTSTRAP_SEED,
-    "individual_runs": False,
-}
-
-
-def bootstrap_mean_interval(sampled):
-    """Mean and pointwise 95% percentile-bootstrap CI over independent runs.
-
-    Each row is one run's complete trajectory on the shared time grid. A
-    bootstrap draw gives that row one weight for ALL timestamps, preserving
-    within-run dependence. Multinomial counts represent sampling runs with
-    replacement without allocating a (draws, runs, timestamps) array.
-    The fixed seed makes re-rendering reproducible. These are pointwise
-    intervals, not a simultaneous confidence band for the entire trajectory.
-    """
-    sampled = np.asarray(sampled, dtype=float)
-    mean = sampled.mean(axis=0)
-    count = len(sampled)
-    if count < 2:
-        # One run cannot estimate between-run uncertainty; plot no band.
-        return None, mean, None
-    rng = np.random.default_rng(BOOTSTRAP_SEED)
-    weights = rng.multinomial(count, np.full(count, 1.0 / count), size=BOOTSTRAP_RESAMPLES)
-    bootstrap_means = (weights @ sampled) / count
-    lower, upper = np.percentile(bootstrap_means, [2.5, 97.5], axis=0)
-    return lower, mean, upper
-
-
-def plot_run_variation(ax, grid, sampled, color, linestyle="-"):
-    """Mean line and pointwise 95% bootstrap CI, with no individual traces."""
-    lower, mean, upper = bootstrap_mean_interval(sampled)
-    if lower is not None:
-        ax.fill_between(grid, lower, upper, color=color, alpha=0.15,
-                        linewidth=0, zorder=2)
-    ax.plot(grid, mean, color=color, linestyle=linestyle, linewidth=2.5,
-            solid_capstyle="round", zorder=3)
-    return lower, mean, upper
-
-
-def run_variation_label(name, lower, mean, upper, unit, count):
-    value = f"{mean[-1]:,.1f}%" if unit == "%" else f"{mean[-1]:,.1f} {unit}"
-    label = f"{name} — {value}"
-    if count > 1:
-        label += f" [{lower[-1]:,.1f}–{upper[-1]:,.1f}]"
-    return label
-
-
-RUN_VARIATION_LEGEND = "Mean [pointwise 95% CI]"
-
-
 def plot_coverage(ax, results, conditions, series_index, ylabel):
     """series_index selects which per-robot coverage series to plot out of
     the (received_bytes, sent_bytes, coverage, local_coverage, ...) tuple --
     2 for communicated (nav_map), 3 for locally-observed (map). results[c]
     is a list of per-run {robot: entry} dicts; each robot's line is the
     mean of that robot's series across the runs it appears in, resampled
-    onto a shared time grid (resample_step), with a pointwise 95% bootstrap CI
+    onto a shared time grid (resample_step) -- with a +/- std shaded band
     when more than one run contributes."""
     robots = sorted({r for run in results.values() for entry in run for r in entry})
     robot_style = {r: LINESTYLES[i % len(LINESTYLES)] for i, r in enumerate(robots)}
@@ -1132,7 +1065,6 @@ def plot_coverage(ax, results, conditions, series_index, ylabel):
     if timeline and all_max_ts:
         shade_capacity(ax, capacity_spans(timeline, max(all_max_ts)))
 
-    has_variation = False
     for cond in conditions:
         runs = results[cond]
         max_ts = [entry[series_index][-1][0] for run in runs for entry in run.values() if entry[series_index]]
@@ -1144,8 +1076,13 @@ def plot_coverage(ax, results, conditions, series_index, ylabel):
             if not series_per_run:
                 continue
             sampled = np.array([resample_step(s, grid) for s in series_per_run])
-            plot_run_variation(ax, grid, sampled, CONDITION_COLORS[cond], robot_style[robot])
-            has_variation |= len(sampled) > 1
+            mean = sampled.mean(axis=0)
+            ax.plot(grid, mean, color=CONDITION_COLORS[cond], linestyle=robot_style[robot],
+                     linewidth=2.5, solid_capstyle="round", zorder=3)
+            if sampled.shape[0] > 1:
+                std = sampled.std(axis=0)
+                ax.fill_between(grid, mean - std, mean + std, color=CONDITION_COLORS[cond], alpha=0.15,
+                                 linewidth=0, zorder=2)
 
     ax.set_xlabel("Time since run start (s)", fontsize=FS_AXIS, color=TEXT_SECONDARY)
     ax.set_ylabel(ylabel, fontsize=FS_AXIS, color=TEXT_SECONDARY)
@@ -1163,8 +1100,7 @@ def plot_coverage(ax, results, conditions, series_index, ylabel):
     if timeline and len({kbps for _, kbps in timeline}) > 1:
         handles.append(Patch(facecolor="#7a7a7a", alpha=0.16, linewidth=0,
                              label="Reduced link capacity"))
-    panel_legend(ax, handles, title=RUN_VARIATION_LEGEND if has_variation else None,
-                 outside=True)
+    panel_legend(ax, handles)
 
 
 def report_degradation(results, conditions):
@@ -1462,14 +1398,13 @@ def plot_redundant_coverage(ax, results, conditions, cell_index):
     """Redundant physical coverage over time: cells more than one robot
     independently drove to and observed with its own sensors, i.e. sensor-map overlap (see run_redundant_series). results[c] is a
     list of per-run {robot: entry} dicts -- each run's redundant series is
-    resampled (resample_step) onto a shared time grid, with a mean line
-    and pointwise 95% bootstrap confidence band."""
+    resampled (resample_step) onto a shared time grid and averaged, with a
+    +/- std band across runs when more than one is given."""
     # Each curve's end-of-run value goes into its legend entry instead of being
     # annotated past the right end of the line: curves that finish close
     # together printed their labels on top of one another, and the annotation
     # itself sat outside the axes.
     handles = []
-    has_variation = False
     for cond in conditions:
         runs = results[cond]
         redundant_per_run = [to_area_m2(run_redundant_series(run, cell_index), run_resolution(run)) for run in runs]
@@ -1478,16 +1413,20 @@ def plot_redundant_coverage(ax, results, conditions, cell_index):
             continue
         grid = np.linspace(0, min(max_ts), 200)
         sampled = np.array([resample_step(m, grid) for m in redundant_per_run if m])
-        lower, mean, upper = plot_run_variation(ax, grid, sampled, CONDITION_COLORS[cond])
-        has_variation |= len(sampled) > 1
-        label = run_variation_label(DISPLAY_NAMES[cond], lower, mean, upper, "m²", len(sampled))
+        mean = sampled.mean(axis=0)
+        ax.plot(grid, mean, color=CONDITION_COLORS[cond], linewidth=2.5, solid_capstyle="round", zorder=3)
+        label = f"{DISPLAY_NAMES[cond]} — {mean[-1]:,.1f} m²"
+        if sampled.shape[0] > 1:
+            std = sampled.std(axis=0)
+            ax.fill_between(grid, np.maximum(mean - std, 0), mean + std, color=CONDITION_COLORS[cond],
+                             alpha=0.15, linewidth=0, zorder=2)
+            label += f" ± {std[-1]:,.1f}"
         handles.append(Line2D([0], [0], color=CONDITION_COLORS[cond], lw=2.5, label=label))
 
     ax.set_xlabel("Time since run start (s)", fontsize=FS_AXIS, color=TEXT_SECONDARY)
-    ax.set_ylabel("Redundant coverage (m²)\n(seen by >1 robot)", fontsize=FS_AXIS, color=TEXT_SECONDARY)
+    ax.set_ylabel("Redundant coverage (m², seen by >1 robot)", fontsize=FS_AXIS, color=TEXT_SECONDARY)
     style_ax(ax)
-    panel_legend(ax, handles, title=RUN_VARIATION_LEGEND if has_variation else None,
-                 outside=True)
+    panel_legend(ax, handles)
 
 
 def summarize(results, conditions):
@@ -1623,7 +1562,7 @@ def format_summary_table(summary, conditions, style):
 
 
 def plot_union_coverage(ax, results, conditions, series_fn, ylabel, unit="m²"):
-    """Plot a per-run map statistic with mean and pointwise 95% bootstrap CI.
+    """Plot a per-run map statistic with mean and standard deviation.
 
     local_physical_union_series estimates observed map union;
     team_known_coverage_series measures the largest individual known map.
@@ -1634,7 +1573,6 @@ def plot_union_coverage(ax, results, conditions, series_fn, ylabel, unit="m²"):
     # End-of-run value carried in the legend entry, not annotated past the
     # right end of the line -- see plot_redundant_coverage.
     handles = []
-    has_variation = False
     for cond in conditions:
         runs = results[cond]
         merged_per_run = [series_fn(run) for run in runs]
@@ -1643,9 +1581,17 @@ def plot_union_coverage(ax, results, conditions, series_fn, ylabel, unit="m²"):
             continue
         grid = np.linspace(0, min(max_ts), 200)
         sampled = np.array([resample_step(m, grid) for m in merged_per_run if m])
-        lower, mean, upper = plot_run_variation(ax, grid, sampled, CONDITION_COLORS[cond])
-        has_variation |= len(sampled) > 1
-        label = run_variation_label(DISPLAY_NAMES[cond], lower, mean, upper, unit, len(sampled))
+        mean = sampled.mean(axis=0)
+        ax.plot(grid, mean, color=CONDITION_COLORS[cond], linewidth=2.5, solid_capstyle="round", zorder=3)
+        # Unit on the mean only, the spread bare -- same shape as
+        # plot_redundant_coverage's labels ("10.0 m² ± 0.4").
+        value = f"{mean[-1]:,.1f}%" if unit == "%" else f"{mean[-1]:,.1f} {unit}"
+        label = f"{DISPLAY_NAMES[cond]} — {value}"
+        if sampled.shape[0] > 1:
+            std = sampled.std(axis=0)
+            ax.fill_between(grid, mean - std, mean + std, color=CONDITION_COLORS[cond], alpha=0.15,
+                             linewidth=0, zorder=2)
+            label += f" ± {std[-1]:,.1f}"
         handles.append(Line2D([0], [0], color=CONDITION_COLORS[cond], lw=2.5, label=label))
 
     ax.set_xlabel("Time since run start (s)", fontsize=FS_AXIS, color=TEXT_SECONDARY)
@@ -1655,8 +1601,7 @@ def plot_union_coverage(ax, results, conditions, series_fn, ylabel, unit="m²"):
         handles.append(ax.axhline(100, color=TEXT_SECONDARY, linestyle="--",
                                   linewidth=1, label="Ideal complete sharing (100%)"))
         ax.set_ylim(0, 105)
-    panel_legend(ax, handles, title=RUN_VARIATION_LEGEND if has_variation else None,
-                 outside=True)
+    panel_legend(ax, handles)
 
 
 def figure_data(results, conditions, summary, robot_paths, max_duration):
@@ -1664,8 +1609,8 @@ def figure_data(results, conditions, summary, robot_paths, max_duration):
 
     Each panel's series is taken from the same function that panel plots, so
     the two cannot drift; what is NOT reproduced here is the averaging the
-    plot functions do at draw time (resample onto a shared grid, mean and
-    bootstrap confidence limits across runs) -- this keeps one entry per run, which is strictly more
+    plot functions do at draw time (resample onto a shared grid, mean and std
+    across runs) -- this keeps one entry per run, which is strictly more
     information and lets a reader re-average however they like.
 
     The bandwidth panel has no entry under "series": it is a bar chart, and
@@ -1686,8 +1631,6 @@ def figure_data(results, conditions, summary, robot_paths, max_duration):
 
     data = {
         "schema": 1,
-        "time_series_display": dict(TIME_SERIES_DISPLAY),
-        "summary_statistics": ["mean", "std"],
         "max_duration": max_duration,
         "conditions": list(conditions),
         "display_names": {c: DISPLAY_NAMES[c] for c in conditions},
@@ -1848,23 +1791,21 @@ def main():
     # "sent" and "received" are one panel -- plot_bandwidth draws both.
     panels = [
         ("bandwidth", plot_bandwidth, (results, conditions, "Map and coordination data volume (KB, log scale)")),
-        ("coverage", plot_coverage, (results, conditions, 2, "Known map area (m²)\n(incl. peer-relayed)")),
+        ("coverage", plot_coverage, (results, conditions, 2, "Known map area (m², incl. peer-relayed)")),
         ("local", plot_coverage, (results, conditions, 3, "Self-observed map area (m²)")),
         ("union", plot_union_coverage, (results, conditions, local_physical_union_series,
-                                        "Observed map union (m²)\n(SLAM estimate)")),
+                                        "Observed map union (m², SLAM estimate)")),
         ("union_nav", plot_union_coverage, (results, conditions, team_known_coverage_series,
                                             "Largest individual known map (m²)")),
         ("delivered", plot_union_coverage, (results, conditions, delivery_fraction_series,
-                                            "Map Synchronization (%)", "%")),
+                                            "Peer-map completeness (%, excluding own observations)", "%")),
         ("redundant", plot_redundant_coverage, (results, conditions, 4)),
     ]
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     if args.separate_figures:
         for name, plot_fn, plot_args in panels:
-            # Reserve room for the compact external time-series legends.
-            panel_size = PANEL_SIZE if name == "bandwidth" else (PANEL_SIZE[0], PANEL_SIZE[1] + 1)
-            panel_fig, ax = plt.subplots(figsize=panel_size)
+            panel_fig, ax = plt.subplots(figsize=PANEL_SIZE)
             plot_fn(ax, *plot_args)
             panel_fig.tight_layout(pad=1.2)
             refit_axes(panel_fig)
@@ -1879,7 +1820,7 @@ def main():
         ncols = min(3, len(panels))
         nrows = math.ceil(len(panels) / ncols)
         fig, axes = plt.subplots(nrows, ncols, squeeze=False,
-                                 figsize=(PANEL_SIZE[0] * ncols, (PANEL_SIZE[1] + 1) * nrows))
+                                 figsize=(PANEL_SIZE[0] * ncols, PANEL_SIZE[1] * nrows))
         flat = axes.ravel()
         for ax, (name, plot_fn, plot_args) in zip(flat, panels):
             plot_fn(ax, *plot_args)
